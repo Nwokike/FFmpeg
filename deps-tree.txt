@@ -1,0 +1,42 @@
+Resolved 30 packages in 2ms
+ffmpeg v1.0.0
+├── av v18.1.0
+├── flet v1.0.0
+│   ├── httpx v0.28.1
+│   │   ├── anyio v4.15.1
+│   │   │   ├── idna v3.20
+│   │   │   └── typing-extensions v4.16.0
+│   │   ├── certifi v2026.7.22
+│   │   ├── httpcore v1.0.9
+│   │   │   ├── certifi v2026.7.22
+│   │   │   └── h11 v0.16.0
+│   │   └── idna v3.20
+│   ├── msgpack v1.2.2
+│   ├── oauthlib v3.3.1
+│   └── repath v0.9.0
+│       └── six v1.17.0
+├── flet-ads v1.0.0
+│   └── flet v1.0.0 (*)
+├── flet-audio v1.0.0
+│   └── flet v1.0.0 (*)
+├── flet-audio-recorder v1.0.0
+│   └── flet v1.0.0 (*)
+├── flet-camera v1.0.0
+│   └── flet v1.0.0 (*)
+├── flet-permission-handler v1.0.0
+│   └── flet v1.0.0 (*)
+├── flet-spinkit v1.0.0
+│   └── flet v1.0.0 (*)
+├── flet-video v1.0.0
+│   └── flet v1.0.0 (*)
+├── httpx v0.28.1 (*)
+├── numpy v2.5.3
+├── pillow v12.3.0
+├── pytest v9.1.1 (group: dev)
+│   ├── colorama v0.4.6
+│   ├── iniconfig v2.3.0
+│   ├── packaging v26.3
+│   ├── pluggy v1.6.0
+│   └── pygments v2.21.0
+└── ruff v0.16.8 (group: dev)
+(*) Package tree already displayed

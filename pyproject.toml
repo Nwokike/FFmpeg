@@ -1,0 +1,97 @@
+[project]
+name = "ffmpeg"
+version = "1.0.0"
+description = "FFmpeg — transcode, compress, cut, extract, and filter any media on your phone. Powered by FFmpeg 8 via PyAV."
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "av>=18.1.0",
+    "flet>=1.0.0",
+    "flet-ads>=1.0.0",
+    "flet-audio>=1.0.0",
+    "flet-audio-recorder>=1.0.0",
+    "flet-camera>=1.0.0",
+    "flet-permission-handler>=1.0.0",
+    "flet-video>=1.0.0",
+    "httpx>=0.28.1",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "ruff>=0.16.8",
+]
+
+[tool.uv]
+package = false
+
+# ── Flet 1.0 build config (flet-cli–consumed; keys verified against
+# ── flet.dev/docs/publish/ + sibling apps. Brand primary = FFmpeg green
+# ── #3c8038 (the launcher glyph); backgrounds are Kiri slate for contrast.
+[tool.flet]
+org = "ng.kiri"
+product = "FFmpeg"
+company = "Kiri Research Labs"
+build_number = 1
+icon_background = "#0f1114"
+
+[tool.flet.app]
+path = "src"
+
+[tool.flet.app.boot_screen]
+startup_message = "Initializing FFmpeg..."
+
+[tool.flet.splash]
+color = "#ffffff"
+dark_color = "#0f1114"
+
+[tool.flet.deep_linking]
+scheme = "ffmpeg"
+host = "app"
+
+[tool.flet.android]
+bundle_id = "ng.kiri.ffmpeg"
+target_arch = ["arm64-v8a", "x86_64"]
+# av's Android wheels are built at ABI 24 (android_24) → match the floor.
+min_sdk_version = 24
+adaptive_icon_background = "#0f1114"
+
+[tool.flet.android.manifest_application]
+# http:// stream capture is a feature; https remains the default path.
+usesCleartextTraffic = "true"
+
+[tool.flet.android.meta_data]
+# Google test App ID (matches AdService USE_TEST_IDS=True). Swap to the
+# production AdMob App ID at Play Store release.
+"com.google.android.gms.ads.APPLICATION_ID" = "ca-app-pub-3940256099942544~3347511713"
+
+# Play-safe set: media INPUTS come from the SAF system picker (no permission),
+# OUTPUTS go to a user-chosen location via SAF/MediaStore (no permission). Only
+# in-app capture (camera/mic) and audio playback tuning need grants. No broad
+# storage/media-read permissions are declared (Play rejects them when SAF suffices).
+[tool.flet.android.permission]
+"android.permission.INTERNET" = true
+"android.permission.ACCESS_NETWORK_STATE" = true
+"android.permission.WAKE_LOCK" = true
+"android.permission.CAMERA" = true
+"android.permission.RECORD_AUDIO" = true
+"android.permission.MODIFY_AUDIO_SETTINGS" = true
+
+[tool.flet.android.feature]
+"android.software.leanback" = false
+"android.hardware.touchscreen" = true
+
+[tool.flet.android.signing]
+key_store = "../../../../kiri_keystore.jks"
+key_alias = "upload"
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py314"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP"]
