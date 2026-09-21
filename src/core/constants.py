@@ -31,7 +31,7 @@ def _read_build_from_pyproject() -> tuple[str, int]:
         from pathlib import Path
 
         here = Path(__file__).resolve()
-        for parent in (here.parents):
+        for parent in here.parents:
             cand = parent / "pyproject.toml"
             if cand.is_file():
                 with open(cand, "rb") as fh:
@@ -71,9 +71,9 @@ DEEP_LINK_HOST = "app"
 # PRIMARY is the FFmpeg launcher glyph green — the app's primary color in both
 # light and dark themes (house rule: brand hue constant across themes, only
 # surfaces change — Sherlock/voicelm pattern). Dark surfaces = Kiri slate.
-PRIMARY = "#3C8038"          # FFmpeg green (icon.svg glyph fill)
-PRIMARY_DARK = "#2E6B2A"    # darker shade for light-mode glyph tinting
-KIRI_DARK_BG = "#0F1114"    # launcher/splash dark background (icon_background)
+PRIMARY = "#3C8038"  # FFmpeg green (icon.svg glyph fill)
+PRIMARY_DARK = "#2E6B2A"  # darker shade for light-mode glyph tinting
+KIRI_DARK_BG = "#0F1114"  # launcher/splash dark background (icon_background)
 KIRI_DARK_2 = "#1A1D22"
 KIRI_LIGHT_BG = "#FAFAFA"
 

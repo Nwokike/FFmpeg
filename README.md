@@ -1,9 +1,13 @@
 <p align="center">
-  <img src="src/assets/icon.png" alt="FFmpeg" width="320" />
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="src/assets/icon_white.svg">
+    <source media="(prefers-color-scheme: light)" srcset="src/assets/icon.svg">
+    <img src="src/assets/icon.svg" alt="FFmpeg" width="320" />
+  </picture>
 </p>
 
 <p align="center">
-  On-device media studio — transcode, compress, cut, extract and filter any video or audio with the full power of FFmpeg 8
+  On-device media studio — convert, transcode, compress, cut, extract and filter any video or audio with the full power of FFmpeg 8
 </p>
 
 <p align="center">
@@ -41,7 +45,7 @@
 | Capability | Description |
 | :--- | :--- |
 | **Full FFmpeg 8 Engine** | Every codec, container and filter of the bundled FFmpeg build — enumerated live at runtime and surfaced in the UI, so the app always shows exactly what this device can do. |
-| **Transcode & Compress** | Any container to any container, quality presets or target file size ("small enough for WhatsApp/Telegram"), duration presets, bitrate/CRF advanced controls. |
+| **Convert, Transcode & Compress** | Any container to any container, quality presets or target file size ("small enough for WhatsApp/Telegram"), duration presets, bitrate/CRF advanced controls. |
 | **Cut / Trim** | Instant stream-copy cuts (keyframe-accurate) or frame-accurate re-encode, scrubbed on a live thumbnail strip. |
 | **Extract** | Audio (AAC/MP3/Opus/FLAC/WAV/PCM), frames, thumbnail grids, palette-optimized GIFs, SRT/ASS subtitles. |
 | **Filters** | Crop, scale, rotate/flip, speed (atempo), volume, EQ, denoise, sharpen, image watermark overlay, concat. |

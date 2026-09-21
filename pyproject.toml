@@ -1,7 +1,7 @@
 [project]
 name = "ffmpeg"
 version = "1.0.0"
-description = "FFmpeg — transcode, compress, cut, extract, and filter any media on your phone. Powered by FFmpeg 8 via PyAV."
+description = "FFmpeg — convert, transcode, compress, cut, extract, and filter any media on your phone. Powered by FFmpeg 8 via PyAV."
 readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
@@ -18,6 +18,8 @@ dependencies = [
 
 [dependency-groups]
 dev = [
+    "flet-cli>=1.0.0",
+    "flet-desktop>=1.0.0",
     "pytest>=9.1.1",
     "ruff>=0.16.8",
 ]

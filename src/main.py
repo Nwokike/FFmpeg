@@ -66,6 +66,7 @@ async def main(page: ft.Page) -> None:
     _bootstrap_logging()  # ring handler attached to root; M1 wires the Activity Terminal to it
     _crash_hook()
     page.title = APP_NAME
+    page.padding = 16
 
     probe_result: list[EngineProbe] = []
     status = ft.Text("Self-test not run yet.", size=12, color=ft.Colors.ON_SURFACE_VARIANT)
@@ -136,7 +137,6 @@ async def main(page: ft.Page) -> None:
             ),
         ],
         spacing=12,
-        padding=16,
         expand=True,
     )
     page.add(root)

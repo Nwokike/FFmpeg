@@ -21,14 +21,42 @@ logger = logging.getLogger(__name__)
 # Filters the app's feature set depends on (verified present in the Windows
 # wheel; each is re-checked per device build here).
 REQUIRED_FILTERS = [
-    "crop", "scale", "transpose", "hflip", "vflip", "rotate",
-    "atempo", "asetpts", "setpts", "trim", "atrim",
-    "volume", "equalizer", "highpass", "lowpass", "treble", "bass",
-    "anlmdn", "firequalizer", "unsharp", "pan", "amix",
-    "overlay", "concat", "fps", "thumbnail", "tile",
-    "palettegen", "paletteuse",
-    "loudnorm", "astats", "volumedetect", "silenceremove",
-    "aresample", "aformat", "select",
+    "crop",
+    "scale",
+    "transpose",
+    "hflip",
+    "vflip",
+    "rotate",
+    "atempo",
+    "asetpts",
+    "setpts",
+    "trim",
+    "atrim",
+    "volume",
+    "equalizer",
+    "highpass",
+    "lowpass",
+    "treble",
+    "bass",
+    "anlmdn",
+    "firequalizer",
+    "unsharp",
+    "pan",
+    "amix",
+    "overlay",
+    "concat",
+    "fps",
+    "thumbnail",
+    "tile",
+    "palettegen",
+    "paletteuse",
+    "loudnorm",
+    "astats",
+    "volumedetect",
+    "silenceremove",
+    "aresample",
+    "aformat",
+    "select",
 ]
 # Optional filters whose absence degrades a feature, not the app.
 OPTIONAL_FILTERS = ["drawbox", "drawtext", "subtitles", "ass", "afftfilt"]
@@ -77,9 +105,10 @@ class EngineProbe:
 
     @property
     def network_ok(self) -> bool:
-        return self.protocol_probe.get("http") == "present" or self.protocol_probe.get(
-            "https", ""
-        ) == "present"
+        return (
+            self.protocol_probe.get("http") == "present"
+            or self.protocol_probe.get("https", "") == "present"
+        )
 
     def to_text(self) -> str:
         """Human-readable report (Engine Info screen + spike log)."""
