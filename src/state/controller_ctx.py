@@ -31,15 +31,12 @@ class ControllerMethods:
     toggle_theme: Callable[[], None] = lambda: None
 
 
-_context = ft.create_context(ControllerMethods())
+ControllerMethodsCtx = ft.create_context(ControllerMethods())
 
 
 def use_controller() -> ControllerMethods:
     """Retrieve the nearest controller methods from context."""
-    return ft.use_context(_context)
+    return ft.use_context(ControllerMethodsCtx)
 
 
-@ft.component
-def ControllerMethodsCtx(methods: ControllerMethods, content: Callable[[], ft.Control]):
-    """Inject controller methods into the widget tree."""
-    return ft.ContextProvider(_context, methods, content=content())
+__all__ = ["ControllerMethods", "ControllerMethodsCtx", "use_controller"]

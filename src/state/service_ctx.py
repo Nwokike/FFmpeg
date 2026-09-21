@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -20,15 +19,12 @@ class Services:
     update: Any = None
 
 
-_context = ft.create_context(Services())
+ServiceCtx = ft.create_context(Services())
 
 
 def use_services() -> Services:
     """Retrieve application services from context."""
-    return ft.use_context(_context)
+    return ft.use_context(ServiceCtx)
 
 
-@ft.component
-def ServiceCtx(services: Services, content: Callable[[], ft.Control]):
-    """Inject services into the widget tree."""
-    return ft.ContextProvider(_context, services, content=content())
+__all__ = ["ServiceCtx", "Services", "use_services"]
