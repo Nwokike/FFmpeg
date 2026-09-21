@@ -6,6 +6,7 @@ set by the Flet mobile launcher, falling back to ~/.ffmpeg/* on desktop dev.
 
 from __future__ import annotations
 
+import logging
 import os
 import shutil
 from pathlib import Path
@@ -47,8 +48,8 @@ def get_cache_size_bytes() -> int:
                 for f in files:
                     try:
                         total += os.path.getsize(os.path.join(root, f))
-                    except OSError:
-                        pass
+                    except OSError as e:
+                        logging.getLogger(__name__).debug("Failed to stat cache file: %s", e)
     return total
 
 
@@ -63,8 +64,10 @@ def clear_cache() -> int:
                         shutil.rmtree(item)
                     else:
                         item.unlink()
-                except OSError:
-                    pass
+                except OSError as e:
+                    logging.getLogger(__name__).warning(
+                        "Failed to clear cache item %s: %s", item, e
+                    )
     return freed
 
 

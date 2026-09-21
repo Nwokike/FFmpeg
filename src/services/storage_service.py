@@ -81,8 +81,8 @@ class StorageService:
                     if os.path.exists(bak_path):
                         os.remove(bak_path)
                     os.rename(self._path, bak_path)
-                except OSError:
-                    pass
+                except OSError as e:
+                    logger.debug("Backup rotation skipped: %s", e)
 
             os.replace(tmp_path, self._path)
         except OSError as ex:
@@ -90,5 +90,5 @@ class StorageService:
             if os.path.exists(tmp_path):
                 try:
                     os.remove(tmp_path)
-                except OSError:
-                    pass
+                except OSError as e:
+                    logger.warning("Failed to clean up temp file: %s", e)

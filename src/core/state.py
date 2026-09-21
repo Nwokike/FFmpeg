@@ -132,3 +132,4 @@ class AppState:
 
 
 state = AppState()
+AppStateCtx = ft.create_context(state)

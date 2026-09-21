@@ -49,6 +49,12 @@ async def main(page: ft.Page) -> None:
     _bootstrap_logging()
     _crash_hook()
 
+    # Global error handler — surfaces every Flet framework exception to the log
+    def _on_global_error(e):
+        logger.error("Unhandled Flet error: %s", e)
+
+    page.on_error = _on_global_error
+
     page.title = APP_NAME
     page.theme = AppTheme.get_light_theme()
     page.dark_theme = AppTheme.get_dark_theme()
@@ -318,6 +324,20 @@ async def main(page: ft.Page) -> None:
     def show_update_dialog() -> None:
         page.show_dialog(build_update_dialog(page, state.update_data))
 
+    def toggle_theme() -> None:
+        current = page.theme_mode
+        if current == ft.ThemeMode.DARK:
+            page.theme_mode = ft.ThemeMode.LIGHT
+            state.settings["theme_mode"] = "light"
+        elif current == ft.ThemeMode.LIGHT:
+            page.theme_mode = ft.ThemeMode.SYSTEM
+            state.settings["theme_mode"] = "system"
+        else:
+            page.theme_mode = ft.ThemeMode.DARK
+            state.settings["theme_mode"] = "dark"
+        storage.set("theme_mode", state.settings["theme_mode"])
+        page.update()
+
     methods = ControllerMethods(
         navigate=navigate,
         select_tab=select_tab,
@@ -332,6 +352,7 @@ async def main(page: ft.Page) -> None:
         clear_history=clear_history,
         check_update=lambda: page.run_task(check_update),
         show_update_dialog=show_update_dialog,
+        toggle_theme=toggle_theme,
     )
 
     # Wire lifecycle

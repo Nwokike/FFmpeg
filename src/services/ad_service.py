@@ -49,7 +49,8 @@ class AdService:
     def _is_mobile(self) -> bool:
         try:
             return not self.page.web and bool(self.page.platform and self.page.platform.is_mobile())
-        except Exception:
+        except Exception as e:
+            logger.debug("Platform detection fallback: %s", e)
             return False
 
     async def gather_consent(self) -> None:

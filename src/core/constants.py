@@ -39,8 +39,10 @@ def _read_build_from_pyproject() -> tuple[str, int]:
                 version = str(data.get("project", {}).get("version", version))
                 build = int(data.get("tool", {}).get("flet", {}).get("build_number", build))
                 break
-    except Exception:
-        pass
+    except Exception as exc:
+        import logging as _log
+
+        _log.getLogger(__name__).debug("pyproject read failed: %s", exc)
     return version, build
 
 

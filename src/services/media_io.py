@@ -82,8 +82,8 @@ class MediaIOService:
                 shutil.copy2(source_path, str(fallback))
                 logger.info("Saved to Downloads fallback: %s", fallback)
                 return str(fallback)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("Downloads fallback failed: %s", e)
 
         return None
 

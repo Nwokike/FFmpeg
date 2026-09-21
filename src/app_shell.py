@@ -1,15 +1,22 @@
-"""Root application shell coordinating navigation, tab switches, and view routing."""
+"""AppShell — top-level shell branching onboarding vs dashboard.
+
+Follows the proven ktv-player / CollabShell / spaninsight architecture:
+- @ft.component reading observable AppState and ControllerMethods
+- Page-level NavigationBar attached to page.views[0].navigation_bar via use_effect
+- Clean declarative screen switching with explicit ValueKeys
+"""
 
 from __future__ import annotations
+
+import logging
 
 import flet as ft
 
 from components.jobs_banner import jobs_banner_view
 from components.offline_banner import offline_banner_view
-from core.constants import APP_NAME
 from core.state import state
-from core.theme import PRIMARY, PRIMARY_DARK, is_dark_mode
-from core.tokens import FONT_LG, FONT_XS, RADIUS_MD, SPACE_MD, SPACE_SM
+from core.theme import PRIMARY, is_dark_mode
+from core.tokens import SPACE_MD
 from screens.audio_screen import AudioScreen
 from screens.compress_screen import CompressScreen
 from screens.convert_screen import ConvertScreen
@@ -24,133 +31,109 @@ from screens.result_screen import ResultScreen
 from screens.settings_screen import SettingsScreen
 from state.controller_ctx import use_controller
 
+logger = logging.getLogger("AppShell")
+
+_TAB_NAMES = ("Home", "Jobs", "Settings")
+_TAB_ICONS = (ft.Icons.HOME_OUTLINED, ft.Icons.HISTORY_ROUNDED, ft.Icons.SETTINGS_OUTLINED)
+_TAB_SELECTED_ICONS = (ft.Icons.HOME_ROUNDED, ft.Icons.HISTORY_ROUNDED, ft.Icons.SETTINGS_ROUNDED)
+
 
 @ft.component
 def AppShell() -> ft.Control:
     """Master presentation layout containing appbar, active view, and navigation."""
-    page = ft.context.page
     ctrl = use_controller()
-    is_dark = is_dark_mode(page)
+    is_dark = is_dark_mode(ft.context.page)
+
+    # Local tab index — controller mutates this via ctrl.select_tab
+    from flet import context
+
+    selected_tab, set_selected_tab = ft.use_state(state.selected_tab)
+
+    def _sync_navigation_bar():
+        page = context.page
+        if not page or not page.views:
+            return
+
+        # Gate: hide nav bar during onboarding
+        if not state.has_accepted_terms:
+            if page.views[0].navigation_bar is not None:
+                page.views[0].navigation_bar = None
+                try:
+                    page.update()
+                except Exception:
+                    logger.exception("Failed to clear NavigationBar during onboarding")
+            return
+
+        # Build destinations
+        def _on_tab_change(e):
+            idx = e.control.selected_index
+            if idx == selected_tab:
+                return
+            set_selected_tab(idx)
+            ctrl.select_tab(idx)
+
+        destinations = [
+            ft.NavigationBarDestination(icon=icon, label=label)
+            for icon, label in zip(_TAB_ICONS, _TAB_NAMES, strict=True)
+        ]
+        page.views[0].navigation_bar = ft.NavigationBar(
+            destinations=destinations,
+            selected_index=selected_tab,
+            on_change=_on_tab_change,
+            bgcolor=ft.Colors.SURFACE,
+            indicator_color=ft.Colors.with_opacity(0.12, PRIMARY),
+            label_behavior=ft.NavigationBarLabelBehavior.ALWAYS_SHOW,
+        )
+        try:
+            page.update()
+        except Exception:
+            logger.exception("Failed to sync NavigationBar")
+
+    ft.use_effect(_sync_navigation_bar, [selected_tab, state.has_accepted_terms])
 
     # Gate: show onboarding deck until accepted
     if not state.has_accepted_terms:
-        # Hide navigation bar on onboarding
-        page.navigation_bar = None
-        page.appbar = None
         return OnboardingScreen()
 
     active_view = state.active_view
     is_dashboard = active_view == "dashboard"
 
-    # Synchronize bottom navigation bar
-    nav_bar = ft.NavigationBar(
-        selected_index=state.selected_tab,
-        on_change=lambda e: ctrl.select_tab(e.control.selected_index),
-        destinations=[
-            ft.NavigationBarDestination(
-                icon=ft.Icons.HOME_OUTLINED,
-                selected_icon=ft.Icons.HOME_ROUNDED,
-                label="Home",
-            ),
-            ft.NavigationBarDestination(
-                icon=ft.Icons.HISTORY_ROUNDED,
-                selected_icon=ft.Icons.HISTORY_ROUNDED,
-                label="Jobs",
-            ),
-            ft.NavigationBarDestination(
-                icon=ft.Icons.SETTINGS_OUTLINED,
-                selected_icon=ft.Icons.SETTINGS_ROUNDED,
-                label="Settings",
-            ),
-        ],
-    )
-
-    # Attach or detach nav bar based on active view
-    page.navigation_bar = nav_bar if is_dashboard else None
-
-    # App bar with SVG logo tinted to white in dark mode or primary-dark in light mode
-    logo_color = ft.Colors.WHITE if is_dark else PRIMARY_DARK
-    logo_widget = ft.Image(
-        src="icon.svg",
-        width=28,
-        height=28,
-        fit=ft.BoxFit.CONTAIN,
-        color=logo_color,
-        color_blend_mode=ft.BlendMode.SRC_IN,
-    )
-
-    page.appbar = (
-        ft.AppBar(
-            leading=ft.Container(content=logo_widget, padding=ft.Padding.only(left=SPACE_MD)),
-            title=ft.Text(APP_NAME, size=FONT_LG, weight=ft.FontWeight.BOLD),
-            actions=[
-                *(
-                    [
-                        ft.Container(
-                            content=ft.Row(
-                                controls=[
-                                    ft.Icon(ft.Icons.SYSTEM_UPDATE_ROUNDED, size=14, color=PRIMARY),
-                                    ft.Text(
-                                        "UPDATE",
-                                        size=FONT_XS,
-                                        weight=ft.FontWeight.BOLD,
-                                        color=PRIMARY,
-                                    ),
-                                ],
-                                spacing=4,
-                                tight=True,
-                            ),
-                            padding=ft.Padding.symmetric(horizontal=SPACE_SM, vertical=4),
-                            border_radius=RADIUS_MD,
-                            bgcolor="#1E3E1C" if is_dark else "#E2F4E0",
-                            on_click=lambda _: ctrl.show_update_dialog(),
-                            margin=ft.Margin.only(right=SPACE_MD),
-                        )
-                    ]
-                    if state.update_available
-                    else []
-                )
-            ],
-            center_title=False,
-        )
-        if is_dashboard
-        else None
-    )
-
     # Resolve active view content
     view_content: ft.Control
     if is_dashboard:
-        if state.selected_tab == 0:
-            view_content = HomeScreen()
-        elif state.selected_tab == 1:
-            view_content = HistoryScreen()
+        if selected_tab == 0:
+            view_content = HomeScreen(key=ft.ValueKey("home"))
+        elif selected_tab == 1:
+            view_content = HistoryScreen(key=ft.ValueKey("history"))
         else:
-            view_content = SettingsScreen()
+            view_content = SettingsScreen(key=ft.ValueKey("settings"))
     elif active_view == "convert":
-        view_content = ConvertScreen()
+        view_content = ConvertScreen(key=ft.ValueKey("convert"))
     elif active_view == "compress":
-        view_content = CompressScreen()
+        view_content = CompressScreen(key=ft.ValueKey("compress"))
     elif active_view == "cut":
-        view_content = CutScreen()
+        view_content = CutScreen(key=ft.ValueKey("cut"))
     elif active_view == "extract":
-        view_content = ExtractScreen()
+        view_content = ExtractScreen(key=ft.ValueKey("extract"))
     elif active_view == "filters":
-        view_content = FiltersScreen()
+        view_content = FiltersScreen(key=ft.ValueKey("filters"))
     elif active_view == "audio":
-        view_content = AudioScreen()
+        view_content = AudioScreen(key=ft.ValueKey("audio"))
     elif active_view == "probe":
-        view_content = ProbeScreen()
+        view_content = ProbeScreen(key=ft.ValueKey("probe"))
     elif active_view == "result":
-        view_content = ResultScreen()
+        view_content = ResultScreen(key=ft.ValueKey("result"))
     else:
-        view_content = HomeScreen()
+        view_content = HomeScreen(key=ft.ValueKey("home"))
 
     return ft.Column(
         controls=[
             offline_banner_view(state.is_online),
             jobs_banner_view(state.active_job, is_dark=is_dark),
             ft.Container(
-                content=view_content, expand=True, padding=ft.Padding.symmetric(horizontal=SPACE_MD)
+                content=view_content,
+                expand=True,
+                padding=ft.Padding.symmetric(horizontal=SPACE_MD),
             ),
         ],
         spacing=0,

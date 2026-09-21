@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import flet as ft
 
-from core.theme import PRIMARY, TEXT_MUTED_DARK, TEXT_MUTED_LIGHT, is_dark_mode
+from core.theme import PRIMARY, PRIMARY_DARK, TEXT_MUTED_DARK, TEXT_MUTED_LIGHT, is_dark_mode
 from core.tokens import (
     FONT_2XL,
     FONT_MD,
@@ -20,17 +20,20 @@ from state.controller_ctx import use_controller
 
 _SLIDES = [
     (
-        ft.Icons.MOVIE_FILTER_ROUNDED,
+        "icon.svg",
+        True,
         "Welcome to FFmpeg",
         "The complete, uncompromised power of FFmpeg 8 running directly on your phone. 100% private, ultra-fast, on-device.",
     ),
     (
         ft.Icons.AUTO_AWESOME_ROUNDED,
+        False,
         "Every Tool You Need",
         "Convert any video or audio, compress for messaging apps, trim with frame-accuracy, extract tracks & GIFs, and normalize audio.",
     ),
     (
         ft.Icons.SHIELD_ROUNDED,
+        False,
         "Private & Sovereign",
         "Zero tracking, zero cloud uploads. Your media files and processed outputs stay strictly inside your device.",
     ),
@@ -48,17 +51,13 @@ def OnboardingScreen() -> ft.Control:
     slide_idx, set_slide_idx = ft.use_state(0)
     accepted_terms, set_accepted_terms = ft.use_state(False)
 
-    icon_data, title, description = _SLIDES[slide_idx]
+    icon_src, is_image, title, description = _SLIDES[slide_idx]
 
     def _next(_=None):
         if slide_idx < len(_SLIDES) - 1:
             set_slide_idx(slide_idx + 1)
         else:
             ctrl.finish_onboarding()
-
-    def _prev(_=None):
-        if slide_idx > 0:
-            set_slide_idx(slide_idx - 1)
 
     def _on_drag(e: ft.DragEndEvent):
         if e.primary_velocity is not None:
@@ -80,10 +79,22 @@ def OnboardingScreen() -> ft.Control:
 
     is_last = slide_idx == len(_SLIDES) - 1
 
+    # Hero: first slide shows your real FFmpeg icon.svg, others show themed icons
+    if is_image:
+        hero_content = ft.Image(
+            src=f"/{icon_src}",
+            width=ICON_HERO * 2.2,
+            height=ICON_HERO * 2.2,
+            fit=ft.BoxFit.CONTAIN,
+            color=ft.Colors.WHITE if is_dark else PRIMARY_DARK,
+            color_blend_mode=ft.BlendMode.SRC_IN,
+        )
+    else:
+        hero_content = ft.Icon(icon_src, size=ICON_HERO * 1.5, color=PRIMARY)
+
     return ft.Container(
         content=ft.Column(
             controls=[
-                # Top bar: Skip button
                 ft.Row(
                     controls=[
                         ft.Container(),
@@ -95,14 +106,13 @@ def OnboardingScreen() -> ft.Control:
                     ],
                     alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
                 ),
-                # Main slide content wrapped in drag detector
                 ft.GestureDetector(
                     on_horizontal_drag_end=_on_drag,
                     content=ft.Container(
                         content=ft.Column(
                             controls=[
                                 ft.Container(
-                                    content=ft.Icon(icon_data, size=ICON_HERO * 1.5, color=PRIMARY),
+                                    content=hero_content,
                                     padding=SPACE_XL,
                                     border_radius=RADIUS_FULL,
                                     bgcolor="#1E3E1C" if is_dark else "#E2F4E0",
@@ -129,9 +139,7 @@ def OnboardingScreen() -> ft.Control:
                     ),
                     expand=True,
                 ),
-                # Dots indicator
                 ft.Row(controls=dots, alignment=ft.MainAxisAlignment.CENTER, spacing=SPACE_SM),
-                # Bottom controls
                 ft.Container(
                     content=ft.Column(
                         controls=[

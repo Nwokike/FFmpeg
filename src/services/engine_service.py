@@ -272,8 +272,8 @@ class EngineService:
             if os.path.exists(output_path):
                 try:
                     os.remove(output_path)
-                except OSError:
-                    pass
+                except OSError as e:
+                    logging.getLogger(__name__).warning("Failed to remove cancelled output: %s", e)
             raise InterruptedError("Transcoding was cancelled")
 
         return output_path
@@ -400,8 +400,8 @@ class EngineService:
             if os.path.exists(output_path):
                 try:
                     os.remove(output_path)
-                except OSError:
-                    pass
+                except OSError as e:
+                    logging.getLogger(__name__).warning("Failed to remove cancelled output: %s", e)
             raise InterruptedError("Compression cancelled")
 
         return output_path
@@ -674,7 +674,12 @@ class EngineService:
                         if frame.time is not None and frame.time >= ts:
                             try:
                                 frame.save(frame_path)
-                            except Exception:
+                            except Exception as save_err:
+                                logging.getLogger(__name__).debug(
+                                    "Direct save failed, reformatting for %s: %s",
+                                    frame_path,
+                                    save_err,
+                                )
                                 frame.reformat(format="bgr24").save(frame_path)
                             out_paths.append(frame_path)
                             saved = True
