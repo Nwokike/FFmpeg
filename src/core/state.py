@@ -13,6 +13,16 @@ from core.engine_probe import EngineProbe
 
 
 @dataclass
+class ChapterInfo:
+    """One container chapter (times in seconds)."""
+
+    id: int
+    title: str
+    start_s: float
+    end_s: float
+
+
+@dataclass
 class MediaStreamInfo:
     """Detailed stream parameters extracted from media containers."""
 
@@ -28,6 +38,7 @@ class MediaStreamInfo:
     height: int | None = None
     fps: float | None = None
     pix_fmt: str | None = None
+    rotation: int | None = None  # display-matrix degrees (from first frame)
     # Audio
     sample_rate: int | None = None
     channels: int | None = None
@@ -35,6 +46,11 @@ class MediaStreamInfo:
     # General
     language: str | None = None
     metadata: dict[str, str] = field(default_factory=dict)
+    disposition: dict[str, bool] = field(default_factory=dict)  # default/forced/…
+
+    @property
+    def has_subtitle_like_type(self) -> bool:
+        return self.stream_type in ("subtitle", "text")
 
 
 @dataclass
@@ -50,6 +66,7 @@ class MediaInfo:
     format_long_name: str
     streams: list[MediaStreamInfo] = field(default_factory=list)
     metadata: dict[str, str] = field(default_factory=dict)
+    chapters: list[ChapterInfo] = field(default_factory=list)
     raw_dump: str = ""
 
     @property

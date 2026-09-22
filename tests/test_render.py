@@ -9,6 +9,7 @@ from flet.components.component import Renderer
 from app_shell import AppShell
 from core.state import state
 from screens.audio_screen import AudioScreen
+from screens.capture_screen import CaptureScreen
 from screens.compress_screen import CompressScreen
 from screens.convert_screen import ConvertScreen
 from screens.cut_screen import CutScreen
@@ -16,10 +17,12 @@ from screens.extract_screen import ExtractScreen
 from screens.filters_screen import FiltersScreen
 from screens.history_screen import HistoryScreen
 from screens.home_screen import HomeScreen
+from screens.join_screen import JoinScreen
 from screens.onboarding_screen import OnboardingScreen
 from screens.probe_screen import ProbeScreen
 from screens.result_screen import ResultScreen
 from screens.settings_screen import SettingsScreen
+from screens.streams_screen import StreamsScreen
 from state.controller_ctx import ControllerMethods, ControllerMethodsCtx
 from state.service_ctx import ServiceCtx, Services
 
@@ -59,6 +62,9 @@ def test_render_all_screens(mock_ctx):
         ResultScreen,
         HistoryScreen,
         SettingsScreen,
+        CaptureScreen,
+        StreamsScreen,
+        JoinScreen,
     ]
 
     for screen_cls in screens:

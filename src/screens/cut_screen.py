@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
+import logging
 import os
+import time
 from pathlib import Path
 
 import flet as ft
@@ -12,7 +15,17 @@ from core.storage_paths import format_bytes, get_temp_dir
 from core.styles import card_container, section_header
 from core.theme import ACCENT_AMBER, PRIMARY, TEXT_MUTED_DARK, TEXT_MUTED_LIGHT, is_dark_mode
 from core.tokens import FONT_LG, FONT_MD, FONT_SM, FONT_XS, RADIUS_LG, SPACE_MD, SPACE_SM
+from services.engine_service import EngineService
 from state.controller_ctx import use_controller
+
+logger = logging.getLogger(__name__)
+
+try:
+    import flet_video as ftv
+
+    _HAS_VIDEO = True
+except ImportError:  # pragma: no cover
+    _HAS_VIDEO = False
 
 
 def _format_time_s(seconds: float) -> str:
@@ -44,8 +57,80 @@ def CutScreen() -> ft.Control:
     end_s, set_end_s = ft.use_state(total_dur)
     stream_copy, set_stream_copy = ft.use_state(True)
     is_processing, set_is_processing = ft.use_state(False)
+    thumbs, set_thumbs = ft.use_state([])
+    keyframes, set_keyframes = ft.use_state([])
+    strip_loaded, set_strip_loaded = ft.use_state(False)
+    scrub_ready, set_scrub_ready = ft.use_state(False)
+    scrub_ref = ft.use_ref(None)
+    last_seek_ref = ft.use_ref(0.0)
 
     cut_duration = max(0.0, end_s - start_s)
+
+    # ── Scrub preview: stable Video instance + throttled seeks ──────────────
+
+    async def _seek_to(seconds: float) -> None:
+        v = scrub_ref.current
+        if v is None:
+            return
+        try:
+            await v.seek(ft.Duration(milliseconds=int(seconds * 1000)))
+        except Exception as exc:  # noqa: BLE001 — cosmetic preview
+            logger.debug("Scrub seek failed: %s", exc)
+
+    def _scrub_to(seconds: float) -> None:
+        now = time.monotonic()
+        if now - last_seek_ref.current < 0.3:
+            return
+        last_seek_ref.current = now
+        page.run_task(_seek_to, seconds)
+
+    def _stop_scrub() -> None:
+        v = scrub_ref.current
+        if v is None:
+            return
+
+        async def _stop():
+            try:
+                await v.stop()
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("Scrub stop failed: %s", exc)
+
+        page.run_task(_stop)
+
+    def _mount_scrub():
+        if not media_path or not _HAS_VIDEO or scrub_ref.current is not None:
+            return None
+        try:
+            scrub_ref.current = ftv.Video(
+                playlist=[ftv.VideoMedia(media_path)],
+                autoplay=False,
+                filter_quality=ft.FilterQuality.MEDIUM,
+            )
+            set_scrub_ready(True)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Scrub preview unavailable: %s", exc)
+        return None
+
+    async def _load_strip() -> None:
+        try:
+            times = [total_dur * (i + 1) / 7 for i in range(6)]
+            imgs = await asyncio.to_thread(EngineService.thumbnail_strip, media_path, times)
+            kfs = await asyncio.to_thread(EngineService.keyframe_times, media_path)
+            set_thumbs(imgs)
+            set_keyframes(kfs)
+        except Exception as exc:  # noqa: BLE001 — strip is cosmetic
+            logger.debug("Thumbnail strip failed: %s", exc)
+        finally:
+            set_strip_loaded(True)
+
+    def _effect_strip():
+        if not media_path:
+            return None
+        page.run_task(_load_strip)
+        return None
+
+    ft.use_effect(_mount_scrub, [], cleanup=_stop_scrub)
+    ft.use_effect(_effect_strip, [])
 
     def _set_trim_range(lo: float, hi: float) -> None:
         """RangeSlider handler: keep an ordered, non-empty trim window."""
@@ -55,6 +140,7 @@ def CutScreen() -> ft.Control:
             return
         set_start_s(a)
         set_end_s(b)
+        _scrub_to(a)
 
     def _start_cut(_):
         if not media_path or cut_duration <= 0.05:
@@ -182,6 +268,35 @@ def CutScreen() -> ft.Control:
                 padding=SPACE_MD,
                 is_dark=is_dark,
             ),
+            # Live scrub preview of the source — seeks as the range moves
+            ft.Container(
+                content=(
+                    scrub_ref.current
+                    if scrub_ready and scrub_ref.current is not None
+                    else ft.Container(
+                        content=ft.Row(
+                            controls=[
+                                ft.ProgressRing(width=20, height=20),
+                                ft.Text(
+                                    "Loading preview…"
+                                    if _HAS_VIDEO
+                                    else "Preview unavailable on this platform",
+                                    size=FONT_SM,
+                                    color=muted,
+                                ),
+                            ],
+                            alignment=ft.MainAxisAlignment.CENTER,
+                            spacing=SPACE_SM,
+                        ),
+                        alignment=ft.Alignment.CENTER,
+                        expand=True,
+                    )
+                ),
+                height=160,
+                border_radius=RADIUS_LG,
+                clip_behavior=ft.ClipBehavior.ANTI_ALIAS,
+                bgcolor="#000000",
+            ),
             # Trim range — one RangeSlider keeps start <= end by construction
             # (the old interlinked Slider pair misbehaved on sub-second clips)
             section_header(
@@ -199,6 +314,63 @@ def CutScreen() -> ft.Control:
                     round(float(e.control.start_value), 2),
                     round(float(e.control.end_value), 2),
                 ),
+            ),
+            # Thumbnail strip + instant-cut keyframe jumps
+            section_header("Timeline", "Frames & instant-cut points", is_dark=is_dark),
+            *(
+                [
+                    ft.Row(
+                        controls=[
+                            ft.Container(
+                                content=ft.Image(src=img, fit=ft.BoxFit.COVER),
+                                height=52,
+                                expand=True,
+                                border_radius=6,
+                                clip_behavior=ft.ClipBehavior.ANTI_ALIAS,
+                            )
+                            for img in thumbs
+                        ],
+                        spacing=4,
+                    )
+                ]
+                if thumbs
+                else [
+                    ft.Text(
+                        "Building thumbnails…"
+                        if not strip_loaded
+                        else "Thumbnails unavailable",
+                        size=FONT_SM,
+                        color=muted,
+                    )
+                ]
+            ),
+            *(
+                [
+                    ft.Row(
+                        controls=[
+                            ft.Chip(
+                                label=ft.Text(_format_time_s(kf)),
+                                selected=False,
+                                on_select=lambda _, t=kf: _scrub_to(t),
+                                tooltip="Preview this cut point",
+                            )
+                            for kf in (
+                                keyframes
+                                if len(keyframes) <= 12
+                                else keyframes[:: (len(keyframes) + 11) // 12][:12]
+                            )
+                        ],
+                        wrap=True,
+                        spacing=SPACE_SM,
+                    ),
+                    ft.Text(
+                        f"◆ {len(keyframes)} keyframes — instant (stream-copy) cuts snap to these",
+                        size=FONT_XS,
+                        color=muted,
+                    ),
+                ]
+                if keyframes
+                else []
             ),
             # Mode toggle
             section_header("Processing Mode", "Cutting method", is_dark=is_dark),

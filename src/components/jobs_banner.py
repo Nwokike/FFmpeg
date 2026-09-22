@@ -6,7 +6,7 @@ from pathlib import Path
 
 import flet as ft
 
-from core.state import Job
+from core.state import Job, state
 from core.theme import ACCENT_RED, PRIMARY
 from core.tokens import FONT_SM, FONT_XS, ICON_SM, RADIUS_MD, SPACE_MD, SPACE_SM
 from state.controller_ctx import use_controller
@@ -20,6 +20,9 @@ def jobs_banner_view(active_job: Job | None, is_dark: bool = True) -> ft.Control
     ctrl = use_controller()
     name = Path(active_job.input_path).name if active_job.input_path else "Media file"
     pct = int(active_job.progress * 100)
+    is_live = active_job.op == "record"  # live streams have no total — animate
+    paused = active_job.status_message == "Paused"
+    queued = max(0, len(state.jobs) - 1)
 
     return ft.Container(
         content=ft.Column(
@@ -30,7 +33,10 @@ def jobs_banner_view(active_job: Job | None, is_dark: bool = True) -> ft.Control
                             controls=[
                                 ft.ProgressRing(width=16, height=16, stroke_width=2, color=PRIMARY),
                                 ft.Text(
-                                    f"Processing {active_job.op.title()}: {name}",
+                                    (
+                                        "Paused — " if paused else "Processing "
+                                    )
+                                    + f"{active_job.op.title()}: {name}",
                                     size=FONT_SM,
                                     weight=ft.FontWeight.W_600,
                                     max_lines=1,
@@ -41,7 +47,26 @@ def jobs_banner_view(active_job: Job | None, is_dark: bool = True) -> ft.Control
                             spacing=SPACE_SM,
                             expand=True,
                         ),
-                        ft.Text(f"{pct}%", size=FONT_XS, weight=ft.FontWeight.BOLD, color=PRIMARY),
+                        *(
+                            [ft.Text(f"+{queued} queued", size=FONT_XS, color=PRIMARY)]
+                            if queued
+                            else []
+                        ),
+                        ft.Text(
+                            "REC" if is_live else f"{pct}%",
+                            size=FONT_XS,
+                            weight=ft.FontWeight.BOLD,
+                            color=ACCENT_RED if is_live else PRIMARY,
+                        ),
+                        ft.IconButton(
+                            icon=ft.Icons.PAUSE_ROUNDED
+                            if not paused
+                            else ft.Icons.PLAY_ARROW_ROUNDED,
+                            icon_size=ICON_SM,
+                            icon_color=PRIMARY,
+                            tooltip="Pause Job" if not paused else "Resume Job",
+                            on_click=lambda _: ctrl.toggle_pause_job(),
+                        ),
                         ft.IconButton(
                             icon=ft.Icons.CLOSE_ROUNDED,
                             icon_size=ICON_SM,
@@ -53,7 +78,7 @@ def jobs_banner_view(active_job: Job | None, is_dark: bool = True) -> ft.Control
                     alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
                 ),
                 ft.ProgressBar(
-                    value=max(0.0, min(active_job.progress, 1.0)),
+                    value=None if is_live else max(0.0, min(active_job.progress, 1.0)),
                     color=PRIMARY,
                     bgcolor="#242930" if is_dark else "#E5E7EB",
                 ),

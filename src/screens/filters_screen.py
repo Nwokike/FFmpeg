@@ -1,29 +1,47 @@
-"""Video and audio filter stack screen (speed, volume, rotate, flip)."""
+"""Video and audio filter stack screen (speed, volume, rotate, crop, EQ, denoise, watermark).
+
+Every presence-sensitive control is gated on this build's compiled-in filters
+(loaded once via ``available_filters()``): a missing filter degrades to a note
+naming it instead of failing mid-job.
+"""
 
 from __future__ import annotations
 
+import asyncio
+import logging
 import os
 from pathlib import Path
 
 import flet as ft
 
+from core.notify import ERROR, show_snack
 from core.state import Job, state
 from core.storage_paths import format_bytes, get_temp_dir
 from core.styles import card_container, section_header
 from core.theme import ACCENT_PURPLE, TEXT_MUTED_DARK, TEXT_MUTED_LIGHT, is_dark_mode
-from core.tokens import FONT_LG, FONT_MD, FONT_SM, RADIUS_LG, SPACE_MD, SPACE_SM
+from core.tokens import FONT_LG, FONT_MD, FONT_SM, FONT_XS, RADIUS_LG, SPACE_MD, SPACE_SM
+from services.engine_service import available_filters
 from state.controller_ctx import use_controller
+from state.service_ctx import use_services
+
+logger = logging.getLogger(__name__)
+
+_CROP_ASPECTS = ("original", "16:9", "1:1", "4:5")
+_DENOISE_LEVELS = ("off", "low", "high")
+_WM_POSITIONS = ("br", "bl", "tl", "tr", "center")
 
 
 @ft.component
 def FiltersScreen() -> ft.Control:
-    """Filter adjustments: Speed/tempo multiplier, audio gain, and spatial rotation."""
+    """Filter adjustments: speed/tempo, gain, rotation, crop, EQ, denoise, watermark."""
     page = ft.context.page
     ctrl = use_controller()
+    services = use_services()
     is_dark = is_dark_mode(page)
     muted = TEXT_MUTED_DARK if is_dark else TEXT_MUTED_LIGHT
 
     media_path = state.current_media_path
+    info = state.current_media_info
     file_name = Path(media_path).name if media_path else "No file selected"
     file_size_str = (
         format_bytes(Path(media_path).stat().st_size)
@@ -34,10 +52,76 @@ def FiltersScreen() -> ft.Control:
     speed_val, set_speed_val = ft.use_state(1.0)
     volume_pct, set_volume_pct = ft.use_state(100)
     rotation_deg, set_rotation_deg = ft.use_state(0)
+    crop, set_crop = ft.use_state("original")
+    scale, set_scale = ft.use_state("original")  # original | 480p | 720p
+    brightness, set_brightness = ft.use_state(0.0)
+    contrast, set_contrast = ft.use_state(1.0)
+    saturation, set_saturation = ft.use_state(1.0)
+    denoise, set_denoise = ft.use_state("off")
+    sharpen, set_sharpen = ft.use_state(0)
+    wm_path, set_wm_path = ft.use_state(None)
+    wm_pos, set_wm_pos = ft.use_state("br")
+    wm_pct, set_wm_pct = ft.use_state(20)
+    avail, set_avail = ft.use_state(frozenset())
     is_processing, set_is_processing = ft.use_state(False)
 
     speeds = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0]
     rotations = [(0, "Normal"), (90, "90° CW"), (180, "180°"), (270, "270° CW")]
+
+    async def _load_avail() -> None:
+        try:
+            names = await asyncio.to_thread(available_filters)
+            set_avail(frozenset(names))
+        except Exception as exc:  # noqa: BLE001 — gates then stay optimistic
+            logger.debug("Filter availability load failed: %s", exc)
+
+    ft.use_effect(lambda: page.run_task(_load_avail), [])
+
+    def _missing(*names: str) -> bool:
+        """True only after enumeration, when any named filter is absent."""
+        return bool(avail) and any(n not in avail for n in names)
+
+    def _note(filter_label: str) -> ft.Control:
+        return ft.Text(
+            f"“{filter_label}” isn't compiled into this FFmpeg build — feature hidden.",
+            size=FONT_XS,
+            color=muted,
+        )
+
+    async def _pick_wm(_=None) -> None:
+        try:
+            res = await services.media_io.file_picker.pick_files(
+                dialog_title="Choose watermark image",
+                file_type=ft.FilePickerFileType.IMAGE,
+                allow_multiple=False,
+            )
+            if not res or not res.files:
+                return
+            picked = res.files[0]
+            if picked.path and os.path.exists(picked.path):
+                set_wm_path(picked.path)
+            elif picked.bytes:
+                dest = get_temp_dir() / f"watermark_{Path(picked.name).name}"
+                dest.write_bytes(picked.bytes)
+                set_wm_path(str(dest))
+            else:
+                show_snack(page, "Couldn't read that image", bgcolor=ERROR)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Watermark pick failed: %s", exc)
+            show_snack(page, f"Image pick failed: {exc}", bgcolor=ERROR)
+
+    def _scale_dims() -> tuple[int | None, int | None]:
+        if scale == "original" or info is None or info.video_stream is None:
+            return None, None
+        vw = info.video_stream.width or 0
+        vh = info.video_stream.height or 0
+        if not vw or not vh:
+            return None, None
+        target_h = 480 if scale == "480p" else 720
+        if vh <= target_h:
+            return None, None
+        w = int(vw * target_h / vh)
+        return (w // 2) * 2, (target_h // 2) * 2
 
     def _start_filters(_):
         if not media_path:
@@ -48,6 +132,7 @@ def FiltersScreen() -> ft.Control:
         ext = Path(media_path).suffix or ".mp4"
         out_name = f"{stem}_filtered{ext}"
         out_path = str(get_temp_dir() / out_name)
+        scale_w, scale_h = _scale_dims()
 
         job = Job(
             op="convert",
@@ -57,6 +142,21 @@ def FiltersScreen() -> ft.Control:
                 "speed": float(speed_val),
                 "volume_pct": int(volume_pct),
                 "rotation": int(rotation_deg),
+                "crop": crop if crop != "original" else None,
+                "scale_width": scale_w,
+                "scale_height": scale_h,
+                "eq": {
+                    "brightness": float(brightness),
+                    "contrast": float(contrast),
+                    "saturation": float(saturation),
+                },
+                "denoise": denoise,
+                "sharpen": int(sharpen),
+                "watermark": (
+                    {"path": wm_path, "position": wm_pos, "width_pct": int(wm_pct)}
+                    if wm_path
+                    else None
+                ),
             },
             original_size_bytes=Path(media_path).stat().st_size
             if os.path.exists(media_path)
@@ -145,6 +245,240 @@ def FiltersScreen() -> ft.Control:
                 ],
                 wrap=True,
                 spacing=SPACE_SM,
+            ),
+            # Crop (gated: crop filter)
+            section_header("Crop", "Center-crop to an aspect ratio", is_dark=is_dark),
+            *(
+                [
+                    ft.Row(
+                        controls=[
+                            ft.Chip(
+                                label=ft.Text(a.upper() if a == "original" else a),
+                                selected=crop == a,
+                                on_select=lambda _, v=a: set_crop(v),
+                            )
+                            for a in _CROP_ASPECTS
+                        ],
+                        wrap=True,
+                        spacing=SPACE_SM,
+                    )
+                ]
+                if not _missing("crop")
+                else [_note("crop")]
+            ),
+            # Scale (reuses convert's reformat path — no filter needed)
+            section_header("Scale Down", "Even-dimension downscale", is_dark=is_dark),
+            ft.Row(
+                controls=[
+                    ft.Chip(
+                        label=ft.Text(label),
+                        selected=scale == value,
+                        on_select=lambda _, v=value: set_scale(v),
+                    )
+                    for value, label in (
+                        ("original", "Original"),
+                        ("480p", "480p"),
+                        ("720p", "720p"),
+                    )
+                ],
+                spacing=SPACE_SM,
+            ),
+            # EQ (gated: eq filter — compiled out of this build)
+            section_header("Color EQ", "Brightness · contrast · saturation", is_dark=is_dark),
+            *(
+                [
+                    ft.Column(
+                        controls=[
+                            ft.Row(
+                                controls=[
+                                    ft.Container(
+                                        width=90,
+                                        content=ft.Text("Brightness", size=FONT_SM),
+                                    ),
+                                    ft.Slider(
+                                        value=float(brightness),
+                                        min=-0.5,
+                                        max=0.5,
+                                        divisions=20,
+                                        expand=True,
+                                        on_change=lambda e: set_brightness(
+                                            round(float(e.control.value), 3)
+                                        ),
+                                    ),
+                                ],
+                                spacing=SPACE_SM,
+                            ),
+                            ft.Row(
+                                controls=[
+                                    ft.Container(
+                                        width=90, content=ft.Text("Contrast", size=FONT_SM)
+                                    ),
+                                    ft.Slider(
+                                        value=float(contrast),
+                                        min=0.5,
+                                        max=1.5,
+                                        divisions=20,
+                                        expand=True,
+                                        on_change=lambda e: set_contrast(
+                                            round(float(e.control.value), 3)
+                                        ),
+                                    ),
+                                ],
+                                spacing=SPACE_SM,
+                            ),
+                            ft.Row(
+                                controls=[
+                                    ft.Container(
+                                        width=90, content=ft.Text("Saturation", size=FONT_SM)
+                                    ),
+                                    ft.Slider(
+                                        value=float(saturation),
+                                        min=0.0,
+                                        max=2.0,
+                                        divisions=20,
+                                        expand=True,
+                                        on_change=lambda e: set_saturation(
+                                            round(float(e.control.value), 3)
+                                        ),
+                                    ),
+                                ],
+                                spacing=SPACE_SM,
+                            ),
+                        ],
+                        spacing=SPACE_SM,
+                    )
+                ]
+                if not _missing("eq")
+                else [_note("eq")]
+            ),
+            # Denoise (gated: hqdn3d > nlmeans > atadenoise)
+            section_header("Denoise", "Clean grain and compression noise", is_dark=is_dark),
+            *(
+                [
+                    ft.Row(
+                        controls=[
+                            ft.Chip(
+                                label=ft.Text(level.title()),
+                                selected=denoise == level,
+                                on_select=lambda _, v=level: set_denoise(v),
+                            )
+                            for level in _DENOISE_LEVELS
+                        ],
+                        spacing=SPACE_SM,
+                    )
+                ]
+                if not avail
+                or "hqdn3d" in avail
+                or "nlmeans" in avail
+                or "atadenoise" in avail
+                else [_note("hqdn3d/nlmeans/atadenoise")]
+            ),
+            # Sharpen (gated: unsharp)
+            section_header("Sharpen", f"Amount {sharpen}%" if sharpen else "Off", is_dark=is_dark),
+            *(
+                [
+                    ft.Slider(
+                        value=float(sharpen),
+                        min=0,
+                        max=100,
+                        divisions=20,
+                        on_change=lambda e: set_sharpen(int(e.control.value)),
+                    )
+                ]
+                if not _missing("unsharp")
+                else [_note("unsharp")]
+            ),
+            # Watermark (gated: movie + overlay)
+            section_header("Watermark", "Overlay a PNG on every frame", is_dark=is_dark),
+            *(
+                [
+                    card_container(
+                        content=ft.Column(
+                            controls=[
+                                ft.Row(
+                                    controls=[
+                                        ft.Icon(
+                                            ft.Icons.IMAGE_ROUNDED, size=24, color=ACCENT_PURPLE
+                                        ),
+                                        ft.Text(
+                                            Path(wm_path).name if wm_path else "No image chosen",
+                                            size=FONT_SM,
+                                            weight=ft.FontWeight.W_600,
+                                            expand=True,
+                                            max_lines=1,
+                                            overflow=ft.TextOverflow.ELLIPSIS,
+                                        ),
+                                        ft.OutlinedButton(
+                                            "Choose PNG",
+                                            on_click=lambda _: page.run_task(_pick_wm),
+                                        ),
+                                        *(
+                                            [
+                                                ft.TextButton(
+                                                    "Clear", on_click=lambda _: set_wm_path(None)
+                                                )
+                                            ]
+                                            if wm_path
+                                            else []
+                                        ),
+                                    ],
+                                    spacing=SPACE_SM,
+                                ),
+                                *(
+                                    [
+                                        ft.Row(
+                                            controls=[
+                                                ft.Text("Position", size=FONT_SM),
+                                                *[
+                                                    ft.Chip(
+                                                        label=ft.Text(
+                                                            {
+                                                                "br": "Bottom Right",
+                                                                "bl": "Bottom Left",
+                                                                "tl": "Top Left",
+                                                                "tr": "Top Right",
+                                                                "center": "Center",
+                                                            }[p]
+                                                        ),
+                                                        selected=wm_pos == p,
+                                                        on_select=lambda _, v=p: set_wm_pos(v),
+                                                    )
+                                                    for p in _WM_POSITIONS
+                                                ],
+                                            ],
+                                            wrap=True,
+                                            spacing=SPACE_SM,
+                                        ),
+                                        ft.Row(
+                                            controls=[
+                                                ft.Text(f"Width {wm_pct}%", size=FONT_SM),
+                                                ft.Slider(
+                                                    value=float(wm_pct),
+                                                    min=5,
+                                                    max=40,
+                                                    divisions=7,
+                                                    expand=True,
+                                                    on_change=lambda e: set_wm_pct(
+                                                        int(e.control.value)
+                                                    ),
+                                                ),
+                                            ],
+                                            spacing=SPACE_SM,
+                                        ),
+                                    ]
+                                    if wm_path
+                                    else []
+                                ),
+                            ],
+                            spacing=SPACE_SM,
+                        ),
+                        padding=SPACE_MD,
+                        border_radius=RADIUS_LG,
+                        is_dark=is_dark,
+                    )
+                ]
+                if not _missing("movie", "overlay")
+                else [_note("movie/overlay")]
             ),
             # Action button
             ft.FilledButton(

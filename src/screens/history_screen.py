@@ -126,6 +126,28 @@ def HistoryScreen() -> ft.Control:
                 if len(history_items) > 2
                 else []
             ),
+            # Now Processing — the serial queue (running + pending jobs)
+            *(
+                [
+                    section_header(
+                        "Now Processing",
+                        (
+                            f"{len(state.jobs)} in queue"
+                            if len(state.jobs) > 1
+                            else ("1 running" if state.jobs else "")
+                        ),
+                        is_dark=is_dark,
+                    ),
+                    ft.Column(
+                        controls=[
+                            job_card_view(j, is_dark=is_dark) for j in state.jobs
+                        ],
+                        spacing=SPACE_SM,
+                    ),
+                ]
+                if state.jobs
+                else []
+            ),
             # Items or empty state
             *(
                 [

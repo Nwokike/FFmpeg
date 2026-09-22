@@ -19,6 +19,8 @@ class Services:
     update: Any = None
     url_launcher: Any = None
     clipboard: Any = None
+    permission_handler: Any = None
+    audio_recorder: Any = None
 
 
 ServiceCtx = ft.create_context(Services())

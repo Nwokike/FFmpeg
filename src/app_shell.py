@@ -16,9 +16,10 @@ import flet as ft
 from components.jobs_banner import jobs_banner_view
 from components.offline_banner import offline_banner_view
 from core.state import state
-from core.theme import PRIMARY, is_dark_mode
+from core.theme import ACCENT_RED, PRIMARY, is_dark_mode
 from core.tokens import SPACE_MD
 from screens.audio_screen import AudioScreen
+from screens.capture_screen import CaptureScreen
 from screens.compress_screen import CompressScreen
 from screens.convert_screen import ConvertScreen
 from screens.cut_screen import CutScreen
@@ -27,10 +28,12 @@ from screens.extract_screen import ExtractScreen
 from screens.filters_screen import FiltersScreen
 from screens.history_screen import HistoryScreen
 from screens.home_screen import HomeScreen
+from screens.join_screen import JoinScreen
 from screens.onboarding_screen import OnboardingScreen
 from screens.probe_screen import ProbeScreen
 from screens.result_screen import ResultScreen
 from screens.settings_screen import SettingsScreen
+from screens.streams_screen import StreamsScreen
 from state.controller_ctx import use_controller
 
 logger = logging.getLogger("AppShell")
@@ -75,11 +78,41 @@ def _build_navigation_bar(ctrl) -> ft.NavigationBar:
             return
         ctrl.select_tab(idx)
 
+    job_count = len(state.jobs)  # observable read → badge re-renders on queue change
+
+    def _icon_with_badge(base: ft.IconData):
+        if job_count <= 0:
+            return base
+        return ft.Stack(
+            controls=[
+                ft.Icon(base),
+                ft.Positioned(
+                    top=-4,
+                    right=-8,
+                    child=ft.Container(
+                        width=16,
+                        height=16,
+                        border_radius=8,
+                        bgcolor=ACCENT_RED,
+                        alignment=ft.Alignment.CENTER,
+                        content=ft.Text(
+                            str(min(job_count, 99)),
+                            size=9,
+                            weight=ft.FontWeight.BOLD,
+                            color=ft.Colors.WHITE,
+                        ),
+                    ),
+                ),
+            ]
+        )
+
+    destinations = []
+    for i, (icon, label) in enumerate(zip(_TAB_ICONS, _TAB_NAMES, strict=True)):
+        icon_control = _icon_with_badge(icon) if i == 1 else icon
+        destinations.append(ft.NavigationBarDestination(icon=icon_control, label=label))
+
     return ft.NavigationBar(
-        destinations=[
-            ft.NavigationBarDestination(icon=icon, label=label)
-            for icon, label in zip(_TAB_ICONS, _TAB_NAMES, strict=True)
-        ],
+        destinations=destinations,
         selected_index=state.selected_tab,
         on_change=_on_tab_change,
         bgcolor=ft.Colors.SURFACE,
@@ -158,6 +191,9 @@ _ROUTES = [
     ft.Route(path="audio", component=_tool_view(AudioScreen, "audio")),
     ft.Route(path="probe", component=_tool_view(ProbeScreen, "probe")),
     ft.Route(path="engine-info", component=_tool_view(EngineInfoScreen, "engine-info")),
+    ft.Route(path="capture", component=_tool_view(CaptureScreen, "capture")),
+    ft.Route(path="streams", component=_tool_view(StreamsScreen, "streams")),
+    ft.Route(path="join", component=_tool_view(JoinScreen, "join")),
     ft.Route(path="result", component=_tool_view(ResultScreen, "result")),
 ]
 

@@ -20,6 +20,7 @@ class ControllerMethods:
     pick_media_for: Callable[[str], Any] = lambda target: None
     start_job: Callable[[Job], Any] = lambda job: None
     cancel_job: Callable[[str], Any] = lambda job_id: None
+    toggle_pause_job: Callable[[], None] = lambda: None
     delete_job: Callable[[str], None] = lambda job_id: None
     restore_job: Callable[[Job], None] = lambda job: None
     retry_job: Callable[[Job], Any] = lambda job: None

@@ -21,6 +21,9 @@ ALL_ROUTES = [
     "/audio",
     "/probe",
     "/engine-info",
+    "/capture",
+    "/streams",
+    "/join",
     "/result",
 ]
 

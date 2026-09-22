@@ -19,6 +19,7 @@ import os
 import shutil
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from errno import EAGAIN
 from fractions import Fraction
 from pathlib import Path
@@ -28,9 +29,130 @@ import av
 from av.error import FFmpegError
 from av.filter.loudnorm import stats as loudnorm_stats
 
-from core.state import MediaInfo, MediaStreamInfo
+from core.state import ChapterInfo, MediaInfo, MediaStreamInfo
 
 logger = logging.getLogger("EngineService")
+
+# Stream disposition flags surfaced in the dossier (av.stream.Disposition names)
+_DISPOSITION_FLAG_NAMES = (
+    "default",
+    "original",
+    "comment",
+    "forced",
+    "hearing_impaired",
+    "visual_impaired",
+    "attached_pic",
+    "captions",
+)
+
+
+# ── Subtitle cue model + hand writers (no muxer dependency) ──────────────
+
+
+@dataclass
+class SubCue:
+    """One extracted subtitle cue. Times in seconds; ``text`` uses real newlines."""
+
+    start_s: float
+    end_s: float
+    text: str
+
+
+def _fmt_srt_time(sec: float) -> str:
+    """00:00:02,000 style (SRT)."""
+    if sec < 0:
+        sec = 0.0
+    ms = int(round(sec * 1000))
+    h, ms = divmod(ms, 3_600_000)
+    m, ms = divmod(ms, 60_000)
+    s, ms = divmod(ms, 1000)
+    return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
+
+
+def _fmt_vtt_time(sec: float) -> str:
+    """00:00:02.000 style (WebVTT)."""
+    if sec < 0:
+        sec = 0.0
+    ms = int(round(sec * 1000))
+    h, ms = divmod(ms, 3_600_000)
+    m, ms = divmod(ms, 60_000)
+    s, ms = divmod(ms, 1000)
+    return f"{h:02d}:{m:02d}:{s:02d}.{ms:03d}"
+
+
+def _fmt_ass_time(sec: float) -> str:
+    """0:00:02.00 style (ASS, centiseconds)."""
+    if sec < 0:
+        sec = 0.0
+    cs = int(round(sec * 100))
+    h, cs = divmod(cs, 360_000)
+    m, cs = divmod(cs, 6_000)
+    s, cs = divmod(cs, 100)
+    return f"{h:d}:{m:02d}:{s:02d}.{cs:02d}"
+
+
+_ASS_HEADER = (
+    "[Script Info]\n"
+    "ScriptType: v4.00+\n"
+    "PlayResX: 384\n"
+    "PlayResY: 288\n"
+    "ScaledBorderAndShadow: yes\n"
+    "\n"
+    "[V4+ Styles]\n"
+    "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, "
+    "BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, "
+    "BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n"
+    "Style: Default,Arial,16,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,0,0,0,0,"
+    "100,100,0,0,1,1,1,2,10,10,10,1\n"
+    "\n"
+    "[Events]\n"
+    "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
+)
+
+
+def _write_srt(path: str, cues: list[SubCue]) -> None:
+    blocks = []
+    for i, c in enumerate(cues, start=1):
+        blocks.append(f"{i}\n{_fmt_srt_time(c.start_s)} --> {_fmt_srt_time(c.end_s)}\n{c.text}\n")
+    Path(path).write_text("\n".join(blocks) + ("\n" if blocks else ""), encoding="utf-8")
+
+
+def _write_vtt(path: str, cues: list[SubCue]) -> None:
+    blocks = []
+    for c in cues:
+        blocks.append(f"{_fmt_vtt_time(c.start_s)} --> {_fmt_vtt_time(c.end_s)}\n{c.text}\n")
+    Path(path).write_text("WEBVTT\n\n" + "\n".join(blocks) + ("\n" if blocks else ""), encoding="utf-8")
+
+
+def _write_ass(path: str, cues: list[SubCue]) -> None:
+    lines = [_ASS_HEADER]
+    for c in cues:
+        # ASS carries wraps as \N; styles from the source are intentionally dropped.
+        text = c.text.replace("\r\n", "\n").replace("\n", "\\N")
+        lines.append(
+            f"Dialogue: 0,{_fmt_ass_time(c.start_s)},{_fmt_ass_time(c.end_s)},"
+            f"Default,,0,0,0,,{text}\n"
+        )
+    Path(path).write_text("".join(lines), encoding="utf-8")
+
+
+def _mjpeg_bytes(frame: av.VideoFrame, width: int) -> bytes:
+    """Encode one frame as an in-memory JPEG (Cut screen thumbnail strip).
+
+    Mirrors VideoFrame.save's encoder choice (mjpeg/yuvj420p) but targets
+    bytes instead of a file — no disk round-trip.
+    """
+    w = max(2, int(width) // 2 * 2)
+    h = max(2, int(frame.height * (w / frame.width)) // 2 * 2)
+    rf = frame.reformat(width=w, height=h, format="yuvj420p")
+    ctx = av.CodecContext.create("mjpeg", "w")
+    ctx.width = w
+    ctx.height = h
+    ctx.pix_fmt = "yuvj420p"
+    ctx.time_base = Fraction(1, 25)
+    packets = list(ctx.encode(rf))
+    packets.extend(ctx.encode(None))
+    return b"".join(bytes(p) for p in packets)
 
 # Fine-grained time base for the video filter pipeline: setpts at speed≠1 on a
 # coarse stream tb (e.g. 1/30) quantizes to duplicate pts → non-monotonic dts →
@@ -112,23 +234,116 @@ def _drain_graph(graph: av.filter.Graph) -> list:
 
 
 def _build_video_filter_graph(
-    frame: av.VideoFrame, rotation: int, speed: float
-) -> av.filter.Graph:
-    """buffer → transpose? → setpts? → buffersink for the Filters screen transforms."""
-    g = av.filter.Graph()
-    nodes: list = [g.add_buffer(template=frame, time_base=_FINE_VIDEO_TB)]
+    frame: av.VideoFrame,
+    rotation: int,
+    speed: float,
+    *,
+    crop_aspect: str | None = None,
+    eq: dict | None = None,
+    denoise: str | None = None,
+    sharpen: int | None = None,
+    watermark: dict | None = None,
+) -> av.filter.Graph | None:
+    """buffer → crop?/eq?/denoise?/sharpen? → [overlay] → transpose?/setpts? → sink.
+
+    Every presence-sensitive node is gated on this build's ``available_filters()``
+    (e.g. eq/hqdn3d are compiled OUT here); returns None when no node applies so
+    the caller keeps the plain reformat path.
+    """
+    avail = available_filters()
+
+    middle: list = []
+    base_w = frame.width  # post-crop width — sizes the watermark overlay
+
+    if crop_aspect and crop_aspect != "original" and "crop" in avail:
+        cw, ch = _crop_dims(frame.width, frame.height, crop_aspect)
+        if (cw, ch) != (frame.width, frame.height):
+            middle.append(("crop", f"{cw}:{ch}"))
+            base_w = cw
+
+    if eq and "eq" in avail:
+        bits = []
+        brightness = float(eq.get("brightness", 0.0) or 0.0)
+        contrast = float(eq.get("contrast", 1.0) or 1.0)
+        saturation = float(eq.get("saturation", 1.0) or 1.0)
+        if abs(brightness) > 1e-6:
+            bits.append(f"brightness={brightness:+.3f}")
+        if abs(contrast - 1.0) > 1e-6:
+            bits.append(f"contrast={contrast:.3f}")
+        if abs(saturation - 1.0) > 1e-6:
+            bits.append(f"saturation={saturation:.3f}")
+        if bits:
+            middle.append(("eq", ":".join(bits)))
+
+    if denoise and denoise != "off":
+        # hqdn3d is preferred but compiled out of this build; nlmeans and
+        # atadenoise are the verified fallbacks.
+        if "hqdn3d" in avail:
+            middle.append(
+                ("hqdn3d", "3:2:6:4" if denoise == "low" else "6:4:12:8")
+            )
+        elif "nlmeans" in avail:
+            middle.append(("nlmeans", f"s={'3' if denoise == 'low' else '7'}"))
+        elif "atadenoise" in avail:
+            middle.append(("atadenoise", None))
+        else:
+            logger.info("Denoise requested but no denoise filter is available")
+
+    if sharpen and int(sharpen) > 0 and "unsharp" in avail:
+        amount = 0.5 + (int(sharpen) / 100.0) * 1.5  # slider 0..100 → 0.5..2.0
+        middle.append(("unsharp", f"5:5:{amount:.2f}:5:5:0"))
+
     rot = rotation % 360
+    tail: list = []
     if rot == 90:
-        nodes.append(g.add("transpose", "clock"))
+        tail.append(("transpose", "clock"))
     elif rot == 180:
-        nodes.append(g.add("transpose", "clock"))
-        nodes.append(g.add("transpose", "clock"))
+        tail.append(("transpose", "clock"))
+        tail.append(("transpose", "clock"))
     elif rot == 270:
-        nodes.append(g.add("transpose", "cclock"))
+        tail.append(("transpose", "cclock"))
     if abs(speed - 1.0) > 1e-6:
-        nodes.append(g.add("setpts", f"PTS/{speed}"))
-    nodes.append(g.add("buffersink"))
-    g.link_nodes(*nodes)
+        tail.append(("setpts", f"PTS/{speed}"))
+
+    # Watermark: movie (static PNG) → scale → overlay's second input.
+    wm_ok = False
+    wm_path = ""
+    wm_w = 8
+    position = "br"
+    if watermark and "movie" in avail and "overlay" in avail:
+        candidate = str(watermark.get("path") or "")
+        if candidate and Path(candidate).exists():
+            pct = max(2, min(60, int(watermark.get("width_pct", 20) or 20)))
+            wm_path = candidate
+            wm_w = max(2, (base_w * pct) // 100)
+            position = str(watermark.get("position", "br"))
+            wm_ok = True
+        elif candidate:
+            logger.warning("Watermark image missing: %s", candidate)
+
+    if not middle and not tail and not wm_ok:
+        return None  # everything gated off / all defaults — plain reformat path
+
+    g = av.filter.Graph()
+    src = g.add_buffer(template=frame, time_base=_FINE_VIDEO_TB)
+
+    main_pre: list = [src]
+    for name, args in middle:
+        main_pre.append(g.add(name) if args is None else g.add(name, args))
+    tail_nodes = [g.add(name) if args is None else g.add(name, args) for name, args in tail]
+    sink = g.add("buffersink")
+
+    if wm_ok:
+        overlay = g.add("overlay", _WM_POSITIONS.get(position, _WM_POSITIONS["br"]))
+        g.link_nodes(*main_pre, overlay)  # main path → overlay input 0
+        movie = g.add("movie", filename=wm_path)
+        wm_scale = g.add("scale", f"{wm_w}:-1")
+        movie.link_to(wm_scale)
+        wm_scale.link_to(overlay, input_idx=1)  # watermark → overlay input 1
+        g.link_nodes(overlay, *tail_nodes, sink)
+    else:
+        g.link_nodes(*main_pre, *tail_nodes, sink)
+
     g.configure()
     return g
 
@@ -167,6 +382,77 @@ def _discard_cancelled(path: str, *, directory: bool = False) -> None:
             os.remove(path)
     except OSError as exc:
         logger.warning("Failed to remove cancelled output %s: %s", path, exc)
+
+
+# Queue-pause switch: wired once at startup to the JobQueue's Event (single
+# worker thread, so a module-level hook beats threading a param through every
+# operation). Checked at each operation's packet loop top.
+ENGINE_PAUSE_EVENT: Event | None = None
+
+
+def set_pause_event(evt: Event | None) -> None:
+    """Install (or clear) the queue's pause event for the engine hooks."""
+    global ENGINE_PAUSE_EVENT
+    ENGINE_PAUSE_EVENT = evt
+
+
+def _pause_hook(cancel_event: Event | None = None) -> None:
+    """Block between packets while paused; a cancel always wins."""
+    evt = ENGINE_PAUSE_EVENT
+    if evt is None or not evt.is_set():
+        return
+    logger.info("Engine paused")
+    while evt.is_set():
+        if cancel_event is not None and cancel_event.is_set():
+            return
+        time.sleep(0.1)
+    logger.info("Engine resumed")
+
+
+# Filter availability — cached per process so the Filters screen can disable
+# features (naming the missing filter) instead of failing mid-job.
+_FILTERS_AVAIL: set[str] | None = None
+
+
+def available_filters() -> set[str]:
+    """Names of every filter compiled into this FFmpeg build (cached)."""
+    global _FILTERS_AVAIL
+    if _FILTERS_AVAIL is None:
+        try:
+            _FILTERS_AVAIL = set(av.filter.filters_available or [])
+        except Exception as exc:  # noqa: BLE001 — degrade to empty (all gated off)
+            logger.warning("Filter enumeration failed: %s", exc)
+            _FILTERS_AVAIL = set()
+    return _FILTERS_AVAIL
+
+
+def _crop_dims(width: int, height: int, aspect: str) -> tuple[int, int]:
+    """Center-crop dimensions for an aspect chip ("16:9", "1:1", "4:5").
+
+    Crops (never scales) so quality is untouched; even-aligned for yuv420p.
+    """
+    try:
+        rw, rh = (int(p) for p in aspect.split(":", 1))
+        target = rw / rh
+    except (ValueError, ZeroDivisionError):
+        return width, height
+    current = width / height
+    if current > target:
+        cw, ch = int(height * target), height
+    else:
+        cw, ch = width, int(width / target)
+    cw = max(2, (cw // 2) * 2)
+    ch = max(2, (ch // 2) * 2)
+    return min(cw, width), min(ch, height)
+
+
+_WM_POSITIONS = {
+    "br": "main_w-overlay_w-10:main_h-overlay_h-10",
+    "bl": "10:main_h-overlay_h-10",
+    "tl": "10:10",
+    "tr": "main_w-overlay_w-10:10",
+    "center": "(main_w-overlay_w)/2:(main_h-overlay_h)/2",
+}
 
 
 class EngineService:
@@ -214,9 +500,22 @@ class EngineService:
                     if stream.duration and stream.time_base
                     else None
                 )
-                s_bitrate = stream.bit_rate or (
+                s_bitrate = getattr(stream, "bit_rate", None) or (
                     stream.codec_context.bit_rate if stream.codec_context else None
                 )
+
+                # DataStream/AttachmentStream have no bit_rate attribute —
+                # files with chapter tracks used to crash the dossier here.
+                disp_obj = getattr(stream, "disposition", None)
+                disp_flags: dict[str, bool] = {}
+                if disp_obj is not None:
+                    # Disposition is an IntFlag: attribute access returns the
+                    # CLASS member (always truthy) — test bits, not attributes.
+                    disp_bits = int(disp_obj)
+                    for flag_name in _DISPOSITION_FLAG_NAMES:
+                        flag_bit = int(getattr(av.stream.Disposition, flag_name, 0))
+                        if flag_bit and disp_bits & flag_bit:
+                            disp_flags[flag_name] = True
 
                 s_info = MediaStreamInfo(
                     index=idx,
@@ -230,6 +529,7 @@ class EngineService:
                     metadata={str(k): str(v) for k, v in stream.metadata.items()}
                     if stream.metadata
                     else {},
+                    disposition=disp_flags,
                 )
 
                 if stype == "video":
@@ -249,6 +549,37 @@ class EngineService:
 
                 streams_info.append(s_info)
 
+            # Rotation lives in the display matrix — no stream-level accessor
+            # exists on this build, so decode ONE frame and read frame.rotation.
+            first_video = next((s for s in streams_info if s.stream_type == "video"), None)
+            if first_video is not None and container.streams.video:
+                try:
+                    for _pkt in container.demux([container.streams.video[0]]):
+                        _frames = _pkt.decode()
+                        if _frames:
+                            first_video.rotation = int(getattr(_frames[0], "rotation", 0) or 0)
+                        break
+                except Exception as exc:  # noqa: BLE001 — badge is cosmetic
+                    logger.debug("Rotation probe failed: %s", exc)
+
+            # Chapters (container dicts → ChapterInfo with seconds)
+            chapters: list[ChapterInfo] = []
+            try:
+                for raw_ch in container.chapters() or []:
+                    tb = raw_ch.get("time_base") or Fraction(1, 1000)
+                    ch_meta = raw_ch.get("metadata") or {}
+                    ch_id = int(raw_ch.get("id", 0))
+                    chapters.append(
+                        ChapterInfo(
+                            id=ch_id,
+                            title=str(ch_meta.get("title") or f"Chapter {ch_id + 1}"),
+                            start_s=float(raw_ch.get("start", 0) * tb),
+                            end_s=float(raw_ch.get("end", 0) * tb),
+                        )
+                    )
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("Chapter read failed: %s", exc)
+
             # Generate formatted overview text
             summary_lines = [
                 f"File: {p.name} ({file_size // 1024} KB)",
@@ -258,8 +589,10 @@ class EngineService:
             ]
             for s in streams_info:
                 if s.stream_type == "video":
+                    rot = f", rot {s.rotation}°" if s.rotation else ""
                     summary_lines.append(
-                        f"  #{s.index} Video: {s.codec_name} ({s.width}x{s.height}, {s.fps:.1f} fps, {s.pix_fmt})"
+                        f"  #{s.index} Video: {s.codec_name} "
+                        f"({s.width}x{s.height}, {s.fps or 0:.1f} fps, {s.pix_fmt}{rot})"
                     )
                 elif s.stream_type == "audio":
                     summary_lines.append(
@@ -281,6 +614,7 @@ class EngineService:
             format_long_name=fmt_long,
             streams=streams_info,
             metadata=metadata,
+            chapters=chapters,
             raw_dump=raw_dump,
         )
 
@@ -298,10 +632,15 @@ class EngineService:
         speed: float = 1.0,
         volume_pct: int = 100,
         rotation: int = 0,
+        crop_aspect: str | None = None,
+        eq: dict | None = None,
+        denoise: str | None = None,
+        sharpen: int | None = None,
+        watermark: dict | None = None,
         on_progress: Callable[[float, str], None] | None = None,
         cancel_event: Event | None = None,
     ) -> str:
-        """Transcode video/audio with quality, scaling, speed, volume, and rotation controls."""
+        """Transcode video/audio with quality, scaling, filters, and transforms."""
         inp = av.open(input_path, "r")
         out = av.open(output_path, "w")
 
@@ -309,7 +648,15 @@ class EngineService:
             in_video = inp.streams.video[0] if inp.streams.video else None
             in_audio = inp.streams.audio[0] if inp.streams.audio else None
 
-            need_vfilter = rotation % 360 != 0 or abs(speed - 1.0) > 1e-6
+            need_vfilter = (
+                rotation % 360 != 0
+                or abs(speed - 1.0) > 1e-6
+                or bool(crop_aspect and crop_aspect != "original")
+                or bool(eq)
+                or bool(denoise and denoise != "off")
+                or bool(sharpen)
+                or bool(watermark)
+            )
             need_afilter = volume_pct != 100 or abs(speed - 1.0) > 1e-6
             video_graph: av.filter.Graph | None = None
             audio_graph: av.filter.Graph | None = None
@@ -335,6 +682,19 @@ class EngineService:
                 out_video = out.add_stream(chosen_vcodec, rate=eff_rate)
                 target_w = scale_width or in_video.width
                 target_h = scale_height or in_video.height
+                # Crop defines the final size when no explicit scale is set —
+                # otherwise the post-graph reformat would upscale right back.
+                if (
+                    crop_aspect
+                    and crop_aspect != "original"
+                    and scale_width is None
+                    and scale_height is None
+                ):
+                    target_w, target_h = _crop_dims(
+                        in_video.width or target_w,
+                        in_video.height or target_h,
+                        crop_aspect,
+                    )
                 if rotation % 180 == 90:  # 90°/270° transposes swap width/height
                     target_w, target_h = target_h, target_w
                 # Dimensions must be even
@@ -369,6 +729,7 @@ class EngineService:
             streams_to_demux = [s for s in (in_video, in_audio) if s]
 
             for packet in inp.demux(streams_to_demux):
+                _pause_hook(cancel_event)
                 if cancel_event and cancel_event.is_set():
                     logger.info("Transcode cancelled by user.")
                     break
@@ -386,7 +747,16 @@ class EngineService:
                             processed_pts = frame.time
 
                         if need_vfilter and video_graph is None:
-                            video_graph = _build_video_filter_graph(frame, rotation, speed)
+                            video_graph = _build_video_filter_graph(
+                                frame,
+                                rotation,
+                                speed,
+                                crop_aspect=crop_aspect,
+                                eq=eq,
+                                denoise=denoise,
+                                sharpen=sharpen,
+                                watermark=watermark,
+                            )
 
                         out_frames = [frame]
                         if video_graph is not None:
@@ -547,6 +917,7 @@ class EngineService:
             processed_pts = 0.0
 
             for packet in inp.demux([s for s in (in_video, in_audio) if s]):
+                _pause_hook(cancel_event)
                 if cancel_event and cancel_event.is_set():
                     break
                 if packet.dts is None:
@@ -629,6 +1000,29 @@ class EngineService:
         )
 
     @staticmethod
+    def _snap_start_to_keyframe(video_stream, start_s: float) -> float:
+        """Nearest keyframe at-or-before ``start_s`` (stream-copy must start on one).
+
+        Returns ``start_s`` unchanged when the container has no usable index —
+        the caller keeps today's behavior as the fallback.
+        """
+        try:
+            entries = video_stream.index_entries
+            if not entries:
+                return start_s
+            tb = float(video_stream.time_base)
+            idx = entries.search_timestamp(int(start_s / tb), backward=True)
+            if idx is None or idx < 0:
+                return start_s
+            snapped = float(entries[idx].timestamp * tb)
+            if snapped < 0:
+                return 0.0
+            return min(snapped, start_s)
+        except Exception as exc:  # noqa: BLE001 — snap is best-effort
+            logger.debug("Keyframe snap unavailable: %s", exc)
+            return start_s
+
+    @staticmethod
     def _cut_stream_copy(
         input_path: str,
         output_path: str,
@@ -648,21 +1042,35 @@ class EngineService:
                     stream_map[s] = out_s
 
             # Seek to start timestamp
-            seek_target = int(start_s * av.time_base)
+            # Instant cuts must begin on a keyframe — snap and tell the user.
+            actual_start = start_s
+            video_src = inp.streams.video[0] if inp.streams.video else None
+            if video_src is not None:
+                snapped = EngineService._snap_start_to_keyframe(video_src, start_s)
+                if snapped < start_s - 1e-6:
+                    actual_start = snapped
+                    if on_progress:
+                        on_progress(
+                            0.0,
+                            f"Start snapped {start_s:.2f}s → {actual_start:.2f}s for instant cut",
+                        )
+
+            seek_target = int(actual_start * av.time_base)
             inp.seek(seek_target, backward=True)
 
-            duration = max(0.1, end_s - start_s)
+            duration = max(0.1, end_s - actual_start)
             last_report = 0.0
             start_pts_map: dict[int, int] = {}
 
             for packet in inp.demux(list(stream_map.keys())):
+                _pause_hook(cancel_event)
                 if cancel_event and cancel_event.is_set():
                     break
                 if packet.pts is None:
                     continue
 
                 pkt_time = float(packet.pts * packet.stream.time_base)
-                if pkt_time < start_s:
+                if pkt_time < actual_start:
                     continue
                 if pkt_time > end_s:
                     break
@@ -682,7 +1090,7 @@ class EngineService:
                 now = time.monotonic()
                 if on_progress and (now - last_report >= 0.25):
                     last_report = now
-                    prog = min(0.99, max(0.01, (pkt_time - start_s) / duration))
+                    prog = min(0.99, max(0.01, (pkt_time - actual_start) / duration))
                     on_progress(prog, f"Copying cut... {int(prog * 100)}%")
 
             if on_progress:
@@ -736,6 +1144,7 @@ class EngineService:
             last_report = 0.0
 
             for packet in inp.demux([s for s in (in_video, in_audio) if s]):
+                _pause_hook(cancel_event)
                 if cancel_event and cancel_event.is_set():
                     break
 
@@ -922,6 +1331,7 @@ class EngineService:
                         _encode(f)
 
             for packet in inp.demux([in_audio]):
+                _pause_hook(cancel_event)
                 if cancel_event and cancel_event.is_set():
                     break
                 for frame in packet.decode():
@@ -1007,6 +1417,7 @@ class EngineService:
             inp.seek(int(timestamps[0] * av.time_base), backward=True)
             done = False
             for packet in inp.demux([v_stream]):
+                _pause_hook(cancel_event)
                 if cancel_event and cancel_event.is_set():
                     break
                 for frame in packet.decode():
@@ -1094,6 +1505,7 @@ class EngineService:
             end_s = start_s + duration_s
 
             for packet in inp.demux([in_video]):
+                _pause_hook(cancel_event)
                 if cancel_event and cancel_event.is_set():
                     break
                 segment_done = False
@@ -1176,4 +1588,654 @@ class EngineService:
             _discard_cancelled(output_path)
             raise InterruptedError("GIF creation cancelled")
 
+        return output_path
+
+    @staticmethod
+    def extract_subtitles(
+        input_path: str,
+        output_path: str,
+        stream_index: int = 0,
+        format_name: str = "srt",
+        on_progress: Callable[[float, str], None] | None = None,
+        cancel_event: Event | None = None,
+    ) -> str:
+        """Extract a text subtitle stream to SRT/ASS/WebVTT via hand writers.
+
+        Timing comes from SubtitleSet empirically verified on this build:
+        ``pts`` is microseconds (AV_TIME_BASE), ``start_display_time`` is a
+        millisecond offset, and ``end_display_time`` is a millisecond DURATION.
+        Bitmap (image-based) subtitle tracks raise a clear error — OCR is out
+        of scope. Writers are plain text, so no muxer availability gate.
+        """
+        writers = {"srt": _write_srt, "ass": _write_ass, "webvtt": _write_vtt, "vtt": _write_vtt}
+        writer = writers.get(format_name.lower())
+        if writer is None:
+            raise ValueError(f"Unsupported subtitle format: {format_name}")
+
+        inp = av.open(input_path, "r")
+        try:
+            subs = inp.streams.subtitles
+            if not subs:
+                raise ValueError("This file has no subtitle streams to extract")
+            if stream_index < 0 or stream_index >= len(subs):
+                logger.warning(
+                    "Subtitle stream index %d out of range (%d streams) — using first",
+                    stream_index,
+                    len(subs),
+                )
+                stream_index = 0
+            sub = subs[stream_index]
+
+            cues: list[SubCue] = []
+            cancelled = False
+            for pkt in inp.demux([sub]):
+                _pause_hook(cancel_event)
+                if cancel_event and cancel_event.is_set():
+                    cancelled = True
+                    break
+                if pkt.size == 0:
+                    continue
+                ss = sub.codec_context.decode2(pkt)
+                if ss is None:
+                    continue
+
+                text_parts: list[str] = []
+                for rect in ss.rects:
+                    if getattr(rect, "type", None) == b"bitmap":
+                        raise ValueError(
+                            "This track has image-based subtitles (PGS/VobSub) — "
+                            "text extraction needs OCR, which isn't supported"
+                        )
+                    dialogue = getattr(rect, "dialogue", None)
+                    if dialogue:
+                        text_parts.append(
+                            dialogue.decode("utf-8", errors="replace")
+                            if isinstance(dialogue, bytes)
+                            else str(dialogue)
+                        )
+                if not text_parts:
+                    continue
+
+                start_s = (ss.pts or 0) / 1_000_000 + (ss.start_display_time or 0) / 1000
+                dur_s = (ss.end_display_time or 0) / 1000
+                if dur_s <= 0:
+                    logger.debug("Cue without duration at %.2fs — defaulting to 2s", start_s)
+                    dur_s = 2.0
+                cues.append(
+                    SubCue(start_s=start_s, end_s=start_s + dur_s, text="\n".join(text_parts))
+                )
+
+                if on_progress and len(cues) % 25 == 0:
+                    on_progress(0.5, f"Extracted {len(cues)} cues…")
+
+            if cancelled:
+                raise InterruptedError("Subtitle extraction cancelled")
+
+            if not cues:
+                raise ValueError("No text cues found in that subtitle stream")
+
+            writer(output_path, cues)
+            if on_progress:
+                on_progress(1.0, f"Wrote {len(cues)} cues")
+        finally:
+            inp.close()
+
+        if cancel_event and cancel_event.is_set():
+            _discard_cancelled(output_path)
+            raise InterruptedError("Subtitle extraction cancelled")
+
+        return output_path
+
+    @staticmethod
+    def thumbnail_strip(input_path: str, times: list[float], width: int = 96) -> list[bytes]:
+        """JPEG bytes for each timestamp — single decode pass, in-memory.
+
+        Missing timestamps are skipped, so the result may be shorter than
+        ``times``; order of successes follows the requested order.
+        """
+        if not times:
+            return []
+        order = sorted(range(len(times)), key=lambda i: times[i])
+        results: dict[int, bytes] = {}
+        inp = av.open(input_path, "r")
+        try:
+            v = inp.streams.video[0] if inp.streams.video else None
+            if not v:
+                return []
+            inp.seek(int(max(0.0, times[order[0]] - 1.0) * av.time_base), backward=True)
+            idx = 0
+            done = False
+            for packet in inp.demux([v]):
+                for frame in packet.decode():
+                    t = frame.time
+                    while idx < len(order) and t is not None and t >= times[order[idx]]:
+                        try:
+                            results[order[idx]] = _mjpeg_bytes(frame, width)
+                        except Exception as exc:  # noqa: BLE001 — cosmetic
+                            logger.debug(
+                                "Thumb at %.2fs failed: %s", times[order[idx]], exc
+                            )
+                        idx += 1
+                        if idx >= len(order):
+                            done = True
+                            break
+                    if done:
+                        break
+                if done:
+                    break
+        finally:
+            inp.close()
+        return [results[i] for i in range(len(times)) if i in results]
+
+    @staticmethod
+    def keyframe_times(input_path: str, limit: int = 24) -> list[float]:
+        """Keyframe timestamps in seconds (sampled to ``limit``), ascending.
+
+        Drives the Cut screen's instant-cut jump chips; empty list when the
+        container has no usable index (MPEG-TS etc.) — UI degrades gracefully.
+        """
+        try:
+            with av.open(input_path, "r") as inp:
+                v = inp.streams.video[0] if inp.streams.video else None
+                if v is None:
+                    return []
+                entries = v.index_entries
+                if not entries:
+                    return []
+                keys = [e for e in entries if e.is_keyframe]
+                if not keys:
+                    return []
+                step = max(1, len(keys) // max(1, limit))
+                sampled = keys[::step][:limit]
+                tb = v.time_base
+                return sorted(float(e.timestamp * tb) for e in sampled)
+        except Exception as exc:  # noqa: BLE001 — markers are cosmetic
+            logger.debug("Keyframe index unavailable: %s", exc)
+            return []
+
+    @staticmethod
+    def remux(
+        input_path: str,
+        output_path: str,
+        drop_indices: list[int] | None = None,
+        on_progress: Callable[[float, str], None] | None = None,
+        cancel_event: Event | None = None,
+    ) -> str:
+        """Losslessly copy selected streams into a Matroska file (track picker).
+
+        ``drop_indices`` are source stream indexes to EXCLUDE (e.g. an unwanted
+        audio track). ``add_stream_from_template`` already carries codecpar,
+        metadata (incl. language) and dispositions across — chapters are
+        copied explicitly. Cancel follows the M1 pattern: remove + InterruptedError.
+        """
+        drop = set(drop_indices or [])
+        inp = av.open(input_path, "r")
+        out = av.open(output_path, "w", format="matroska")
+        try:
+            stream_map = {}
+            for s in inp.streams:
+                if s.index in drop or s.type not in ("video", "audio", "subtitle"):
+                    continue
+                out_s = out.add_stream_from_template(s, opaque=True)
+                # add_stream_from_template is a NO-OP for metadata/disposition
+                # on this build (verified: both come across empty) — copy them
+                # explicitly before the header is written. Disposition is an
+                # IntFlag, so int() carries the exact bit set.
+                out_s.metadata.update(s.metadata)
+                try:
+                    out_s.disposition = int(s.disposition)
+                except Exception as exc:  # noqa: BLE001 — flags are best-effort
+                    logger.debug("Disposition copy skipped: %s", exc)
+                stream_map[s] = out_s
+            if not stream_map:
+                raise ValueError("Nothing to keep — every stream was excluded")
+
+            try:
+                out.set_chapters(inp.chapters())
+            except Exception as exc:  # noqa: BLE001 — chapters are best-effort
+                logger.debug("Chapter copy skipped: %s", exc)
+
+            total_s = (float(inp.duration or 0) / float(av.time_base)) if inp.duration else 0.0
+            last_report = 0.0
+
+            for packet in inp.demux(list(stream_map)):
+                _pause_hook(cancel_event)
+                if cancel_event and cancel_event.is_set():
+                    break
+                if packet.size == 0 or packet.pts is None:
+                    continue
+                pkt_time = float(packet.pts * packet.stream.time_base)
+                packet.stream = stream_map[packet.stream]
+                out.mux(packet)
+
+                now = time.monotonic()
+                if on_progress and (now - last_report >= 0.25):
+                    last_report = now
+                    prog = (
+                        min(0.99, max(0.01, pkt_time / total_s)) if total_s > 0 else 0.5
+                    )
+                    on_progress(prog, f"Copying streams... {int(prog * 100)}%")
+
+            if on_progress:
+                on_progress(1.0, "Streams copied")
+        finally:
+            inp.close()
+            out.close()
+
+        if cancel_event and cancel_event.is_set():
+            _discard_cancelled(output_path)
+            raise InterruptedError("Stream copy cancelled")
+
+        return output_path
+
+    @staticmethod
+    def concat(
+        paths: list[str],
+        output_path: str,
+        container_format: str | None = "mp4",
+        transition: str = "cut",
+        fade_s: float = 0.5,
+        on_progress: Callable[[float, str], None] | None = None,
+        cancel_event: Event | None = None,
+    ) -> str:
+        """Join clips end-to-end. Identical streams → lossless stream-copy;
+        anything else → uniform re-encode (scaled to the first clip's shape)."""
+        if not paths or len(paths) < 2:
+            raise ValueError("Pick at least two files to join")
+        if transition != "cut":
+            raise ValueError(f"Unsupported transition: {transition}")
+
+        infos = [EngineService.probe(p) for p in paths]
+        if EngineService._concat_copyable(infos):
+            return EngineService._concat_stream_copy(
+                paths, output_path, container_format, on_progress, cancel_event
+            )
+        return EngineService._concat_reencode(
+            paths, infos, output_path, container_format, on_progress, cancel_event
+        )
+
+    @staticmethod
+    def _concat_copyable(infos: list[MediaInfo]) -> bool:
+        """True when every clip shares stream layout + codec parameters."""
+        first = infos[0]
+        first_layout = [s.stream_type for s in first.streams]
+        for other in infos[1:]:
+            if [s.stream_type for s in other.streams] != first_layout:
+                return False
+            fv, ov = first.video_stream, other.video_stream
+            if (fv is None) != (ov is None):
+                return False
+            if fv is not None and ov is not None:
+                if fv.codec_name != ov.codec_name:
+                    return False
+                if (fv.width, fv.height) != (ov.width, ov.height):
+                    return False
+                if abs((fv.fps or 0) - (ov.fps or 0)) > 0.05:
+                    return False
+            fa, oa = first.audio_stream, other.audio_stream
+            if (fa is None) != (oa is None):
+                return False
+            if fa is not None and oa is not None:
+                if fa.codec_name != oa.codec_name:
+                    return False
+                if fa.channels != oa.channels or fa.sample_rate != oa.sample_rate:
+                    return False
+        return True
+
+    @staticmethod
+    def _concat_stream_copy(
+        paths: list[str],
+        output_path: str,
+        container_format: str | None,
+        on_progress: Callable[[float, str], None] | None,
+        cancel_event: Event | None,
+    ) -> str:
+        """Lossless join: packets are rescaled onto the first clip's timeline
+        and shifted so each file starts exactly one tick after the previous
+        file's last packet (no duration-rounding gaps or overlaps)."""
+        out = av.open(output_path, "w", format=container_format)
+        cancelled = False
+        try:
+            out_by_pos: list = []
+            tb_by_pos: list = []
+            last_pts: dict[int, int] = {}
+
+            for fi, path in enumerate(paths):
+                if cancel_event and cancel_event.is_set():
+                    cancelled = True
+                    break
+                inp = av.open(path, "r")
+                try:
+                    src_streams = [
+                        s for s in inp.streams if s.type in ("video", "audio", "subtitle")
+                    ]
+                    if fi == 0:
+                        for s in src_streams:
+                            out_by_pos.append(out.add_stream_from_template(s, opaque=True))
+                            tb_by_pos.append(s.time_base or Fraction(1, 1000))
+
+                    # Boundary constant per stream: land one tick past the previous
+                    # file's final pts (computed on the FIRST packet of this file).
+                    shift: dict[int, int] = {}
+                    first_native: dict[int, int] = {}
+
+                    for packet in inp.demux(src_streams):
+                        if cancel_event and cancel_event.is_set():
+                            cancelled = True
+                            break
+                        if packet.size == 0 or (packet.pts is None and packet.dts is None):
+                            continue
+                        pos = src_streams.index(packet.stream)
+                        target_tb = tb_by_pos[pos]
+                        if packet.time_base != target_tb:
+                            packet.rescale_ts(target_tb)
+
+                        key = pos
+                        if key not in first_native:
+                            first_native[key] = packet.pts or 0
+                            prev = last_pts.get(key)
+                            if prev is not None:
+                                shift[key] = prev + 1 - first_native[key]
+                            else:
+                                shift[key] = 0
+                        delta = shift.get(key, 0)
+                        if packet.pts is not None:
+                            packet.pts = packet.pts + delta
+                        if packet.dts is not None:
+                            packet.dts = packet.dts + delta
+                        if packet.pts is not None:
+                            cur = last_pts.get(pos)
+                            last_pts[pos] = packet.pts if cur is None else max(cur, packet.pts)
+
+                        packet.stream = out_by_pos[pos]
+                        out.mux(packet)
+
+                    if on_progress:
+                        on_progress(
+                            min(0.95, (fi + 1) / len(paths) * 0.95),
+                            f"Joining {Path(path).name}… ({fi + 1}/{len(paths)})",
+                        )
+                finally:
+                    inp.close()
+
+            if not cancelled and on_progress:
+                on_progress(1.0, f"Joined {len(paths)} clips")
+        finally:
+            out.close()
+
+        if cancelled or (cancel_event and cancel_event.is_set()):
+            _discard_cancelled(output_path)
+            raise InterruptedError("Join cancelled")
+        return output_path
+
+    @staticmethod
+    def _concat_reencode(
+        paths: list[str],
+        infos: list[MediaInfo],
+        output_path: str,
+        container_format: str | None,
+        on_progress: Callable[[float, str], None] | None,
+        cancel_event: Event | None,
+    ) -> str:
+        """Uniform re-encode join: one encoder pair for the whole chain;
+        clips with mismatched shapes are scaled to the first clip's size.
+        Sequential pts=None keeps the timeline continuous across boundaries."""
+        first = infos[0]
+        fv = first.video_stream
+        fa = first.audio_stream
+        if fv is None:
+            raise ValueError("The first file has no video stream to join")
+
+        out = av.open(output_path, "w", format=container_format)
+        cancelled = False
+        try:
+            out_fps = max(1, min(int(fv.fps or 30), 60))
+            out_w = max(2, (fv.width or 640 // 2 * 2) // 2 * 2)
+            out_h = max(2, (fv.height or 360 // 2 * 2) // 2 * 2)
+            out_video = None
+            chosen_v = "libx264" if "libx264" in av.codec.codecs_available else "h264"
+            out_video = out.add_stream(chosen_v, rate=out_fps)
+            out_video.width = out_w
+            out_video.height = out_h
+            out_video.pix_fmt = "yuv420p"
+            out_video.time_base = Fraction(1, out_fps)
+            out_video.options = {"crf": "23", "preset": "fast"}
+
+            out_audio = None
+            if fa is not None:
+                out_audio = out.add_stream("aac", rate=fa.sample_rate or 44100)
+                out_audio.layout = "stereo" if (fa.channels or 2) >= 2 else "mono"
+
+            for fi, path in enumerate(paths):
+                if cancel_event and cancel_event.is_set():
+                    cancelled = True
+                    break
+                inp = av.open(path, "r")
+                try:
+                    in_video = inp.streams.video[0] if inp.streams.video else None
+                    in_audio = inp.streams.audio[0] if inp.streams.audio else None
+                    streams = [s for s in (in_video, in_audio) if s]
+
+                    for packet in inp.demux(streams):
+                        if cancel_event and cancel_event.is_set():
+                            cancelled = True
+                            break
+                        _pause_hook(cancel_event)
+                        if in_video and packet.stream == in_video:
+                            for frame in packet.decode():
+                                if out_video is None:
+                                    break
+                                if (
+                                    frame.width != out_video.width
+                                    or frame.height != out_video.height
+                                    or frame.format.name != "yuv420p"
+                                ):
+                                    frame = frame.reformat(
+                                        width=out_video.width,
+                                        height=out_video.height,
+                                        format="yuv420p",
+                                    )
+                                frame.pts = None  # sequential across the whole chain
+                                for enc_pkt in out_video.encode(frame):
+                                    out.mux(enc_pkt)
+                        elif in_audio and packet.stream == in_audio and out_audio is not None:
+                            for frame in packet.decode():
+                                frame.pts = None
+                                for enc_pkt in out_audio.encode(frame):
+                                    out.mux(enc_pkt)
+
+                    if on_progress:
+                        on_progress(
+                            min(0.95, (fi + 1) / len(paths) * 0.95),
+                            f"Joining {Path(path).name}… ({fi + 1}/{len(paths)})",
+                        )
+                finally:
+                    inp.close()
+
+            if not cancelled:
+                if out_video:
+                    for enc_pkt in out_video.encode(None):
+                        out.mux(enc_pkt)
+                if out_audio:
+                    for enc_pkt in out_audio.encode(None):
+                        out.mux(enc_pkt)
+                if on_progress:
+                    on_progress(1.0, f"Joined {len(paths)} clips")
+        finally:
+            out.close()
+
+        if cancelled or (cancel_event and cancel_event.is_set()):
+            _discard_cancelled(output_path)
+            raise InterruptedError("Join cancelled")
+        return output_path
+
+    @staticmethod
+    def record(
+        input_url: str,
+        output_path: str,
+        container_format: str | None = None,
+        duration_s: float | None = None,
+        on_progress: Callable[[float, str], None] | None = None,
+        cancel_event: Event | None = None,
+    ) -> str:
+        """Record an HTTP/HTTPS/HLS/DASH stream to a local file.
+
+        Cancellation semantics differ from every other op: pressing Stop KEEPS
+        the recording (returns normally instead of raising InterruptedError) —
+        a stopped stream is a successful partial capture. ``duration_s`` acts
+        as an automatic clean stop.
+        """
+        if not input_url or "://" not in input_url:
+            raise ValueError("That doesn't look like a stream URL (need scheme://…)")
+        try:
+            inp = av.open(input_url, "r", timeout=(10.0, 30.0))
+        except av.error.ProtocolNotFoundError as exc:
+            raise ValueError(f"This build can't open that protocol: {exc}") from exc
+        except av.error.TimeoutError as exc:
+            raise ValueError("Connection timed out — check the URL and your network.") from exc
+        except av.error.HTTPError as exc:
+            raise ValueError(f"The server refused the stream: {exc}") from exc
+        except av.error.FFmpegError as exc:
+            raise ValueError(f"Couldn't read that stream: {exc}") from exc
+        except (OSError, ValueError) as exc:
+            raise ValueError(f"Couldn't open URL: {exc}") from exc
+
+        try:
+            return EngineService._record_from(
+                inp, output_path, container_format, duration_s, on_progress, cancel_event
+            )
+        finally:
+            inp.close()
+
+    @staticmethod
+    def _record_from(
+        inp,
+        output_path: str,
+        container_format: str | None = None,
+        duration_s: float | None = None,
+        on_progress: Callable[[float, str], None] | None = None,
+        cancel_event: Event | None = None,
+    ) -> str:
+        """Demux-copy every stream of an open container into output_path.
+
+        Test seam: tests drive this directly with a local file container
+        instead of a network URL. Timestamps are shifted so the first packet
+        of each stream lands at 0 (live inputs often start far up the
+        timeline, which would leave a gaping offset in MP4).
+        """
+        out = av.open(output_path, "w", format=container_format)
+        try:
+            stream_map = {}
+            for s in inp.streams:
+                if s.type in ("video", "audio", "subtitle", "data"):
+                    stream_map[s] = out.add_stream_from_template(s, opaque=True)
+            if not stream_map:
+                raise ValueError("No recordable streams found in that URL")
+
+            # MP4-family sources carry h264/hevc in AVCC (length-prefixed) form;
+            # the MPEG-TS muxer needs Annex-B. FFmpeg's CLI auto-inserts
+            # h264_mp4toannexb for this combo — libavformat does NOT, so muxing
+            # raw raises InvalidData. Apply the BSF manually per video stream.
+            out_format = out.format.name
+            bsfs: dict[int, tuple] = {}  # source stream index -> (ctx, out_stream)
+            if out_format in ("mpegts", "hls"):
+                for s, out_s in stream_map.items():
+                    if s.type != "video" or s.codec_context is None:
+                        continue
+                    cname = s.codec_context.name or ""
+                    bsf_name = None
+                    if cname.startswith(("h264", "libx264")):
+                        bsf_name = "h264_mp4toannexb"
+                    elif cname.startswith(("hevc", "libx265")):
+                        bsf_name = "hevc_mp4toannexb"
+                    if bsf_name:
+                        try:
+                            bsfs[s.index] = (
+                                av.BitStreamFilterContext(
+                                    bsf_name, in_stream=s, out_stream=out_s
+                                ),
+                                out_s,
+                            )
+                        except Exception as exc:  # noqa: BLE001 — fall back unfiltered
+                            logger.warning("BSF %s unavailable: %s", bsf_name, exc)
+
+            start = time.monotonic()
+            base_pts: dict[int, int] = {}
+            bytes_out = 0
+            last_report = 0.0
+
+            def _emit(packet) -> None:
+                """Zero-base the timestamps, run the BSF if any, mux result(s)."""
+                # Real-world sources carry junk: zero-byte flush artifacts with no
+                # timestamps (the mpegts muxer rejects size<7 AAC outright).
+                if packet.size == 0 or (packet.pts is None and packet.dts is None):
+                    logger.debug(
+                        "Skipping empty/timestamp-less packet (stream %s)",
+                        packet.stream.index if packet.stream is not None else "?",
+                    )
+                    return
+                src_key = packet.stream.index if packet.stream is not None else -1
+                if src_key >= 0:
+                    if src_key not in base_pts:
+                        base_pts[src_key] = packet.pts if packet.pts is not None else 0
+                    base = base_pts[src_key]
+                    if packet.pts is not None:
+                        packet.pts = packet.pts - base
+                    if packet.dts is not None:
+                        packet.dts = packet.dts - base
+                out_s = stream_map.get(packet.stream) if src_key >= 0 else None
+                # stream identity may already be consumed; resolve out_s via key
+                if out_s is None:
+                    for src, mapped in stream_map.items():
+                        if src.index == src_key:
+                            out_s = mapped
+                            break
+                bsf_entry = bsfs.get(src_key)
+                candidates = bsf_entry[0].filter(packet) if bsf_entry else [packet]
+                for pkt in candidates:
+                    pkt.stream = out_s
+                    out.mux(pkt)
+
+            for packet in inp.demux(list(stream_map)):
+                _pause_hook(cancel_event)
+                if cancel_event and cancel_event.is_set():
+                    logger.info(
+                        "Recording stopped by user (%d bytes) — keeping output", bytes_out
+                    )
+                    break
+                elapsed = time.monotonic() - start
+                if duration_s is not None and elapsed >= duration_s:
+                    logger.info("Recording reached duration cap (%.1fs)", duration_s)
+                    break
+
+                _emit(packet)
+                bytes_out += max(0, packet.size or 0)
+
+                now = time.monotonic()
+                if on_progress and (now - last_report >= 0.25):
+                    last_report = now
+                    if duration_s and duration_s > 0:
+                        prog = min(0.99, elapsed / duration_s)
+                    else:
+                        prog = 0.05  # live: no total — banner shows activity msg
+                    on_progress(
+                        prog,
+                        f"Recording… {elapsed:.0f}s • {bytes_out // 1024} KB",
+                    )
+
+            # Drain BSF-delayed packets (EOF marker)
+            for _src_idx, (bsf_ctx, out_s) in bsfs.items():
+                for pkt in bsf_ctx.filter(None):
+                    pkt.stream = out_s
+                    out.mux(pkt)
+
+            if on_progress:
+                total_s = time.monotonic() - start
+                on_progress(1.0, f"Recorded {total_s:.0f}s • {bytes_out // 1024} KB")
+        finally:
+            out.close()
+
+        # Zero-packet stops never trigger the muxer's lazy header write — keep
+        # the "output exists" contract so callers can rely on the path.
+        Path(output_path).touch(exist_ok=True)
         return output_path

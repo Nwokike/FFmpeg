@@ -36,6 +36,27 @@ class JobQueue:
         self._shutdown = False
         self._current: Job | None = None
         self._thread: threading.Thread | None = None
+        # Shared pause switch: the worker holds BEFORE pulling the next job and
+        # the engine's pause hook (same Event) holds INSIDE the running one.
+        self.pause_event = threading.Event()
+
+    # ── Pause ──────────────────────────────────────────────────────────────
+
+    @property
+    def paused(self) -> bool:
+        return self.pause_event.is_set()
+
+    def set_paused(self, value: bool) -> bool:
+        """Pause (True) or resume (False) the queue; returns the new state."""
+        if value:
+            self.pause_event.set()
+        else:
+            self.pause_event.clear()
+            self._wake.set()
+        return value
+
+    def toggle_pause(self) -> bool:
+        return self.set_paused(not self.paused)
 
     # ── Lifecycle ────────────────────────────────────────────────────────
 
@@ -137,6 +158,11 @@ class JobQueue:
 
     def _loop(self) -> None:
         while not self._shutdown:
+            # Hold here while paused — the running job's engine hook holds
+            # inside itself; this gate catches the *next* job.
+            while self.pause_event.is_set() and not self._shutdown:
+                self._wake.wait(timeout=0.5)
+                self._wake.clear()
             with self._lock:
                 job = self._pending.pop(0) if self._pending else None
             if job is None:

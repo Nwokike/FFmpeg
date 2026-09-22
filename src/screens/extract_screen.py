@@ -33,17 +33,23 @@ def ExtractScreen() -> ft.Control:
     )
     duration_s = info.duration_s if info else 10.0
 
-    mode, set_mode = ft.use_state("audio")  # "audio", "frames", "gif"
+    mode, set_mode = ft.use_state("audio")  # "audio", "frames", "gif", "subtitles"
     audio_fmt, set_audio_fmt = ft.use_state("mp3")
     audio_kbps, set_audio_kbps = ft.use_state(192)
     frame_count, set_frame_count = ft.use_state(5)
     gif_fps, set_gif_fps = ft.use_state(15)
     gif_width, set_gif_width = ft.use_state(480)
     gif_duration, set_gif_duration = ft.use_state(min(5.0, duration_s))
+    sub_fmt, set_sub_fmt = ft.use_state("srt")
+    sub_sel, set_sub_sel = ft.use_state(0)  # index into sub_streams
     is_processing, set_is_processing = ft.use_state(False)
+
+    sub_streams = [s for s in (info.streams if info else []) if s.stream_type == "subtitle"]
 
     def _start_extraction(_):
         if not media_path:
+            return
+        if mode == "subtitles" and not sub_streams:
             return
         set_is_processing(True)
 
@@ -56,6 +62,23 @@ def ExtractScreen() -> ft.Control:
                 input_path=media_path,
                 output_path=out_path,
                 params={"format_name": audio_fmt, "bitrate_kbps": int(audio_kbps)},
+                original_size_bytes=Path(media_path).stat().st_size
+                if os.path.exists(media_path)
+                else 0,
+            )
+        elif mode == "subtitles":
+            chosen = sub_streams[sub_sel] if sub_sel < len(sub_streams) else sub_streams[0]
+            ext = "vtt" if sub_fmt == "webvtt" else sub_fmt
+            out_name = f"{stem}.{ext}"
+            out_path = str(get_temp_dir() / out_name)
+            job = Job(
+                op="extract_subtitles",
+                input_path=media_path,
+                output_path=out_path,
+                params={
+                    "stream_index": chosen.index,
+                    "format_name": sub_fmt,
+                },
                 original_size_bytes=Path(media_path).stat().st_size
                 if os.path.exists(media_path)
                 else 0,
@@ -160,6 +183,11 @@ def ExtractScreen() -> ft.Control:
                         selected=mode == "gif",
                         on_select=lambda _: set_mode("gif"),
                     ),
+                    ft.Chip(
+                        label=ft.Text("Subtitles"),
+                        selected=mode == "subtitles",
+                        on_select=lambda _: set_mode("subtitles"),
+                    ),
                 ],
                 spacing=SPACE_SM,
             ),
@@ -210,6 +238,59 @@ def ExtractScreen() -> ft.Control:
             *(
                 [
                     section_header(
+                        "Subtitle Track",
+                        (
+                            f"{len(sub_streams)} track(s) found"
+                            if sub_streams
+                            else "No subtitle streams in this file"
+                        ),
+                        is_dark=is_dark,
+                    ),
+                    *(
+                        [
+                            ft.Row(
+                                controls=[
+                                    ft.Chip(
+                                        label=ft.Text(
+                                            f"Track {s.index}"
+                                            + (f" • {s.language}" if s.language else "")
+                                        ),
+                                        selected=sub_sel == i,
+                                        on_select=lambda _, idx=i: set_sub_sel(idx),
+                                    )
+                                    for i, s in enumerate(sub_streams)
+                                ],
+                                wrap=True,
+                                spacing=SPACE_SM,
+                            )
+                        ]
+                        if sub_streams
+                        else []
+                    ),
+                    *(
+                        [
+                            ft.Row(
+                                controls=[
+                                    ft.Chip(
+                                        label=ft.Text(fmt.upper() if fmt != "webvtt" else "VTT"),
+                                        selected=sub_fmt == fmt,
+                                        on_select=lambda _, f=fmt: set_sub_fmt(f),
+                                    )
+                                    for fmt in ("srt", "ass", "webvtt")
+                                ],
+                                spacing=SPACE_SM,
+                            )
+                        ]
+                        if sub_streams
+                        else []
+                    ),
+                ]
+                if mode == "subtitles"
+                else []
+            ),
+            *(
+                [
+                    section_header(
                         "GIF Framerate & Resolution",
                         f"{gif_fps} fps • {gif_width}px wide",
                         is_dark=is_dark,
@@ -246,7 +327,9 @@ def ExtractScreen() -> ft.Control:
                 f"Extract {mode.title()}",
                 icon=ft.Icons.DOWNLOAD_ROUNDED,
                 height=48,
-                disabled=not media_path or is_processing,
+                disabled=not media_path
+                or is_processing
+                or (mode == "subtitles" and not sub_streams),
                 on_click=_start_extraction,
             ),
         ],

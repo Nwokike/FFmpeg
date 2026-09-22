@@ -23,7 +23,8 @@ def _build_synthetic(path: str) -> None:
     out = av.open(path, "w")
     vs = out.add_stream("libx264", rate=_FPS)
     vs.width, vs.height, vs.pix_fmt = _WIDTH, _HEIGHT, "yuv420p"
-    vs.options = {"crf": "30", "preset": "ultrafast"}
+    # keyint=10 gives regular keyframes — exercises keyframe snap + tick chips
+    vs.options = {"crf": "30", "preset": "ultrafast", "keyint": "10", "min-keyint": "10"}
     asr = out.add_stream("aac", rate=_RATE)
     asr.layout = "stereo"
 

@@ -39,7 +39,11 @@ def job_card_view(job: Job, is_dark: bool = True) -> ft.Control:
         "cut": "Trim",
         "extract_audio": "Extract Audio",
         "extract_frames": "Extract Frames",
+        "extract_subtitles": "Extract Subtitles",
         "create_gif": "Make GIF",
+        "record": "Recording",
+        "remux": "Track Copy",
+        "concat": "Join",
         "filters": "Filter Stack",
         "audio_studio": "Audio Studio",
     }
@@ -51,12 +55,32 @@ def job_card_view(job: Job, is_dark: bool = True) -> ft.Control:
     # Action buttons
     action_btns: list[ft.Control] = []
     if job.is_running:
+        paused = job.status_message == "Paused"
+        action_btns.append(
+            ft.IconButton(
+                icon=ft.Icons.PAUSE_ROUNDED if not paused else ft.Icons.PLAY_ARROW_ROUNDED,
+                icon_color=PRIMARY,
+                icon_size=ICON_MD,
+                tooltip="Pause Job" if not paused else "Resume Job",
+                on_click=lambda _: ctrl.toggle_pause_job(),
+            )
+        )
         action_btns.append(
             ft.IconButton(
                 icon=ft.Icons.STOP_CIRCLE_OUTLINED,
                 icon_color=ACCENT_RED,
                 icon_size=ICON_MD,
                 tooltip="Cancel Job",
+                on_click=lambda _: ctrl.cancel_job(job.id),
+            )
+        )
+    elif job.status == "pending":
+        action_btns.append(
+            ft.IconButton(
+                icon=ft.Icons.CLOSE_ROUNDED,
+                icon_color=muted,
+                icon_size=ICON_MD,
+                tooltip="Remove from Queue",
                 on_click=lambda _: ctrl.cancel_job(job.id),
             )
         )
@@ -78,15 +102,26 @@ def job_card_view(job: Job, is_dark: bool = True) -> ft.Control:
             ]
         )
 
+    op_icons = {
+        "extract_subtitles": ft.Icons.SUBTITLES_OUTLINED,
+        "record": ft.Icons.VIDEOCAM_OUTLINED,
+        "remux": ft.Icons.CONTENT_COPY_ROUNDED,
+        "concat": ft.Icons.MERGE_TYPE_ROUNDED,
+    }
+    card_icon = op_icons.get(
+        job.op,
+        ft.Icons.AUDIOTRACK_OUTLINED
+        if "audio" in job.op
+        else ft.Icons.MOVIE_OUTLINED,
+    )
+
     content_rows = [
         ft.Row(
             controls=[
                 ft.Row(
                     controls=[
                         ft.Icon(
-                            ft.Icons.MOVIE_OUTLINED
-                            if "audio" not in job.op
-                            else ft.Icons.AUDIOTRACK_OUTLINED,
+                            card_icon,
                             size=ICON_MD,
                             color=PRIMARY,
                         ),

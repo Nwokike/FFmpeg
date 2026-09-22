@@ -55,6 +55,28 @@ class MediaIOService:
             logger.error("Failed to pick media file: %s", exc)
         return None
 
+    async def pick_media_files(self) -> list[str]:
+        """Multi-select picker for the Joiner; returns local paths (bytes cached)."""
+        picked: list[str] = []
+        try:
+            res = await self.file_picker.pick_files(
+                dialog_title="Select Media Files to Join",
+                file_type=ft.FilePickerFileType.MEDIA,
+                allow_multiple=True,
+            )
+            if not res or not res.files:
+                return picked
+            for f in res.files:
+                if f.path and os.path.exists(f.path):
+                    picked.append(f.path)
+                elif f.bytes:
+                    cache_dest = get_data_dir() / f.name
+                    cache_dest.write_bytes(f.bytes)
+                    picked.append(str(cache_dest))
+        except Exception as exc:
+            logger.error("Failed to pick media files: %s", exc)
+        return picked
+
     async def save_media_file(
         self, source_path: str, default_name: str | None = None
     ) -> str | None:

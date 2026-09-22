@@ -19,13 +19,27 @@ from core.notify import ERROR, SUCCESS, show_snack
 from core.state import Job, state
 from core.theme import AppTheme
 from services.ad_service import AdService
-from services.engine_service import EngineService
+from services.engine_service import EngineService, set_pause_event
 from services.job_queue import JobQueue
 from services.media_io import MediaIOService
 from services.storage_service import StorageService
 from services.update_service import UpdateService
 from state.controller_ctx import ControllerMethods, ControllerMethodsCtx
 from state.service_ctx import ServiceCtx, Services
+
+try:
+    from flet_audio_recorder import AudioRecorder
+
+    _HAS_RECORDER = True
+except ImportError:  # pragma: no cover — package is in the dev tree
+    _HAS_RECORDER = False
+
+try:
+    from flet_permission_handler import PermissionHandler
+
+    _HAS_PERM_HANDLER = True
+except ImportError:  # pragma: no cover
+    _HAS_PERM_HANDLER = False
 
 logger = logging.getLogger(__name__)
 
@@ -120,6 +134,33 @@ async def main(page: ft.Page) -> None:
         except Exception as exc:  # noqa: BLE001 — desktop/web may not support it
             logger.debug("Wakelock %s failed: %s", on, exc)
 
+    # PermissionHandler's platform guard allows Android/TV/iOS/Windows/Web but
+    # RAISES on Linux/macOS desktops — only register where it can update.
+    permission_handler = None
+    _perm_platforms = (
+        ft.PagePlatform.ANDROID,
+        ft.PagePlatform.ANDROID_TV,
+        ft.PagePlatform.IOS,
+        ft.PagePlatform.WINDOWS,
+    )
+    if _HAS_PERM_HANDLER and (
+        page.web or (page.platform is not None and page.platform in _perm_platforms)
+    ):
+        try:
+            permission_handler = PermissionHandler()
+            page.services.append(permission_handler)
+        except Exception as exc:  # noqa: BLE001 — capture degrades without it
+            logger.warning("PermissionHandler unavailable: %s", exc)
+            permission_handler = None
+
+    audio_recorder = None
+    if _HAS_RECORDER:
+        try:
+            audio_recorder = AudioRecorder()
+            page.services.append(audio_recorder)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("AudioRecorder unavailable: %s", exc)
+
     services = Services(
         storage=storage,
         engine=engine,
@@ -128,6 +169,8 @@ async def main(page: ft.Page) -> None:
         update=update_svc,
         url_launcher=url_launcher,
         clipboard=clipboard,
+        permission_handler=permission_handler,
+        audio_recorder=audio_recorder,
     )
 
     # Restore persisted state from storage
@@ -192,6 +235,9 @@ async def main(page: ft.Page) -> None:
         "probe": "/probe",
         "engine_info": "/engine-info",
         "result": "/result",
+        "capture": "/capture",
+        "streams": "/streams",
+        "join": "/join",
     }
 
     def navigate(view: str) -> None:
@@ -279,6 +325,11 @@ async def main(page: ft.Page) -> None:
                     speed=p.get("speed", 1.0),
                     volume_pct=p.get("volume_pct", 100),
                     rotation=p.get("rotation", 0),
+                    crop_aspect=p.get("crop"),
+                    eq=p.get("eq"),
+                    denoise=p.get("denoise"),
+                    sharpen=p.get("sharpen"),
+                    watermark=p.get("watermark"),
                     on_progress=_on_progress,
                     cancel_event=cancel_evt,
                 )
@@ -318,6 +369,42 @@ async def main(page: ft.Page) -> None:
                     output_dir=job.output_path,
                     count=p.get("count", 5),
                     format_name=p.get("format_name", "jpg"),
+                    on_progress=_on_progress,
+                    cancel_event=cancel_evt,
+                )
+            elif job.op == "extract_subtitles":
+                engine.extract_subtitles(
+                    input_path=job.input_path,
+                    output_path=job.output_path,
+                    stream_index=p.get("stream_index", 0),
+                    format_name=p.get("format_name", "srt"),
+                    on_progress=_on_progress,
+                    cancel_event=cancel_evt,
+                )
+            elif job.op == "record":
+                engine.record(
+                    input_url=p.get("url", job.input_path),
+                    output_path=job.output_path,
+                    container_format=p.get("format"),
+                    duration_s=p.get("duration_s"),
+                    on_progress=_on_progress,
+                    cancel_event=cancel_evt,
+                )
+            elif job.op == "concat":
+                engine.concat(
+                    paths=p.get("paths", [job.input_path]),
+                    output_path=job.output_path,
+                    container_format=p.get("container", "mp4"),
+                    transition=p.get("transition", "cut"),
+                    fade_s=p.get("fade_s", 0.5),
+                    on_progress=_on_progress,
+                    cancel_event=cancel_evt,
+                )
+            elif job.op == "remux":
+                engine.remux(
+                    input_path=job.input_path,
+                    output_path=job.output_path,
+                    drop_indices=p.get("drop", []),
                     on_progress=_on_progress,
                     cancel_event=cancel_evt,
                 )
@@ -375,6 +462,16 @@ async def main(page: ft.Page) -> None:
     queue = JobQueue(
         runner=_job_runner, on_started=_on_job_started, on_finished=_on_job_finished
     )
+    # One Event drives both gates: the worker (before the next job) and the
+    # engine's per-packet pause hook inside the running one.
+    set_pause_event(queue.pause_event)
+
+    def toggle_pause_job() -> None:
+        paused = queue.toggle_pause()
+        current = queue.current
+        if current is not None:
+            current.status_message = "Paused" if paused else "Processing…"
+        page.update()
 
     def start_job(job: Job) -> None:
         state.jobs.insert(0, job)
@@ -460,6 +557,7 @@ async def main(page: ft.Page) -> None:
         pick_media_for=lambda t: page.run_task(pick_media_for, t),
         start_job=start_job,
         cancel_job=cancel_job,
+        toggle_pause_job=toggle_pause_job,
         retry_job=retry_job,
         delete_job=delete_job,
         restore_job=restore_job,
