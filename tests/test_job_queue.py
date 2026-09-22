@@ -1,0 +1,109 @@
+"""JobQueue semantics: serial execution, pending-cancel, shutdown."""
+
+from __future__ import annotations
+
+import time
+
+from core.state import Job
+from services.job_queue import JobQueue
+
+
+def _job() -> Job:
+    return Job(op="convert", input_path="in.mp4", output_path="out.mp4")
+
+
+def test_serial_execution_order():
+    order: list[str] = []
+
+    def runner(job: Job, evt) -> None:
+        order.append(job.id)
+        job.status = "completed"
+        time.sleep(0.15)
+
+    q = JobQueue(runner=runner)
+    jobs = [_job() for _ in range(3)]
+    for j in jobs:
+        q.enqueue(j)
+    deadline = time.time() + 5
+    while len(order) < 3 and time.time() < deadline:
+        time.sleep(0.05)
+    q.shutdown()
+    assert order == [j.id for j in jobs]  # FIFO, one at a time
+
+
+def test_cancel_pending_job_removes_it_before_running():
+    order: list[str] = []
+    finished: dict[str, str] = {}
+
+    def runner(job: Job, evt) -> None:
+        order.append(job.id)
+        job.status = "completed"
+        time.sleep(0.3)
+
+    q = JobQueue(runner=runner, on_finished=lambda j: finished.update({j.id: j.status}))
+    j1, j2, j3 = _job(), _job(), _job()
+    q.enqueue(j1)
+    q.enqueue(j2)
+    q.enqueue(j3)
+    time.sleep(0.05)  # j1 running, j2/j3 pending
+    assert q.cancel(j2.id) is True
+    deadline = time.time() + 5
+    while len(order) < 2 and time.time() < deadline:
+        time.sleep(0.05)
+    q.shutdown()
+    assert j2.id not in order, "cancelled pending job must never run"
+    assert j2.status == "cancelled"
+    assert finished.get(j2.id) == "cancelled"
+
+
+def test_running_job_cancel_sets_event():
+    started = []
+
+    def runner(job: Job, evt) -> None:
+        started.append(job.id)
+        deadline = time.time() + 5
+        while not evt.is_set() and time.time() < deadline:
+            time.sleep(0.01)
+        job.status = "cancelled" if evt.is_set() else "completed"
+
+    q = JobQueue(runner=runner)
+    j = _job()
+    q.enqueue(j)
+    deadline = time.time() + 5
+    while not started and time.time() < deadline:
+        time.sleep(0.01)
+    assert q.cancel(j.id) is True  # running path → event set
+    deadline = time.time() + 5
+    while j.status == "pending" and time.time() < deadline:
+        time.sleep(0.01)
+    q.shutdown()
+    assert j.status == "cancelled"
+
+
+def test_shutdown_drops_pending_jobs():
+    finished: dict[str, str] = {}
+
+    def runner(job: Job, evt) -> None:
+        while not evt.is_set():
+            time.sleep(0.01)
+        job.status = "cancelled"
+
+    q = JobQueue(runner=runner, on_finished=lambda j: finished.update({j.id: j.status}))
+    running = _job()
+    q.enqueue(running)
+    time.sleep(0.1)
+    pending = _job()
+    q.enqueue(pending)
+    q.shutdown()
+    time.sleep(0.3)
+    assert finished.get(pending.id) == "cancelled"
+    assert pending.status == "cancelled"
+
+
+def test_enqueue_sets_pending_status():
+    q = JobQueue(runner=lambda job, evt: None)
+    j = _job()
+    q.enqueue(j)
+    assert j.status == "pending"
+    assert j.status_message == "Queued"
+    q.shutdown()

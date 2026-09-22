@@ -105,7 +105,6 @@ def ResultScreen() -> ft.Control:
             content=ftv.Video(
                 playlist=[ftv.VideoMedia(out_path)],
                 autoplay=False,
-                aspect_ratio=16 / 9,
                 filter_quality=ft.FilterQuality.MEDIUM,
             ),
             border_radius=RADIUS_LG,

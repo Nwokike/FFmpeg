@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
+import logging
+
 import flet as ft
 
-from core.constants import APP_NAME, APP_VERSION, BUILD_NUMBER
+from core.constants import APP_NAME, APP_VERSION, BUILD_NUMBER, GITHUB_RELEASE_URL
 from core.engine_probe import probe
 from core.logger_handler import MemoryLogHandler
+from core.notify import SUCCESS, show_snack
 from core.state import state
 from core.storage_paths import clear_cache, format_bytes, get_cache_size_bytes
 from core.styles import card_container, section_header
@@ -28,6 +32,8 @@ from core.tokens import (
 from state.controller_ctx import use_controller
 from state.service_ctx import use_services
 
+logger = logging.getLogger(__name__)
+
 
 @ft.component
 def SettingsScreen() -> ft.Control:
@@ -40,6 +46,21 @@ def SettingsScreen() -> ft.Control:
 
     cache_size, set_cache_size = ft.use_state(get_cache_size_bytes())
     active_theme, set_active_theme = ft.use_state(state.settings.get("theme_mode", "system"))
+    engine_counts, set_engine_counts = ft.use_state("")
+
+    async def _load_engine_counts() -> None:
+        # Capability probe off the UI loop; counts fill the subtitle live
+        # instead of the hardcoded (and rotted) "557 codecs, 468 filters".
+        try:
+            p = await asyncio.to_thread(probe)
+            set_engine_counts(
+                f"Inspect {p.codec_count} codecs, {p.filter_count} filters, and formats in PyAV 18"
+            )
+            page.update()
+        except Exception as exc:  # noqa: BLE001 — subtitle is cosmetic
+            logger.debug("Engine counts probe failed: %s", exc)
+
+    ft.use_effect(lambda: page.run_task(_load_engine_counts), [])
 
     def _update_theme(mode_str: str):
         set_active_theme(mode_str)
@@ -57,14 +78,9 @@ def SettingsScreen() -> ft.Control:
     def _do_clear_cache(_):
         freed = clear_cache()
         set_cache_size(get_cache_size_bytes())
-        page.show_dialog(
-            ft.AlertDialog(
-                title=ft.Text("Cache Cleared"),
-                content=ft.Text(
-                    f"Successfully removed {format_bytes(freed)} of temporary processing files."
-                ),
-                actions=[ft.TextButton("OK", on_click=lambda _: page.pop_dialog())],
-            )
+        page.update()
+        show_snack(
+            page, f"Removed {format_bytes(freed)} of temporary files", bgcolor=SUCCESS
         )
 
     def _open_activity_terminal(_):
@@ -86,34 +102,49 @@ def SettingsScreen() -> ft.Control:
                     height=350,
                 ),
                 actions=[
-                    ft.TextButton("Copy", on_click=lambda _: page.set_clipboard(log_text)),
+                    ft.TextButton(
+                        "Copy",
+                        on_click=lambda _: page.run_task(services.clipboard.set, log_text),
+                    ),
                     ft.TextButton("Close", on_click=lambda _: page.pop_dialog()),
                 ],
             )
         )
 
     def _open_engine_inspector(_):
-        p = probe()
-        page.show_dialog(
-            ft.AlertDialog(
-                title=ft.Text("FFmpeg Engine Capabilities"),
-                content=ft.Container(
-                    content=ft.Column(
-                        controls=[
-                            ft.Text(
-                                p.to_text(), size=FONT_XS, font_family="monospace", selectable=True
-                            ),
-                        ],
-                        scroll=ft.ScrollMode.AUTO,
+        # Probe off the UI thread (it enumerates every codec/filter on device)
+        async def _load():
+            try:
+                p = await asyncio.to_thread(probe)
+            except Exception as exc:  # noqa: BLE001 — surface, never crash the click
+                logger.error("Engine probe failed: %s", exc)
+                show_snack(page, f"Engine probe failed: {exc}")
+                return
+            page.show_dialog(
+                ft.AlertDialog(
+                    title=ft.Text("FFmpeg Engine Capabilities"),
+                    content=ft.Container(
+                        content=ft.Column(
+                            controls=[
+                                ft.Text(
+                                    p.to_text(),
+                                    size=FONT_XS,
+                                    font_family="monospace",
+                                    selectable=True,
+                                ),
+                            ],
+                            scroll=ft.ScrollMode.AUTO,
+                        ),
+                        width=500,
+                        height=350,
                     ),
-                    width=500,
-                    height=350,
-                ),
-                actions=[
-                    ft.TextButton("Close", on_click=lambda _: page.pop_dialog()),
-                ],
+                    actions=[
+                        ft.TextButton("Close", on_click=lambda _: page.pop_dialog()),
+                    ],
+                )
             )
-        )
+
+        page.run_task(_load)
 
     def _show_ad_privacy(_):
         if services.ads:
@@ -227,7 +258,7 @@ def SettingsScreen() -> ft.Control:
                             leading=ft.Icon(ft.Icons.INFO_OUTLINE_ROUNDED, color=ACCENT_BLUE),
                             title=ft.Text("Engine Capabilities", weight=ft.FontWeight.W_600),
                             subtitle=ft.Text(
-                                "Inspect 557 codecs, 468 filters, and formats in PyAV 18",
+                                engine_counts or "Inspect codecs, filters, and formats in PyAV 18",
                                 color=muted,
                             ),
                             on_click=_open_engine_inspector,
@@ -265,7 +296,9 @@ def SettingsScreen() -> ft.Control:
                             leading=ft.Icon(ft.Icons.OPEN_IN_BROWSER_ROUNDED, color=muted),
                             title=ft.Text("GitHub Repository", weight=ft.FontWeight.W_600),
                             subtitle=ft.Text("Source code, releases, and discussions", color=muted),
-                            on_click=lambda _: page.launch_url("https://github.com/Nwokike/FFMPEG"),
+                            on_click=lambda _: page.run_task(
+                                services.url_launcher.launch_url, GITHUB_RELEASE_URL
+                            ),
                         ),
                     ],
                     spacing=0,

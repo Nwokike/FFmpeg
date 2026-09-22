@@ -14,6 +14,7 @@ from typing import Any
 import flet as ft
 
 from core.constants import ADMOB_BANNER_UNIT_TEST, ADMOB_INTERSTITIAL_UNIT_TEST
+from core.state import state
 
 logger = logging.getLogger("AdService")
 
@@ -69,8 +70,10 @@ class AdService:
             self._can_request_ads = await self._consent_manager.can_request_ads()
             logger.info("UMP consent completed, can_request_ads=%s", self._can_request_ads)
         except Exception as exc:
-            logger.warning("UMP consent check failed (allowing ads): %s", exc)
-            self._can_request_ads = True
+            # Fail closed: without a consent decision we must not request ads
+            # (UMP/Play policy) — a failed check cannot grant permission.
+            logger.warning("UMP consent check failed (fail closed, no ads): %s", exc)
+            self._can_request_ads = False
 
     async def show_privacy_options(self) -> None:
         """Show privacy settings form if required by EU/UK regulation."""
@@ -108,6 +111,9 @@ class AdService:
         """Preload an interstitial ad into memory."""
         if not _HAS_ADS or not self._is_mobile() or not self._can_request_ads:
             return
+        if not state.is_online:
+            logger.info("Interstitial preload skipped: offline")
+            return
 
         try:
             ad = fta.InterstitialAd(
@@ -126,6 +132,14 @@ class AdService:
     async def show_interstitial(self, on_close: Callable | None = None) -> bool:
         """Display preloaded interstitial if cooldown has elapsed. Returns True if shown."""
         if not _HAS_ADS or not self._is_mobile() or not self._can_request_ads:
+            if on_close:
+                if asyncio.iscoroutinefunction(on_close):
+                    await on_close()
+                else:
+                    on_close()
+            return False
+        if not state.is_online:
+            logger.info("Interstitial skipped: offline")
             if on_close:
                 if asyncio.iscoroutinefunction(on_close):
                     await on_close()

@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "type": "update",
   "title": "FFmpeg 1.0.0",
-  "release_notes": "• M0 scaffold — project foundation and engine spike",
+  "release_notes": "• Full FFmpeg 8 engine via PyAV — convert, transcode & compress with exact target sizes\n• Frame-accurate trimming with a live trim range and instant stream-copy cuts\n• Audio Studio: two-pass LUFS mastering, channel routing, sample-rate conversion\n• Extract audio, frames and palette-optimized GIFs; media dossier with live engine probe\n• Serial job queue with per-job progress, cancel, and swipe-undo history\n• On-device capture, filters, and batch tools — your media never leaves your phone",
   "mandatory": false,
   "github_url": "https://github.com/Nwokike/FFmpeg/releases/latest",
   "playstore_url": "https://play.google.com/store/apps/details?id=ng.kiri.ffmpeg"

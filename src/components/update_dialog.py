@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 import flet as ft
@@ -10,11 +11,13 @@ from core.changelog import notes_for
 from core.constants import APP_NAME, APP_VERSION, GITHUB_RELEASE_URL, PLAYSTORE_URL
 from core.tokens import RADIUS_LG
 
+logger = logging.getLogger(__name__)
+
 
 def build_update_dialog(
     page: ft.Page,
     update_data: dict | None = None,
-    on_dismiss: Any = None,
+    url_launcher: Any = None,
 ) -> ft.AlertDialog:
     """Build modal dialog displaying changelog and download buttons."""
     is_update = update_data is not None
@@ -30,9 +33,17 @@ def build_update_dialog(
     )
     is_mandatory = bool(update_data.get("mandatory", False)) if update_data else False
 
+    def _launch(url: str) -> None:
+        # Flet 1.0: URLs open via the registered UrlLauncher service (async),
+        # never page.launch_url which no longer exists on Page.
+        if url_launcher is None:
+            logger.warning("UrlLauncher unavailable; cannot open %s", url)
+            return
+        page.run_task(url_launcher.launch_url, url)
+
     def _open_download(_):
         url = PLAYSTORE_URL if (page.platform and page.platform.is_mobile()) else GITHUB_RELEASE_URL
-        page.launch_url(url)
+        _launch(url)
 
     actions = [
         ft.FilledButton(
@@ -52,7 +63,7 @@ def build_update_dialog(
                         notes,
                         selectable=True,
                         extension_set=ft.MarkdownExtensionSet.GITHUB_WEB,
-                        on_tap_link=lambda e: page.launch_url(e.data),
+                        on_tap_link=lambda e: _launch(e.data),
                     )
                 ],
                 scroll=ft.ScrollMode.AUTO,

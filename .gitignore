@@ -1,5 +1,7 @@
 .venv/
 .ruff_cache/
+.pytest_cache/
+.flet/
 __pycache__/
 *.pyc
 storage/

@@ -221,6 +221,14 @@ def ExtractScreen() -> ft.Control:
                         divisions=20,
                         on_change=lambda e: set_gif_fps(int(e.control.value)),
                     ),
+                    section_header("GIF Width", f"{gif_width}px wide", is_dark=is_dark),
+                    ft.Slider(
+                        value=float(gif_width),
+                        min=160,
+                        max=1080,
+                        divisions=23,
+                        on_change=lambda e: set_gif_width(int(e.control.value)),
+                    ),
                     section_header("GIF Duration", f"{gif_duration:.1f} seconds", is_dark=is_dark),
                     ft.Slider(
                         value=float(gif_duration),

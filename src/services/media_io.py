@@ -13,6 +13,10 @@ from core.storage_paths import get_data_dir
 
 logger = logging.getLogger("MediaIOService")
 
+# Files above this size skip the read-into-RAM save dialog (mobile save_file
+# requires src_bytes) and use the streaming Downloads copy instead.
+MAX_SAF_BYTES = 100 * 1024 * 1024
+
 
 class MediaIOService:
     """Coordinates FilePicker and Share services across mobile and desktop."""
@@ -54,32 +58,53 @@ class MediaIOService:
     async def save_media_file(
         self, source_path: str, default_name: str | None = None
     ) -> str | None:
-        """Prompt user to save an output file to Downloads or chosen location."""
+        """Prompt user to save an output file to Downloads or chosen location.
+
+        Directories (frame exports) are zipped first; files above the SAF byte
+        budget skip the full-read dialog and go straight to the Downloads copy
+        (save_file requires src_bytes on mobile — reading a huge file into RAM
+        is the OOM this guard exists to prevent).
+        """
         src = Path(source_path)
         if not src.exists():
             logger.warning("Save target file does not exist: %s", source_path)
             return None
 
-        name = default_name or src.name
-        try:
-            data = src.read_bytes()
-            dest_path = await self.file_picker.save_file(
-                dialog_title="Save Converted Media",
-                file_name=name,
-                src_bytes=data,
-            )
-            if dest_path:
-                logger.info("Media file saved to: %s", dest_path)
-                return dest_path
-        except Exception as exc:
-            logger.error("Failed saving media file: %s", exc)
+        if src.is_dir():
+            # Frame exports are directories; SAF deals in files. Zip in place
+            # (dirs live in the temp tier, so the archive is regenerable).
+            # make_archive appends .zip to the full base name — safe for stems
+            # that themselves contain dots.
+            try:
+                src = Path(shutil.make_archive(str(src), "zip", root_dir=str(src)))
+            except OSError as exc:
+                logger.error("Failed zipping frame export: %s", exc)
+                return None
 
-        # Fallback for systems where save_file dialog fails: copy to Downloads folder
+        name = default_name or src.name
+        size = src.stat().st_size
+        if size <= MAX_SAF_BYTES:
+            try:
+                data = src.read_bytes()
+                dest_path = await self.file_picker.save_file(
+                    dialog_title="Save Converted Media",
+                    file_name=name,
+                    src_bytes=data,
+                )
+                if dest_path:
+                    logger.info("Media file saved to: %s", dest_path)
+                    return dest_path
+            except Exception as exc:
+                logger.error("Failed saving media file: %s", exc)
+        else:
+            logger.info("Save dialog skipped for large file (%d bytes): %s", size, name)
+
+        # Fallback: copy to Downloads (covers dialog failure AND the size guard)
         try:
             downloads = Path.home() / "Downloads"
             if downloads.exists():
                 fallback = downloads / name
-                shutil.copy2(source_path, str(fallback))
+                shutil.copy2(str(src), str(fallback))
                 logger.info("Saved to Downloads fallback: %s", fallback)
                 return str(fallback)
         except Exception as e:
@@ -92,6 +117,12 @@ class MediaIOService:
         p = Path(file_path)
         if not p.exists():
             return False
+        if p.is_dir():
+            try:
+                p = Path(shutil.make_archive(str(p), "zip", root_dir=str(p)))
+            except OSError as exc:
+                logger.error("Failed zipping directory for share: %s", exc)
+                return False
         try:
             share_item = ft.ShareFile.from_path(str(p.resolve()))
             await self.share.share_files([share_item], text=f"Processed with FFmpeg: {p.name}")

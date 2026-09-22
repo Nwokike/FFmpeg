@@ -17,6 +17,8 @@ class Services:
     media_io: Any = None
     ads: Any = None
     update: Any = None
+    url_launcher: Any = None
+    clipboard: Any = None
 
 
 ServiceCtx = ft.create_context(Services())

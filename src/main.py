@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import sys
 import threading
@@ -14,10 +15,12 @@ from app_shell import AppShell
 from components.update_dialog import build_update_dialog
 from core.constants import APP_NAME
 from core.logger_handler import MemoryLogHandler
+from core.notify import ERROR, SUCCESS, show_snack
 from core.state import Job, state
 from core.theme import AppTheme
 from services.ad_service import AdService
 from services.engine_service import EngineService
+from services.job_queue import JobQueue
 from services.media_io import MediaIOService
 from services.storage_service import StorageService
 from services.update_service import UpdateService
@@ -49,9 +52,16 @@ async def main(page: ft.Page) -> None:
     _bootstrap_logging()
     _crash_hook()
 
-    # Global error handler — surfaces every Flet framework exception to the log
+    # Global error handler — logs every Flet framework exception and tells the
+    # user where to find it (previously log-only: frozen UI with no feedback).
     def _on_global_error(e):
         logger.error("Unhandled Flet error: %s", e)
+        show_snack(
+            page,
+            "Something went wrong — see Settings → Activity Terminal.",
+            bgcolor=ERROR,
+            duration_ms=5000,
+        )
 
     page.on_error = _on_global_error
 
@@ -67,16 +77,58 @@ async def main(page: ft.Page) -> None:
     ads = AdService(page)
     update_svc = UpdateService()
 
+    # Flet 1.0 has no page.launch_url/page.set_clipboard — these services must be
+    # registered in page.services before any launch/clipboard call (GC + transport).
+    url_launcher = ft.UrlLauncher()
+    clipboard = ft.Clipboard()
+    if url_launcher not in page.services:
+        page.services.append(url_launcher)
+    if clipboard not in page.services:
+        page.services.append(clipboard)
+
+    # Screen stays awake during encodes; connectivity drives the offline banner
+    # (both were dead before: no wakelock at all, is_online hardcoded True).
+    wakelock = ft.Wakelock()
+    connectivity = ft.Connectivity()
+    page.services.append(wakelock)
+    page.services.append(connectivity)
+
+    async def _refresh_online() -> None:
+        try:
+            states = await connectivity.get_connectivity()
+            from flet import ConnectivityType
+
+            online = any(s is not ConnectivityType.NONE for s in states)
+        except Exception as exc:  # noqa: BLE001 — keep last known state on failure
+            logger.debug("Connectivity query failed: %s", exc)
+            return
+        if online != state.is_online:
+            state.is_online = online
+            page.update()
+
+    def _on_connectivity_change(_e) -> None:
+        page.run_task(_refresh_online)
+
+    connectivity.on_change = _on_connectivity_change
+
+    async def _set_wakelock(on: bool) -> None:
+        try:
+            if on:
+                await wakelock.enable()
+            else:
+                await wakelock.disable()
+        except Exception as exc:  # noqa: BLE001 — desktop/web may not support it
+            logger.debug("Wakelock %s failed: %s", on, exc)
+
     services = Services(
         storage=storage,
         engine=engine,
         media_io=media_io,
         ads=ads,
         update=update_svc,
+        url_launcher=url_launcher,
+        clipboard=clipboard,
     )
-
-    # Active cancel event tracker per job
-    active_cancel_events: dict[str, threading.Event] = {}
 
     # Restore persisted state from storage
     state.has_accepted_terms = storage.get("terms_accepted") == "true"
@@ -127,9 +179,45 @@ async def main(page: ft.Page) -> None:
         storage.set("history_jobs", serializable)
 
     # Controller Methods implementation
+    # view-name → route map: screens keep calling ctrl.navigate(name) while
+    # ft.Router owns the actual view stack (system back, swipe-back, deep links).
+    _VIEW_ROUTES = {
+        "dashboard": "/",
+        "convert": "/convert",
+        "compress": "/compress",
+        "cut": "/cut",
+        "extract": "/extract",
+        "filters": "/filters",
+        "audio": "/audio",
+        "probe": "/probe",
+        "engine_info": "/engine-info",
+        "result": "/result",
+    }
+
     def navigate(view: str) -> None:
+        leaving_result = state.active_view == "result" and view == "dashboard"
         state.active_view = view
-        page.update()
+        route = _VIEW_ROUTES.get(view, "/")
+        if page.route == route:
+            page.update()
+            return
+        if leaving_result:
+            # Natural ad break: on the way OUT of the result screen rather than
+            # between completion and its result (Play placement policy). Cooldown,
+            # mobile-only, consent and connectivity gates live in show_interstitial.
+            async def _ad_then_nav():
+                try:
+                    await ads.show_interstitial()
+                except Exception:
+                    logger.exception("Interstitial on result-exit failed")
+                if page.route != route:
+                    page.navigate(route)
+                else:
+                    page.update()
+
+            page.run_task(_ad_then_nav)
+        else:
+            page.navigate(route)
 
     def select_tab(tab_idx: int) -> None:
         state.selected_tab = tab_idx
@@ -145,11 +233,11 @@ async def main(page: ft.Page) -> None:
         path = await media_io.pick_media_file()
         if path:
             try:
-                info = engine.probe(path)
+                # Sync PyAV probe off the UI loop — large files janked the UI here
+                info = await asyncio.to_thread(engine.probe, path)
                 state.current_media_path = path
                 state.current_media_info = info
-                state.active_view = target_view
-                page.update()
+                navigate(target_view)
             except Exception as exc:
                 logger.error("Media probe failed: %s", exc)
                 page.show_dialog(
@@ -160,127 +248,165 @@ async def main(page: ft.Page) -> None:
                     )
                 )
 
+    # ── Serial job queue (one encode at a time; ordering + cancel ownership) ──
+
+    def _on_job_started(job: Job) -> None:
+        state.active_job = job
+        page.run_task(lambda: page.update())
+
+    def _job_runner(job: Job, cancel_evt: threading.Event) -> None:
+        """Execute one job's engine dispatch on the queue worker thread."""
+        job.status = "running"
+        job.status_message = "Starting..."
+        page.run_task(_set_wakelock, True)
+
+        def _on_progress(pct: float, msg: str):
+            job.progress = pct
+            job.status_message = msg
+            page.run_task(lambda: page.update())
+
+        try:
+            p = job.params
+            if job.op == "convert":
+                engine.convert(
+                    input_path=job.input_path,
+                    output_path=job.output_path,
+                    video_codec=p.get("video_codec", "libx264"),
+                    audio_codec=p.get("audio_codec", "aac"),
+                    crf=p.get("crf", 23),
+                    scale_width=p.get("scale_width"),
+                    scale_height=p.get("scale_height"),
+                    speed=p.get("speed", 1.0),
+                    volume_pct=p.get("volume_pct", 100),
+                    rotation=p.get("rotation", 0),
+                    on_progress=_on_progress,
+                    cancel_event=cancel_evt,
+                )
+            elif job.op == "compress":
+                engine.compress_to_target(
+                    input_path=job.input_path,
+                    output_path=job.output_path,
+                    target_size_mb=p.get("target_size_mb", 16.0),
+                    on_progress=_on_progress,
+                    cancel_event=cancel_evt,
+                )
+            elif job.op == "cut":
+                engine.cut_trim(
+                    input_path=job.input_path,
+                    output_path=job.output_path,
+                    start_seconds=p.get("start_seconds", 0.0),
+                    end_seconds=p.get("end_seconds", 10.0),
+                    stream_copy=p.get("stream_copy", True),
+                    on_progress=_on_progress,
+                    cancel_event=cancel_evt,
+                )
+            elif job.op == "extract_audio":
+                engine.extract_audio(
+                    input_path=job.input_path,
+                    output_path=job.output_path,
+                    format_name=p.get("format_name", "mp3"),
+                    bitrate_kbps=p.get("bitrate_kbps", 192),
+                    target_lufs=p.get("target_lufs"),
+                    channels=p.get("channels"),
+                    sample_rate=p.get("sample_rate"),
+                    on_progress=_on_progress,
+                    cancel_event=cancel_evt,
+                )
+            elif job.op == "extract_frames":
+                engine.extract_frames(
+                    input_path=job.input_path,
+                    output_dir=job.output_path,
+                    count=p.get("count", 5),
+                    format_name=p.get("format_name", "jpg"),
+                    on_progress=_on_progress,
+                    cancel_event=cancel_evt,
+                )
+            elif job.op == "create_gif":
+                engine.create_gif(
+                    input_path=job.input_path,
+                    output_path=job.output_path,
+                    fps=p.get("fps", 15),
+                    width=p.get("width", 480),
+                    start_s=p.get("start_s", 0.0),
+                    duration_s=p.get("duration_s", 5.0),
+                    on_progress=_on_progress,
+                    cancel_event=cancel_evt,
+                )
+
+            job.status = "completed"
+            job.progress = 1.0
+            job.status_message = "Completed"
+            job.finished_at = time.time()
+            out_p = Path(job.output_path)
+            if out_p.exists() and out_p.is_file():
+                job.output_size_bytes = out_p.stat().st_size
+
+        except InterruptedError:
+            job.status = "cancelled"
+            job.status_message = "Cancelled"
+            job.finished_at = time.time()
+            logger.info("Job %s cancelled", job.id)
+        except Exception as exc:
+            job.status = "cancelled" if cancel_evt.is_set() else "failed"
+            job.error_message = str(exc)
+            job.status_message = "Cancelled" if cancel_evt.is_set() else f"Failed: {exc}"
+            job.finished_at = time.time()
+            logger.error("Job %s execution failed: %s", job.id, exc)
+        finally:
+            page.run_task(_set_wakelock, False)
+
+    def _on_job_finished(job: Job) -> None:
+        state.active_job = None
+        state.last_completed_job = job
+        state.jobs = [j for j in state.jobs if j.id != job.id]
+        state.history.insert(0, job)
+        _persist_history()
+
+        # Notify UI and navigate to result if successful (ad break moved to the
+        # result→dashboard exit — never between completion and its own result)
+        async def _on_done():
+            if job.status == "completed":
+                navigate("result")
+            else:
+                page.update()
+
+        page.run_task(_on_done)
+
+    queue = JobQueue(
+        runner=_job_runner, on_started=_on_job_started, on_finished=_on_job_finished
+    )
+
     def start_job(job: Job) -> None:
         state.jobs.insert(0, job)
-        state.active_job = job
-        state.active_view = "dashboard"
-        page.update()
+        queue.enqueue(job)
+        navigate("dashboard")
 
-        cancel_evt = threading.Event()
-        active_cancel_events[job.id] = cancel_evt
-
-        def _worker():
-            job.status = "running"
-            job.status_message = "Starting..."
-
-            def _on_progress(pct: float, msg: str):
-                job.progress = pct
-                job.status_message = msg
-                page.run_task(lambda: page.update())
-
-            try:
-                p = job.params
-                if job.op == "convert":
-                    engine.convert(
-                        input_path=job.input_path,
-                        output_path=job.output_path,
-                        video_codec=p.get("video_codec", "libx264"),
-                        audio_codec=p.get("audio_codec", "aac"),
-                        crf=p.get("crf", 23),
-                        scale_width=p.get("scale_width"),
-                        scale_height=p.get("scale_height"),
-                        on_progress=_on_progress,
-                        cancel_event=cancel_evt,
-                    )
-                elif job.op == "compress":
-                    engine.compress_to_target(
-                        input_path=job.input_path,
-                        output_path=job.output_path,
-                        target_size_mb=p.get("target_size_mb", 16.0),
-                        on_progress=_on_progress,
-                        cancel_event=cancel_evt,
-                    )
-                elif job.op == "cut":
-                    engine.cut_trim(
-                        input_path=job.input_path,
-                        output_path=job.output_path,
-                        start_seconds=p.get("start_seconds", 0.0),
-                        end_seconds=p.get("end_seconds", 10.0),
-                        stream_copy=p.get("stream_copy", True),
-                        on_progress=_on_progress,
-                        cancel_event=cancel_evt,
-                    )
-                elif job.op == "extract_audio":
-                    engine.extract_audio(
-                        input_path=job.input_path,
-                        output_path=job.output_path,
-                        format_name=p.get("format_name", "mp3"),
-                        bitrate_kbps=p.get("bitrate_kbps", 192),
-                        on_progress=_on_progress,
-                        cancel_event=cancel_evt,
-                    )
-                elif job.op == "extract_frames":
-                    engine.extract_frames(
-                        input_path=job.input_path,
-                        output_dir=job.output_path,
-                        count=p.get("count", 5),
-                        on_progress=_on_progress,
-                        cancel_event=cancel_evt,
-                    )
-                elif job.op == "create_gif":
-                    engine.create_gif(
-                        input_path=job.input_path,
-                        output_path=job.output_path,
-                        fps=p.get("fps", 15),
-                        width=p.get("width", 480),
-                        start_s=p.get("start_s", 0.0),
-                        duration_s=p.get("duration_s", 5.0),
-                        on_progress=_on_progress,
-                        cancel_event=cancel_evt,
-                    )
-
-                job.status = "completed"
-                job.progress = 1.0
-                job.status_message = "Completed"
-                job.finished_at = time.time()
-                out_p = Path(job.output_path)
-                if out_p.exists() and out_p.is_file():
-                    job.output_size_bytes = out_p.stat().st_size
-
-            except Exception as exc:
-                job.status = "cancelled" if cancel_evt.is_set() else "failed"
-                job.error_message = str(exc)
-                job.status_message = "Cancelled" if cancel_evt.is_set() else f"Failed: {exc}"
-                logger.error("Job %s execution failed: %s", job.id, exc)
-
-            finally:
-                active_cancel_events.pop(job.id, None)
-                state.active_job = None
-                state.last_completed_job = job
-                state.history.insert(0, job)
-                _persist_history()
-
-                # Notify UI and navigate to result if successful
-                async def _on_done():
-                    if job.status == "completed":
-                        await ads.show_interstitial()
-                        state.active_view = "result"
-                    page.update()
-
-                page.run_task(_on_done)
-
-        page.run_thread(_worker)
+    def retry_job(job: Job) -> None:
+        # Fresh Job (new id/status) so the original history entry stays intact
+        clone = Job(
+            op=job.op,
+            input_path=job.input_path,
+            output_path=job.output_path,
+            params=dict(job.params),
+            original_size_bytes=job.original_size_bytes,
+        )
+        start_job(clone)
 
     def cancel_job(job_id: str) -> None:
-        evt = active_cancel_events.get(job_id)
-        if evt:
-            evt.set()
-        if state.active_job and state.active_job.id == job_id:
-            state.active_job.status_message = "Cancelling..."
-            page.update()
+        if queue.cancel(job_id):
+            current = queue.current
+            if current and current.id == job_id:
+                current.status_message = "Cancelling..."
+                page.update()
 
     def delete_job(job_id: str) -> None:
         state.history = [j for j in state.history if j.id != job_id]
+        _persist_history()
+        page.update()
+
+    def restore_job(job: Job) -> None:
+        """Undo target for the history swipe-delete SnackBar."""
+        state.history.insert(0, job)
         _persist_history()
         page.update()
 
@@ -297,32 +423,22 @@ async def main(page: ft.Page) -> None:
         if job.output_path:
             saved = await media_io.save_media_file(job.output_path)
             if saved:
-                page.show_dialog(
-                    ft.AlertDialog(
-                        title=ft.Text("Saved Successfully"),
-                        content=ft.Text(f"File saved to:\n{saved}"),
-                        actions=[ft.TextButton("OK", on_click=lambda _: page.pop_dialog())],
-                    )
-                )
+                show_snack(page, f"Saved to {saved}", bgcolor=SUCCESS, duration_ms=4000)
+            else:
+                show_snack(page, "Couldn't save the file — try again.", bgcolor=ERROR)
 
     async def check_update() -> None:
         data = await update_svc.check_for_updates()
         if data:
             state.update_available = True
             state.update_data = data
-            page.show_dialog(build_update_dialog(page, data))
+            page.show_dialog(build_update_dialog(page, data, url_launcher))
         else:
-            page.show_dialog(
-                ft.AlertDialog(
-                    title=ft.Text("Up to Date"),
-                    content=ft.Text(f"{APP_NAME} is running the latest version."),
-                    actions=[ft.TextButton("OK", on_click=lambda _: page.pop_dialog())],
-                )
-            )
+            show_snack(page, f"{APP_NAME} is running the latest version.")
         page.update()
 
     def show_update_dialog() -> None:
-        page.show_dialog(build_update_dialog(page, state.update_data))
+        page.show_dialog(build_update_dialog(page, state.update_data, url_launcher))
 
     def toggle_theme() -> None:
         current = page.theme_mode
@@ -344,8 +460,9 @@ async def main(page: ft.Page) -> None:
         pick_media_for=lambda t: page.run_task(pick_media_for, t),
         start_job=start_job,
         cancel_job=cancel_job,
+        retry_job=retry_job,
         delete_job=delete_job,
-        retry_job=start_job,
+        restore_job=restore_job,
         finish_onboarding=finish_onboarding,
         share_result=lambda j: page.run_task(share_result, j),
         save_result=lambda j: page.run_task(save_result, j),
@@ -356,10 +473,15 @@ async def main(page: ft.Page) -> None:
     )
 
     # Wire lifecycle
-    page.on_view_pop = lambda _: navigate("dashboard")
-    page.on_disconnect = lambda _: storage.flush()
+    def _on_disconnect() -> None:
+        queue.shutdown()
+        storage.flush()
+
+    page.on_disconnect = _on_disconnect
+    page.on_close = lambda _: (queue.shutdown(), storage.flush())
 
     # Background tasks
+    page.run_task(_refresh_online)
     page.run_task(ads.gather_consent)
     page.run_task(ads.preload_interstitial)
 
@@ -372,8 +494,9 @@ async def main(page: ft.Page) -> None:
 
     page.run_task(_silent_update_check)
 
-    # Mount UI
-    page.render(
+    # Mount UI — render_views: ft.Router(manage_views=True) emits the ft.View
+    # list that becomes page.views (back-stack, swipe-back, deep-link entry).
+    page.render_views(
         lambda: ServiceCtx(
             services,
             lambda: ControllerMethodsCtx(

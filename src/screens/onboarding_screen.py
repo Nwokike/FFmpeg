@@ -23,7 +23,7 @@ _SLIDES = [
         "icon.svg",
         True,
         "Welcome to FFmpeg",
-        "The complete, uncompromised power of FFmpeg 8 running directly on your phone. 100% private, ultra-fast, on-device.",
+        "The complete, uncompromised power of FFmpeg 8 running directly on your phone. Ultra-fast, on-device processing.",
     ),
     (
         ft.Icons.AUTO_AWESOME_ROUNDED,
@@ -35,7 +35,7 @@ _SLIDES = [
         ft.Icons.SHIELD_ROUNDED,
         False,
         "Private & Sovereign",
-        "Zero tracking, zero cloud uploads. Your media files and processed outputs stay strictly inside your device.",
+        "Your media files and processed outputs never leave your device — all conversion and editing happens on-device.",
     ),
 ]
 

@@ -165,7 +165,7 @@ def HomeScreen() -> ft.Control:
                                     "FFmpeg Media Studio", size=FONT_2XL, weight=ft.FontWeight.BOLD
                                 ),
                                 ft.Text(
-                                    "On-device processing • 100% private • PyAV & FFmpeg 8",
+                                    "On-device processing • PyAV & FFmpeg 8",
                                     size=FONT_SM,
                                     color=muted,
                                 ),

@@ -162,6 +162,20 @@ def AudioScreen() -> ft.Control:
                 ],
                 spacing=SPACE_SM,
             ),
+            # Output Format
+            section_header("Output Format", "Container / codec target", is_dark=is_dark),
+            ft.Row(
+                controls=[
+                    ft.Chip(
+                        label=ft.Text(fmt.upper() if fmt != "m4a" else "M4A (AAC)"),
+                        selected=audio_format == fmt,
+                        on_select=lambda _, f=fmt: set_audio_format(f),
+                    )
+                    for fmt in ["m4a", "mp3", "aac", "flac", "opus", "wav"]
+                ],
+                wrap=True,
+                spacing=SPACE_SM,
+            ),
             # Action button
             ft.FilledButton(
                 "Process & Master Audio",

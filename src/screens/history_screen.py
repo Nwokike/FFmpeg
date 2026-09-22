@@ -8,6 +8,7 @@ import flet as ft
 
 from components.empty_state import empty_state_view
 from components.job_card import job_card_view
+from core.notify import ERROR, show_snack
 from core.state import state
 from core.styles import section_header
 from core.theme import ACCENT_RED, is_dark_mode
@@ -57,6 +58,21 @@ def HistoryScreen() -> ft.Control:
 
     def _build_dismissible_card(job):
         card = job_card_view(job, is_dark=is_dark)
+
+        def _on_dismiss(_e):
+            # Delete, then offer Undo — swipe used to be unrecoverable data loss.
+            ctrl.delete_job(job.id)
+            show_snack(
+                page,
+                f"Deleted {Path(job.output_path).name or job.op}",
+                bgcolor=ERROR,
+                duration_ms=5000,
+                action=ft.SnackBarAction(
+                    label="UNDO",
+                    on_click=lambda _: ctrl.restore_job(job),
+                ),
+            )
+
         return ft.Dismissible(
             key=ft.ValueKey(job.id),
             content=card,
@@ -80,7 +96,7 @@ def HistoryScreen() -> ft.Control:
                 border_radius=RADIUS_MD,
                 alignment=ft.Alignment.CENTER_RIGHT,
             ),
-            on_dismiss=lambda _: ctrl.delete_job(job.id),
+            on_dismiss=_on_dismiss,
         )
 
     return ft.ListView(

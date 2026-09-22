@@ -21,6 +21,7 @@ class ControllerMethods:
     start_job: Callable[[Job], Any] = lambda job: None
     cancel_job: Callable[[str], Any] = lambda job_id: None
     delete_job: Callable[[str], None] = lambda job_id: None
+    restore_job: Callable[[Job], None] = lambda job: None
     retry_job: Callable[[Job], Any] = lambda job: None
     finish_onboarding: Callable[[], None] = lambda: None
     share_result: Callable[[Job], Any] = lambda job: None

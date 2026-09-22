@@ -47,6 +47,15 @@ def CutScreen() -> ft.Control:
 
     cut_duration = max(0.0, end_s - start_s)
 
+    def _set_trim_range(lo: float, hi: float) -> None:
+        """RangeSlider handler: keep an ordered, non-empty trim window."""
+        a = max(0.0, min(lo, hi))
+        b = min(float(total_dur), max(lo, hi))
+        if b - a < 0.05:
+            return
+        set_start_s(a)
+        set_end_s(b)
+
     def _start_cut(_):
         if not media_path or cut_duration <= 0.05:
             return
@@ -173,23 +182,23 @@ def CutScreen() -> ft.Control:
                 padding=SPACE_MD,
                 is_dark=is_dark,
             ),
-            # Start position slider
-            section_header("Start Offset", f"{_format_time_s(start_s)}", is_dark=is_dark),
-            ft.Slider(
-                value=float(start_s),
-                min=0.0,
-                max=float(max(1.0, end_s - 0.1)),
-                divisions=100,
-                on_change=lambda e: set_start_s(round(float(e.control.value), 2)),
+            # Trim range — one RangeSlider keeps start <= end by construction
+            # (the old interlinked Slider pair misbehaved on sub-second clips)
+            section_header(
+                "Trim Range",
+                f"{_format_time_s(start_s)} → {_format_time_s(end_s)}",
+                is_dark=is_dark,
             ),
-            # End position slider
-            section_header("End Offset", f"{_format_time_s(end_s)}", is_dark=is_dark),
-            ft.Slider(
-                value=float(end_s),
-                min=float(min(total_dur - 0.1, start_s + 0.1)),
-                max=float(total_dur),
+            ft.RangeSlider(
+                min=0.0,
+                max=float(max(total_dur, 0.5)),
+                start_value=float(start_s),
+                end_value=float(end_s),
                 divisions=100,
-                on_change=lambda e: set_end_s(round(float(e.control.value), 2)),
+                on_change=lambda e: _set_trim_range(
+                    round(float(e.control.start_value), 2),
+                    round(float(e.control.end_value), 2),
+                ),
             ),
             # Mode toggle
             section_header("Processing Mode", "Cutting method", is_dark=is_dark),
