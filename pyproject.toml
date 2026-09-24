@@ -4,24 +4,27 @@ version = "1.0.0"
 description = "FFmpeg — convert, transcode, compress, cut, extract, and filter any media on your phone. Powered by FFmpeg 8 via PyAV."
 readme = "README.md"
 requires-python = ">=3.14"
+# These packages are audited against one exact Flet/PyAV wire contract.
+# Keep the pins synchronized with uv.lock and pinned-deps.txt; a minor
+# framework release can change component constructors and event semantics.
 dependencies = [
-    "av>=18.1.0",
-    "flet>=1.0.0",
-    "flet-ads>=1.0.0",
-    "flet-audio>=1.0.0",
-    "flet-audio-recorder>=1.0.0",
-    "flet-camera>=1.0.0",
-    "flet-permission-handler>=1.0.0",
-    "flet-video>=1.0.0",
-    "httpx>=0.28.1",
+    "av==18.1.0",
+    "flet==1.0.1",
+    "flet-ads==1.0.1",
+    "flet-audio==1.0.1",
+    "flet-audio-recorder==1.0.1",
+    "flet-camera==1.0.1",
+    "flet-permission-handler==1.0.1",
+    "flet-video==1.0.1",
+    "httpx==0.28.1",
 ]
 
 [dependency-groups]
 dev = [
-    "flet-cli>=1.0.0",
-    "flet-desktop>=1.0.0",
-    "pytest>=9.1.1",
-    "ruff>=0.16.8",
+    "flet-cli==1.0.1",
+    "flet-desktop==1.0.1",
+    "pytest==9.1.1",
+    "ruff==0.16.8",
 ]
 
 [tool.uv]
@@ -36,31 +39,44 @@ product = "FFmpeg"
 company = "Kiri Research Labs"
 build_number = 1
 icon_background = "#0f1114"
+desktop_flavor = "full"
+# Cross-platform groups add matching iOS usage descriptions/entitlements;
+# Android's explicit permission table below remains intact.
+permissions = ["camera", "microphone"]
 
 [tool.flet.app]
 path = "src"
 
-[tool.flet.app.boot_screen]
-startup_message = "Initializing FFmpeg..."
+# flet-cli reads the built-in screen as { name = "flet", flet = { ... } }.
+[tool.flet.boot_screen]
+name = "flet"
+flet = { startup_message = "Initializing FFmpeg..." }
 
 [tool.flet.splash]
 color = "#ffffff"
 dark_color = "#0f1114"
 
-[tool.flet.deep_linking]
+# Android reads deep links from the ANDROID block only; a top-level
+# [tool.flet.deep_linking] is ignored for the APK.
+[tool.flet.android.deep_linking]
 scheme = "ffmpeg"
 host = "app"
 
 [tool.flet.android]
 bundle_id = "ng.kiri.ffmpeg"
-target_arch = ["arm64-v8a", "x86_64"]
-# av's Android wheels are built at ABI 24 (android_24) → match the floor.
-min_sdk_version = 24
+split_per_abi = true
+# PyAV loads bundled FFmpeg shared libraries through package paths; keep its
+# native extension unpacked instead of relying on zipimport layout.
+extract_packages = ["av"]
+# arm64-v8a only: x86_64 produced an emulator-only split in every build.
+target_arch = ["arm64-v8a"]
+# NOTE: `min_sdk_version` is NOT a flet-cli key (zero references in its
+# source) — av's wheels are built at ABI 24; the effective floor comes from
+# the Flutter/Gradle template, so verify the generated minSdk before tagging.
+# `manifest_application.usesCleartextTraffic` is likewise NOT merged (only
+# permission/feature/meta_data/provider are) — http:// capture depends on the
+# platform default, so test it on-device before advertising plain-http input.
 adaptive_icon_background = "#0f1114"
-
-[tool.flet.android.manifest_application]
-# http:// stream capture is a feature; https remains the default path.
-usesCleartextTraffic = "true"
 
 [tool.flet.android.meta_data]
 # Google test App ID (matches AdService USE_TEST_IDS=True). Swap to the
@@ -83,9 +99,8 @@ usesCleartextTraffic = "true"
 "android.software.leanback" = false
 "android.hardware.touchscreen" = true
 
-[tool.flet.android.signing]
-key_store = "../../../../kiri_keystore.jks"
-key_alias = "upload"
+# Signing credentials are supplied only through FLET_ANDROID_SIGNING_* env or
+# CLI flags; never commit a machine-relative keystore path.
 
 # flet-cli's Android template defaults to org.gradle.jvmargs=-Xmx8G (+4G
 # metaspace) — more than a 7 GB GitHub runner has, so CI builds OOM. Merged
@@ -96,10 +111,13 @@ key_alias = "upload"
 # Ship runtime code only: dev/test artifacts are stripped at package time.
 # Setting app_files also implies cleanup.app = true (verified in flet-cli).
 [tool.flet.cleanup]
-app = true
 app_files = [
     "tests",
     "tools",
+    "docs",
+    "screenshots",
+    "README.md",
+    "LICENSE",
     "spike.py",
     "deps-tree.txt",
     "pinned-deps.txt",
@@ -110,11 +128,39 @@ app_files = [
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]
+addopts = ["-ra", "-q"]
+strict_markers = true
+strict_config = true
+markers = [
+    "live: hits the real network; run explicitly with -m live",
+]
+filterwarnings = [
+    # Escalate warnings from our modules; leave third-party warnings visible.
+    "error:::^(services|screens|components|core|state|tests)(\\.|/)|^(app_shell|main)$",
+]
 
 [tool.ruff]
 line-length = 100
-target-version = "py314"
+# Keep formatter output importable by the Flet verifier/runtime as well as
+# Python 3.14; the app itself still requires Python 3.14.
+target-version = "py313"
 
 [tool.ruff.lint]
-select = ["E", "F", "W", "I", "UP"]
-ignore = ["E501"]
+# B/SIM/PERF/RUF/ASYNC/PTH/TRY added M3 (measured: 186 hits → driven to 0).
+# TRY003/TRY300 kept out for house style (long raise-messages; try/else shape).
+# BLE/S deliberately absent: broad-except + assert-in-tests are house rules.
+select = [
+    "E",
+    "F",
+    "W",
+    "I",
+    "UP",
+    "B",
+    "SIM",
+    "PERF",
+    "RUF",
+    "ASYNC",
+    "PTH",
+    "TRY",
+]
+ignore = ["E501", "TRY003", "TRY300"]

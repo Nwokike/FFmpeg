@@ -13,7 +13,12 @@ from typing import Any
 
 import flet as ft
 
-from core.constants import ADMOB_BANNER_UNIT_TEST, ADMOB_INTERSTITIAL_UNIT_TEST
+from core.constants import (
+    ADMOB_BANNER_UNIT_PROD,
+    ADMOB_BANNER_UNIT_TEST,
+    ADMOB_INTERSTITIAL_UNIT_PROD,
+    ADMOB_INTERSTITIAL_UNIT_TEST,
+)
 from core.state import state
 
 logger = logging.getLogger("AdService")
@@ -29,6 +34,8 @@ except ImportError:
 class AdService:
     """Coordinates Banner and Interstitial ads with Google UMP consent."""
 
+    # Swapped by tools/admob.py swap-ids (test ↔ prod) — a REAL branch: the
+    # flag now decides which unit IDs are served, and empty PROD IDs never win.
     USE_TEST_IDS = True
     INTERSTITIAL_COOLDOWN_SEC = 90.0
 
@@ -36,15 +43,22 @@ class AdService:
         self.page = page
         self.interstitial: Any | None = None
         self._consent_manager: Any | None = None
-        self._can_request_ads: bool = True
+        # Fail closed: no ad request may go out before UMP has answered.
+        self._can_request_ads: bool = False
+        self._interstitial_ready: bool = False
+        self._banner: ft.Control | None = None
         self._last_interstitial_time: float = 0.0
 
     @property
     def banner_unit_id(self) -> str:
+        if not self.USE_TEST_IDS and ADMOB_BANNER_UNIT_PROD:
+            return ADMOB_BANNER_UNIT_PROD
         return ADMOB_BANNER_UNIT_TEST
 
     @property
     def interstitial_unit_id(self) -> str:
+        if not self.USE_TEST_IDS and ADMOB_INTERSTITIAL_UNIT_PROD:
+            return ADMOB_INTERSTITIAL_UNIT_PROD
         return ADMOB_INTERSTITIAL_UNIT_TEST
 
     def _is_mobile(self) -> bool:
@@ -54,16 +68,28 @@ class AdService:
             logger.debug("Platform detection fallback: %s", e)
             return False
 
+    def _remove_service(self, service: Any) -> None:
+        """Remove a service by identity; dataclass equality can match twins."""
+        for registered in tuple(self.page.services):
+            if registered is service:
+                self.page.services.remove(registered)
+                break
+
     async def gather_consent(self) -> None:
         """Execute Google UMP consent request on mobile platforms."""
         if not _HAS_ADS or not self._is_mobile():
-            self._can_request_ads = True
+            # Ads never render off-mobile; keep the gate shut regardless.
+            self._can_request_ads = False
             return
 
         try:
-            self._consent_manager = fta.ConsentManager()
+            if self._consent_manager is None:
+                self._consent_manager = fta.ConsentManager()
             if self._consent_manager not in self.page.services:
                 self.page.services.append(self._consent_manager)
+                # A bare list append does not run Service.init(); sync the
+                # page before invoking the native consent method.
+                self.page.update()
 
             await self._consent_manager.request_consent_info_update()
             await self._consent_manager.load_and_show_consent_form_if_required()
@@ -77,7 +103,7 @@ class AdService:
 
     async def show_privacy_options(self) -> None:
         """Show privacy settings form if required by EU/UK regulation."""
-        if not self._consent_manager:
+        if not _HAS_ADS or not self._is_mobile() or not self._consent_manager:
             return
         try:
             status = await self._consent_manager.get_privacy_options_requirement_status()
@@ -88,9 +114,16 @@ class AdService:
             logger.warning("Privacy options display error: %s", exc)
 
     def get_banner_control(self) -> ft.Control:
-        """Return a BannerAd widget or transparent placeholder."""
+        """Return the cached BannerAd widget or a transparent placeholder.
+
+        Built once per service — constructing a new BannerAd on every render
+        spams ad requests and flickers. Only the real banner is cached: the
+        placeholder must be rebuilt once consent flips the gate open.
+        """
         if not _HAS_ADS or not self._is_mobile() or not self._can_request_ads:
             return ft.Container(height=0, width=0)
+        if self._banner is not None:
+            return self._banner
 
         try:
             banner = fta.BannerAd(
@@ -98,35 +131,51 @@ class AdService:
                 width=320,
                 height=50,
             )
-            return ft.Container(
+            self._banner = ft.Container(
                 content=banner,
                 alignment=ft.Alignment.CENTER,
                 height=50,
             )
+            return self._banner
         except Exception as exc:
             logger.warning("Failed creating banner ad: %s", exc)
             return ft.Container(height=0, width=0)
 
     async def preload_interstitial(self) -> None:
-        """Preload an interstitial ad into memory."""
+        """Preload an interstitial ad into memory (ready flag set on on_load)."""
         if not _HAS_ADS or not self._is_mobile() or not self._can_request_ads:
             return
         if not state.is_online:
             logger.info("Interstitial preload skipped: offline")
             return
+        if self.interstitial is not None:
+            return  # one in flight — never stack duplicates
+
+        def _on_load(_e) -> None:
+            self._interstitial_ready = True
+            logger.info("Interstitial ad loaded")
+
+        def _on_error(e) -> None:
+            logger.warning("Interstitial ad load error: %s", getattr(e, "data", e))
+            self._remove_service(ad)
+            self.interstitial = None
+            self._interstitial_ready = False
 
         try:
+            self._interstitial_ready = False
             ad = fta.InterstitialAd(
                 unit_id=self.interstitial_unit_id,
-                on_load=lambda e: logger.info("Interstitial ad loaded"),
-                on_error=lambda e: logger.warning(
-                    "Interstitial ad load error: %s", getattr(e, "data", e)
-                ),
+                on_load=_on_load,
+                on_error=_on_error,
             )
             self.interstitial = ad
             if ad not in self.page.services:
                 self.page.services.append(ad)
+                # Service registration happens during the page update cycle.
+                self.page.update()
         except Exception as exc:
+            self.interstitial = None
+            self._interstitial_ready = False
             logger.warning("Failed preloading interstitial: %s", exc)
 
     async def show_interstitial(self, on_close: Callable | None = None) -> bool:
@@ -158,14 +207,24 @@ class AdService:
             return False
 
         ad = self.interstitial
+        if ad is not None and not self._interstitial_ready:
+            # Still loading: show() would throw or silently no-op. Keep the
+            # ad (it may finish) and retry on the next natural break.
+            logger.info("Interstitial skipped: still loading")
+            if on_close:
+                if asyncio.iscoroutinefunction(on_close):
+                    await on_close()
+                else:
+                    on_close()
+            return False
         self.interstitial = None
+        self._interstitial_ready = False
 
         if ad is not None:
             self._last_interstitial_time = now
 
             async def _handle_close(e):
-                if ad in self.page.services:
-                    self.page.services.remove(ad)
+                self._remove_service(ad)
                 if on_close:
                     if asyncio.iscoroutinefunction(on_close):
                         await on_close()
@@ -174,13 +233,15 @@ class AdService:
                 await self.preload_interstitial()
 
             ad.on_close = _handle_close
+            # Push the handler to the native service before showing it; a
+            # close event can arrive immediately on a cached ad.
+            self.page.update()
             try:
                 await ad.show()
                 return True
             except Exception as exc:
                 logger.warning("Failed displaying interstitial: %s", exc)
-                if ad in self.page.services:
-                    self.page.services.remove(ad)
+                self._remove_service(ad)
 
         if on_close:
             if asyncio.iscoroutinefunction(on_close):

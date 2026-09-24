@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 import flet as ft
 
-from core.state import Job, state
+from core.state import Job, use_app_state
 from core.storage_paths import format_bytes, get_temp_dir
 from core.styles import card_container, section_header
 from core.theme import PRIMARY, TEXT_MUTED_DARK, TEXT_MUTED_LIGHT, is_dark_mode
@@ -20,14 +19,15 @@ def AudioScreen() -> ft.Control:
     """Audio post-production studio: EBU R128 loudness target presets and acoustic routing."""
     page = ft.context.page
     ctrl = use_controller()
-    is_dark = is_dark_mode(page)
+    app_state = use_app_state()
+    is_dark = is_dark_mode(page, app_state)
     muted = TEXT_MUTED_DARK if is_dark else TEXT_MUTED_LIGHT
 
-    media_path = state.current_media_path
+    media_path = app_state.current_media_path
     file_name = Path(media_path).name if media_path else "No file selected"
     file_size_str = (
         format_bytes(Path(media_path).stat().st_size)
-        if media_path and os.path.exists(media_path)
+        if media_path and Path(media_path).exists()
         else "0 B"
     )
 
@@ -65,9 +65,7 @@ def AudioScreen() -> ft.Control:
                 "channels": 2 if channel_layout == "stereo" else 1,
                 "sample_rate": int(sample_rate),
             },
-            original_size_bytes=Path(media_path).stat().st_size
-            if os.path.exists(media_path)
-            else 0,
+            original_size_bytes=Path(media_path).stat().st_size if Path(media_path).exists() else 0,
         )
         ctrl.start_job(job)
 

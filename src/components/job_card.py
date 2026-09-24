@@ -14,6 +14,7 @@ from core.tokens import FONT_MD, FONT_SM, FONT_XS, ICON_MD, RADIUS_MD, SPACE_MD,
 from state.controller_ctx import use_controller
 
 
+@ft.component
 def job_card_view(job: Job, is_dark: bool = True) -> ft.Control:
     """Card displaying a media job with real-time progress bar or result metadata."""
     ctrl = use_controller()
@@ -110,9 +111,7 @@ def job_card_view(job: Job, is_dark: bool = True) -> ft.Control:
     }
     card_icon = op_icons.get(
         job.op,
-        ft.Icons.AUDIOTRACK_OUTLINED
-        if "audio" in job.op
-        else ft.Icons.MOVIE_OUTLINED,
+        ft.Icons.AUDIOTRACK_OUTLINED if "audio" in job.op else ft.Icons.MOVIE_OUTLINED,
     )
 
     content_rows = [
@@ -156,13 +155,17 @@ def job_card_view(job: Job, is_dark: bool = True) -> ft.Control:
         content_rows.extend(
             [
                 ft.ProgressBar(
-                    value=max(0.0, min(job.progress, 1.0)), color=PRIMARY, bgcolor=bg_status
+                    value=max(0.0, min(job.progress or 0.0, 1.0)),
+                    color=PRIMARY,
+                    bgcolor=bg_status,
                 ),
                 ft.Row(
                     controls=[
                         ft.Text(job.status_message, size=FONT_XS, color=muted),
                         ft.Text(
-                            f"{int(job.progress * 100)}%", size=FONT_XS, weight=ft.FontWeight.W_600
+                            f"{int((job.progress or 0.0) * 100)}%",
+                            size=FONT_XS,
+                            weight=ft.FontWeight.W_600,
                         ),
                     ],
                     alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
@@ -171,7 +174,7 @@ def job_card_view(job: Job, is_dark: bool = True) -> ft.Control:
         )
     elif job.status == "completed":
         size_info = ""
-        if job.original_size_bytes > 0 and job.output_size_bytes > 0:
+        if (job.original_size_bytes or 0) > 0 and (job.output_size_bytes or 0) > 0:
             size_info = (
                 f"{format_bytes(job.original_size_bytes)} → {format_bytes(job.output_size_bytes)}"
             )

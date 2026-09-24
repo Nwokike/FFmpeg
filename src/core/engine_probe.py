@@ -1,20 +1,25 @@
-"""Engine capability probe — the M0 device-spike module.
+"""Engine capability probe — codecs, filters, formats and protocols.
 
 Everything here runs against the installed `av` wheel, so the SAME module
-answers the [UNVERIFIED-DEVICE] flags on a phone: `flet build apk` + the
-Engine Info screen both call into it. No assumptions — every result is a
-measured value from this exact wheel.
+answers device-specific questions on a phone: `flet build apk` + the Engine
+Info screen + the Streams screen's protocol badge all call into it. No
+assumptions — every result is a measured value from this exact wheel.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import time
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from fractions import Fraction
 from pathlib import Path
 
 import av
+import av.codec
+import av.filter
+
+from core.storage_paths import get_cache_dir
 
 logger = logging.getLogger(__name__)
 
@@ -87,6 +92,12 @@ class EngineProbe:
     filters: set[str] = field(default_factory=set)
     formats: set[str] = field(default_factory=set)
     hw_devices: set[str] = field(default_factory=set)
+    hardware_configs: list[str] = field(default_factory=list)
+    bitstream_filters: set[str] = field(default_factory=set)
+    video_codec_formats: dict[str, list[str]] = field(default_factory=dict)
+    audio_codec_formats: dict[str, list[str]] = field(default_factory=dict)
+    encoder_options: dict[str, list[str]] = field(default_factory=dict)
+    library_versions: str = ""
     protocol_probe: dict[str, str] = field(default_factory=dict)
     video_encoder_picks: list[str] = field(default_factory=list)
     audio_encoder_picks: list[str] = field(default_factory=list)
@@ -114,18 +125,21 @@ class EngineProbe:
         """Human-readable report (Engine Info screen + spike log)."""
         lines = [
             f"av {self.av_version}",
+            f"libraries: {self.library_versions or 'unavailable'}",
             f"codecs: {self.codec_count} total | decoders verified: {self.decoder_count}",
             f"filters: {self.filter_count} | formats: {self.format_count}",
+            f"bitstream filters: {len(self.bitstream_filters)}",
             f"video encoders (verified): {', '.join(self.video_encoder_picks) or 'NONE'}",
             f"audio encoders (verified): {', '.join(self.audio_encoder_picks) or 'NONE'}",
             f"hw devices: {', '.join(sorted(self.hw_devices)) or 'none detected'}",
+            f"hw configs: {len(self.hardware_configs)}",
+            f"encoder option sets: {len(self.encoder_options)}",
             "protocol probe: " + ", ".join(f"{k}={v}" for k, v in self.protocol_probe.items()),
             f"GIF pipeline: {'OK' if self.gif_ok else 'MISSING'}",
         ]
         if self.missing_required_filters:
             lines.append("MISSING required filters: " + ", ".join(self.missing_required_filters))
-        for note in self.notes:
-            lines.append(f"note: {note}")
+        lines.extend(f"note: {note}" for note in self.notes)
         return "\n".join(lines)
 
 
@@ -138,7 +152,8 @@ def _as_name_set(obj) -> set[str]:
     if callable(obj):
         try:
             obj = obj()
-        except Exception:
+        except Exception as exc:
+            logger.warning("Capability callable failed: %s", exc)
             return set()
     try:
         return {str(x) for x in obj}
@@ -147,7 +162,7 @@ def _as_name_set(obj) -> set[str]:
 
 
 def _codec_mode_available(name: str, mode: str) -> bool:
-    """True if `name` exists and supports `mode` ('e' or 'd')."""
+    """True if `name` exists and supports `mode` ('w' or 'r')."""
     if name not in _ALL_CODECS:
         return False
     try:
@@ -175,7 +190,67 @@ def _find_attr(root, *names) -> set[str]:
     return set()
 
 
+_PROBE_MEM: EngineProbe | None = None
+_SET_FIELDS = (
+    "codecs",
+    "encoders",
+    "decoders",
+    "filters",
+    "formats",
+    "hw_devices",
+    "bitstream_filters",
+)
+
+
+def _probe_cache_path() -> Path:
+    return get_cache_dir() / f"engine_probe_{av.__version__}_caps2.json"
+
+
+def _load_cached() -> EngineProbe | None:
+    """Disk tier: CACHE JSON keyed on the av wheel version (sets round-trip)."""
+    try:
+        path = _probe_cache_path()
+        if not path.is_file():
+            return None
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        valid = {f.name for f in fields(EngineProbe)}
+        payload = {k: v for k, v in payload.items() if k in valid}
+        for name in _SET_FIELDS:
+            payload[name] = set(payload.get(name, []))
+        return EngineProbe(**payload)
+    except Exception as exc:
+        logger.warning("Engine probe cache unreadable — re-measuring: %s", exc)
+        return None
+
+
+def _save_cached(p: EngineProbe) -> None:
+    try:
+        payload = asdict(p)
+        for name in _SET_FIELDS:
+            payload[name] = sorted(payload[name])
+        _probe_cache_path().write_text(json.dumps(payload, indent=1), encoding="utf-8")
+    except Exception as exc:
+        logger.warning("Engine probe cache write failed: %s", exc)
+
+
 def probe() -> EngineProbe:
+    """Full capability probe — measured once per wheel, then served from RAM
+    and a CACHE JSON. The socket-level protocol pass costs ~2s and cannot
+    change within one installed wheel, so Settings/Engine Info/spike reuse it.
+    """
+    global _PROBE_MEM, _ALL_CODECS
+    if _PROBE_MEM is None:
+        cached = _load_cached()
+        if cached is not None:
+            _PROBE_MEM = cached
+        else:
+            _PROBE_MEM = _measure()
+            _save_cached(_PROBE_MEM)
+    _ALL_CODECS = _PROBE_MEM.codecs
+    return _PROBE_MEM
+
+
+def _measure() -> EngineProbe:
     """Run the full capability probe against the installed av."""
     global _ALL_CODECS
     p = EngineProbe(av_version=av.__version__)
@@ -201,6 +276,45 @@ def probe() -> EngineProbe:
     p.filter_count = len(p.filters)
     p.formats = _find_attr(av, "formats_available", "av.format.formats_available")
     p.format_count = len(p.formats)
+    p.bitstream_filters = _as_name_set(getattr(av, "bitstream_filters_available", ()))
+    try:
+        p.library_versions = ", ".join(
+            f"{name} {version[0]}.{version[1]}.{version[2]}"
+            for name, version in av.library_versions.items()
+        )
+    except Exception as exc:
+        p.notes.append(f"library version report unavailable: {exc}")
+
+    # Measure encoder metadata instead of exposing only a flat name list.
+    # This powers honest codec/filter pickers and validates options before a
+    # job can fail halfway through a long encode.
+    for name in preferred:
+        try:
+            codec = av.Codec(name, "w")
+        except Exception:
+            continue
+        if codec.video_formats:
+            p.video_codec_formats[name] = [str(fmt.name) for fmt in codec.video_formats]
+        if codec.audio_formats:
+            p.audio_codec_formats[name] = [str(fmt.name) for fmt in codec.audio_formats]
+        for hw in codec.hardware_configs or []:
+            device = getattr(hw, "device_type", "unknown")
+            fmt = getattr(hw, "format", None)
+            p.hardware_configs.append(f"{name}:{device}:{getattr(fmt, 'name', 'any')}")
+        try:
+            ctx = av.CodecContext.create(name, "w")
+            p.encoder_options[name] = sorted(
+                {str(option.name) for option in ctx.supported_options.private}
+            )
+        except Exception as exc:
+            logger.debug("Encoder option probe failed for %s: %s", name, exc)
+
+    # Keep FFmpeg's native diagnostics visible in the app log instead of the
+    # wheel's default discard callback.
+    try:
+        av.logging.set_level(av.logging.WARNING)
+    except Exception as exc:
+        p.notes.append(f"av logging setup unavailable: {exc}")
 
     # Hardware accel (may be empty on the mobile build — that is a result, not a failure).
     try:
@@ -233,16 +347,24 @@ def _probe_protocol(proto: str) -> str:
     port = "443" if proto == "https" else "9"
     url = f"{proto}://127.0.0.1:{port}/"
     try:
-        import contextlib
-
-        with contextlib.suppress(Exception):
-            c = av.open(url, timeout=(1, 2))
-            c.close()
+        c = av.open(url, timeout=(1, 2))
+        c.close()
         return "present"
-    except av.error.ProtocolNotFound:
-        return "missing"
-    except Exception:
-        return "present"  # any other error means the protocol handler ran
+    except Exception as exc:
+        # PyAV 18 exposes ProtocolNotFoundError; older wheels used
+        # ProtocolNotFound.  Resolve the names from the installed module
+        # instead of assuming either spelling exists.
+        missing_types = tuple(
+            error_type
+            for name in ("ProtocolNotFound", "ProtocolNotFoundError")
+            if isinstance(error_type := getattr(av.error, name, None), type)
+        )
+        if missing_types and isinstance(exc, missing_types):
+            return "missing"
+        err_str = str(exc).lower()
+        if "protocol not found" in err_str or "unknown protocol" in err_str:
+            return "missing"
+        return "present"  # network errors (connection refused, timeout, etc.) mean the protocol handler ran
 
 
 def synthetic_transcode(out_dir: str | Path) -> dict:
@@ -270,8 +392,7 @@ def synthetic_transcode(out_dir: str | Path) -> dict:
         frame.planes[0].update(bytes(rows))
         return frame
 
-    codec_names = _ALL_CODECS or set(av.codec.codecs_available)
-    encoder = "libx264" if "libx264" in codec_names else "h264"
+    encoder = "libx264" if _codec_mode_available("libx264", "w") else "h264"
     tb = Fraction(1, fps)
 
     t0 = time.perf_counter()
@@ -330,6 +451,6 @@ def run() -> tuple[EngineProbe, dict]:
         result = synthetic_transcode(Path(__file__).resolve().parent.parent / "ui-spike")
         logger.info("Synthetic transcode self-test: %s", result)
     except Exception as exc:
-        logger.error("Synthetic transcode self-test failed: %s", exc)
+        logger.exception("Synthetic transcode self-test failed")
         result = {"ok": False, "error": str(exc)}
     return p, result

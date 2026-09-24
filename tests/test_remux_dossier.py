@@ -75,10 +75,7 @@ def _rich_source(tmp_path: Path) -> str:
             (
                 v
                 for k in range(1024)
-                for v in (
-                    int(8000 * math.sin(2 * math.pi * 440 * (n + k) / 44100)),
-                )
-                * 2
+                for v in (int(8000 * math.sin(2 * math.pi * 440 * (n + k) / 44100)),) * 2
             ),
         )
         n += 1024
@@ -98,6 +95,7 @@ def rich_source(tmp_path: Path) -> SimpleNamespace:
 
 
 # ── Probe upgrades ───────────────────────────────────────────────────────
+
 
 def test_probe_reads_rotation_chapters_disposition(rich_source):
     # Regression: chaptered MP4s carry a DataStream; probe used to raise
@@ -130,6 +128,7 @@ def test_probe_plain_synthetic_still_works(synthetic_media):
 
 # ── Report builder ───────────────────────────────────────────────────────
 
+
 def test_build_media_report_contains_essentials(rich_source):
     info = EngineService.probe(rich_source.path)
     report = build_media_report(info)
@@ -149,6 +148,7 @@ def test_fmt_ct_formats():
 
 
 # ── Remux (lossless track picker) ────────────────────────────────────────
+
 
 def test_remux_drops_audio_track(rich_source):
     out = str(rich_source.dir / "video_only.mkv")
@@ -196,7 +196,5 @@ def test_remux_cancel_cleans_up(rich_source):
     evt = threading.Event()
     evt.set()
     with pytest.raises(InterruptedError):
-        EngineService.remux(
-            rich_source.path, out, cancel_event=evt, on_progress=lambda p, m: None
-        )
+        EngineService.remux(rich_source.path, out, cancel_event=evt, on_progress=lambda p, m: None)
     assert not Path(out).exists()

@@ -7,8 +7,8 @@ import flet as ft
 from components.banner_ad import BannerAdView
 from components.empty_state import empty_state_view
 from components.job_card import job_card_view
-from core.state import state
-from core.styles import card_container, section_header, status_badge
+from core.state import use_app_state
+from core.styles import card_container, section_header
 from core.theme import (
     ACCENT_AMBER,
     ACCENT_BLUE,
@@ -21,9 +21,7 @@ from core.theme import (
     is_dark_mode,
 )
 from core.tokens import (
-    FONT_2XL,
     FONT_MD,
-    FONT_SM,
     FONT_XS,
     ICON_LG,
     RADIUS_LG,
@@ -40,7 +38,8 @@ def HomeScreen() -> ft.Control:
     """Dashboard presenting media tools, recent jobs, and engine status."""
     page = ft.context.page
     ctrl = use_controller()
-    is_dark = is_dark_mode(page)
+    app_state = use_app_state()
+    is_dark = is_dark_mode(page, app_state)
     muted = TEXT_MUTED_DARK if is_dark else TEXT_MUTED_LIGHT
 
     tools = [
@@ -161,7 +160,7 @@ def HomeScreen() -> ft.Control:
     ]
 
     # Recent items list
-    recent_items = state.history[:3] if state.history else []
+    recent_items = app_state.history[:3] if app_state.history else []
     recent_controls = (
         [job_card_view(j, is_dark=is_dark) for j in recent_items]
         if recent_items
@@ -175,38 +174,9 @@ def HomeScreen() -> ft.Control:
         ]
     )
 
-    return ft.ListView(
+    return ft.Column(
+        scroll=ft.ScrollMode.AUTO,
         controls=[
-            # Hero Header
-            card_container(
-                content=ft.Row(
-                    controls=[
-                        ft.Column(
-                            controls=[
-                                ft.Text(
-                                    "FFmpeg Media Studio", size=FONT_2XL, weight=ft.FontWeight.BOLD
-                                ),
-                                ft.Text(
-                                    "On-device processing • PyAV & FFmpeg 8",
-                                    size=FONT_SM,
-                                    color=muted,
-                                ),
-                            ],
-                            spacing=4,
-                            expand=True,
-                        ),
-                        status_badge(
-                            "ENGINE READY",
-                            text_color=PRIMARY,
-                            bg_color="#1E3E1C" if is_dark else "#E2F4E0",
-                        ),
-                    ],
-                    alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
-                ),
-                padding=SPACE_LG,
-                border_radius=RADIUS_LG,
-                is_dark=is_dark,
-            ),
             # Tools Section
             section_header("Studio Tools", "Select an operation to pick a file", is_dark=is_dark),
             ft.ResponsiveRow(controls=tool_controls, spacing=SPACE_MD, run_spacing=SPACE_MD),
@@ -215,13 +185,17 @@ def HomeScreen() -> ft.Control:
                 "Recent Jobs",
                 subtitle="Past conversions and exports",
                 action=ft.TextButton("View All", on_click=lambda _: ctrl.select_tab(1))
-                if state.history
+                if app_state.history
                 else None,
                 is_dark=is_dark,
             ),
             ft.Column(controls=recent_controls, spacing=SPACE_MD),
             # Banner Ad Slot
             BannerAdView(),
+            # Nav-bar clearance INSIDE the scroll (sibling pattern): the old
+            # fixed outer inset fought the scroll view's constraints and still
+            # fell short on gesture-nav phones — the last item stayed buried.
+            ft.Container(height=88),
         ],
         spacing=SPACE_LG,
         expand=True,

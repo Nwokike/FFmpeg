@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 import flet as ft
 
-from core.state import Job, state
+from core.state import Job, use_app_state
 from core.storage_paths import format_bytes, get_temp_dir
 from core.styles import card_container, section_header
 from core.theme import ACCENT_BLUE, TEXT_MUTED_DARK, TEXT_MUTED_LIGHT, is_dark_mode
@@ -20,13 +19,14 @@ def CompressScreen() -> ft.Control:
     """Target-size constraint view with messaging presets (WhatsApp, Discord, Email)."""
     page = ft.context.page
     ctrl = use_controller()
-    is_dark = is_dark_mode(page)
+    app_state = use_app_state()
+    is_dark = is_dark_mode(page, app_state)
     muted = TEXT_MUTED_DARK if is_dark else TEXT_MUTED_LIGHT
 
-    media_path = state.current_media_path
-    info = state.current_media_info
+    media_path = app_state.current_media_path
+    info = app_state.current_media_info
     file_name = Path(media_path).name if media_path else "No file selected"
-    orig_bytes = Path(media_path).stat().st_size if media_path and os.path.exists(media_path) else 0
+    orig_bytes = Path(media_path).stat().st_size if media_path and Path(media_path).exists() else 0
     orig_size_str = format_bytes(orig_bytes)
     duration_s = info.duration_s if info and info.duration_s > 0 else 10.0
 

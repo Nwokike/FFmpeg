@@ -13,6 +13,7 @@ import logging
 import flet as ft
 
 from core.engine_probe import probe
+from core.state import use_app_state
 from core.styles import card_container, section_header
 from core.theme import ACCENT_BLUE, TEXT_MUTED_DARK, TEXT_MUTED_LIGHT, is_dark_mode
 from core.tokens import FONT_LG, FONT_SM, RADIUS_LG, SPACE_MD, SPACE_SM
@@ -26,7 +27,8 @@ def EngineInfoScreen() -> ft.Control:
     """Capability report: codecs, encoders, filters, formats, protocols."""
     page = ft.context.page
     ctrl = use_controller()
-    is_dark = is_dark_mode(page)
+    app_state = use_app_state()
+    is_dark = is_dark_mode(page, app_state)
     muted = TEXT_MUTED_DARK if is_dark else TEXT_MUTED_LIGHT
 
     report, set_report = ft.use_state("")
@@ -35,8 +37,8 @@ def EngineInfoScreen() -> ft.Control:
     def _load_sync() -> str:
         try:
             return probe().to_text()
-        except Exception as exc:  # noqa: BLE001 — surface any probe failure in UI
-            logger.error("Engine probe failed: %s", exc)
+        except Exception as exc:
+            logger.exception("Engine probe failed")
             return f"Engine probe failed: {exc}"
 
     async def _load() -> None:
@@ -62,7 +64,9 @@ def EngineInfoScreen() -> ft.Control:
                 ],
                 spacing=SPACE_SM,
             ),
-            section_header("FFmpeg 8 Capability Status", "Probed live on this device", is_dark=is_dark),
+            section_header(
+                "FFmpeg 8 Capability Status", "Probed live on this device", is_dark=is_dark
+            ),
             card_container(
                 content=ft.Column(
                     controls=[

@@ -15,7 +15,7 @@
   <a href="https://github.com/Nwokike/FFmpeg/releases/latest"><img src="https://img.shields.io/badge/Download-APK-orange?style=for-the-badge&logo=android&logoColor=white" alt="Download APK" /></a>
   <a href="https://github.com/Nwokike/FFmpeg/releases/latest"><img src="https://img.shields.io/badge/Download_Windows-0078D6?style=for-the-badge&logo=windows&logoColor=white" alt="Windows" /></a>
   <a href="https://github.com/Nwokike/FFmpeg/releases/latest"><img src="https://img.shields.io/badge/Download_Linux-FCC624?style=for-the-badge&logo=linux&logoColor=black" alt="Linux" /></a>
-  <img src="https://img.shields.io/badge/Built%20with-Flet%201.0-00B0FF?style=for-the-badge&logo=flutter&logoColor=white" alt="Flet" />
+  <img src="https://img.shields.io/badge/Built%20with-Flet%201.0.1-00B0FF?style=for-the-badge&logo=flutter&logoColor=white" alt="Flet" />
   <img src="https://img.shields.io/badge/Python-3.14-3776AB?style=for-the-badge&logo=python&logoColor=white" alt="Python" />
 </p>
 
@@ -26,7 +26,7 @@
 | Platform | Download | Notes |
 | :---: | :---: | :--- |
 | 🤖 **Android** | [![Play Store](https://img.shields.io/badge/Google_Play-414141?style=flat-square&logo=google-play&logoColor=white)](https://play.google.com/store/apps/details?id=ng.kiri.ffmpeg) | Recommended for Android users |
-| 🪟 **Windows** | [![Windows Release](https://img.shields.io/badge/Download_Windows_Release-0078D6?style=flat-square&logo=windows&logoColor=white)](https://github.com/Nwokike/FFmpeg/releases/latest/download/FFmpeg_Setup.exe) | Automated standalone setup installer with desktop shortcut integration |
+| 🪟 **Windows** | [![Windows Release](https://img.shields.io/badge/Download_Windows_Release-0078D6?style=flat-square&logo=windows&logoColor=white)](https://github.com/Nwokike/FFmpeg/releases/latest/download/FFmpeg.exe) | Automated standalone setup installer with desktop shortcut integration |
 | 🐧 **Linux (Debian/Ubuntu)** | [![Linux DEB](https://img.shields.io/badge/Download_Linux_DEB-FCC624?style=flat-square&logo=linux&logoColor=white)](https://github.com/Nwokike/FFmpeg/releases/latest/download/FFmpeg.deb) | Desktop package tailored for Ubuntu, Debian, Linux Mint & Pop!_OS |
 | 🎩 **Linux (Fedora/RHEL)** | [![Linux RPM](https://img.shields.io/badge/Download_Linux_RPM-E91E63?style=flat-square&logo=redhat&logoColor=white)](https://github.com/Nwokike/FFmpeg/releases/latest/download/FFmpeg.rpm) | Desktop package tailored for Fedora, openSUSE, RHEL & CentOS |
 | 📦 **Linux (Universal Portable)** | [![Linux TAR.GZ](https://img.shields.io/badge/Download_Linux_TAR.GZ-9C27B0?style=flat-square&logo=linux&logoColor=white)](https://github.com/Nwokike/FFmpeg/releases/latest/download/FFmpeg.tar.gz) | Universal standalone portable archive for Arch, Alpine, Steam Deck & all distros |
@@ -36,7 +36,7 @@
 | Variant | Download | Notes |
 | :---: | :---: | :--- |
 | 📱 **ARM64** (most phones) | [**ffmpeg-arm64-v8a.apk**](https://github.com/Nwokike/FFmpeg/releases/latest/download/ffmpeg-arm64-v8a.apk) | Modern 64-bit Android devices |
-| 💻 **x86_64** (emulators) | [**ffmpeg-x86_64.apk**](https://github.com/Nwokike/FFmpeg/releases/latest/download/ffmpeg-x86_64.apk) | Chromebooks & Android emulators |
+| 💻 **x86_64** (emulator QA) | Not shipped in v1.0.0 | The release target is arm64-v8a; x86_64 can be added as a separate QA build. |
 
 ---
 
@@ -47,13 +47,14 @@
 | **Full FFmpeg 8 Engine** | Every codec, container and filter of the bundled FFmpeg build — enumerated live at runtime and surfaced in the UI, so the app always shows exactly what this device can do. |
 | **Convert, Transcode & Compress** | Any container to any container, quality presets or target file size ("small enough for WhatsApp/Telegram"), duration presets, bitrate/CRF advanced controls. |
 | **Cut / Trim** | Instant stream-copy cuts (keyframe-accurate) or frame-accurate re-encode, scrubbed on a live thumbnail strip. |
-| **Extract** | Audio (AAC/MP3/Opus/FLAC/WAV/PCM), frames, thumbnail grids, palette-optimized GIFs, SRT/ASS subtitles. |
-| **Filters** | Crop, scale, rotate/flip, speed (atempo), volume, EQ, denoise, sharpen, image watermark overlay, concat. |
-| **Audio Studio** | Loudness normalization (two-pass, use-case presets), resampling (incl. soxr), channel mixing, speed/pitch. |
+| **Extract** | Audio (AAC/MP3/Opus/FLAC/WAV/PCM), frame extraction, palette-optimized GIFs, and SRT/ASS/WebVTT subtitles. |
+| **Filters** | Crop, scale, rotate/flip, speed (atempo), volume, denoise, sharpen, image watermark overlay — plus color EQ and any other filter exactly as this device's FFmpeg build supports (the UI names what's missing). |
+| **Join** | Merge clips end-to-end: instant lossless when formats match, uniform re-encode when they don't, with optional crossfade transitions. |
+| **Audio Studio** | Loudness normalization (two-pass, use-case presets), resampling (incl. soxr), channel mixing, and playback-speed export. |
 | **Capture** | In-app camera video/still capture and microphone recording — straight into the conversion pipeline. |
 | **Live Streams** | Record HTTP/HTTPS/HLS/DASH streams on-device (feature-gated on engine support). |
 | **Batch Jobs** | Multi-file queue with per-job progress, cancel, pause and a jobs banner that survives tab switches. |
-| **Media Dossier** | Probe any file: streams, codecs, bitrates, dimensions, rotation, language, chapters, full `dumps_format` report — shareable on-device. |
+| **Media Dossier** | Probe any file: streams, codecs, bitrates, dimensions, rotation, language, chapters — with a raw container summary and a shareable markdown report. Includes lossless track-picker copies (drop audio/subtitle tracks without re-encoding). |
 | **Share & Save** | Save to Downloads/Movies via the system picker, or push outputs to any app via the system share sheet. |
 
 ---
@@ -62,7 +63,7 @@
 
 | Layer | Technology | Purpose |
 | :--- | :--- | :--- |
-| **Frontend** | Flet 1.0 (Flutter engine) | Cross-platform UI — M3 themes, adaptive video controls, on-demand lists, reorderable filter stacks |
+| **Frontend** | Flet 1.0 (Flutter engine) | Cross-platform UI — Material 3 themes, adaptive video controls, on-demand lists, chip-and-slider filter stacks |
 | **Media Engine** | `av` (PyAV 18, FFmpeg 8.1.2 bundled) | Decode/encode/mux/filter/resample — in-process, GIL-released C calls, cancel-aware |
 | **Playback** | `flet-video` (mpv backend, hardware decode) + `flet-audio` | Live before/after preview of sources and outputs |
 | **Capture** | `flet-camera` + `flet-audio-recorder` | In-app video/still/mic capture feeding the engine |
@@ -75,7 +76,7 @@
 ```mermaid
 graph TB
     subgraph FFMPEG_CLIENT ["📱 FFmpeg CLIENT (On-Device Media Studio)"]
-        UI["🎨 Flet 1.0 UI (Home | Convert | Compress | Cut | Extract | Filters | Audio | Batch | Streams | History | Settings)"]
+        UI["🎨 Flet 1.0 UI (Home | Capture | Convert | Compress | Cut | Extract | Filters | Audio | Join | Streams | Probe | Batch | History | Settings)"]
         Engine["⚙️ PyAV Engine (FFmpeg 8.1.2)"]
         Jobs["🧵 Job Queue (isolated worker threads)"]
         Storage["💾 Local Storage (data / cache / temp tiers)"]
@@ -117,10 +118,36 @@ graph TB
 
 ---
 
+## Screenshots
+
+The release screenshots are kept in [`screenshots/`](screenshots/) and should be refreshed whenever the main navigation or Settings surface changes.
+
+![FFmpeg home in dark mode](screenshots/home_dark.png)
+
+## Production release status
+
+`v1.0.0` is prepared as a closed-testing release. It intentionally uses Google test AdMob units while the AdMob production account is being finalized. Test units are not a public-production configuration; swap all IDs with [`tools/admob.py`](tools/admob.py) before the Play production release.
+
+The release workflow blocks test IDs on later production tags, runs the locked test suite, validates version/build identity, builds mobile wheels without hiding failures, and checks that development-only files do not enter Android artifacts.
+
+## Development and release checks
+
+```text
+uv sync --frozen
+uv run pytest -m "not live"
+uv run ruff check .
+uv run ruff format --check .
+uv run python tools/check_release_consistency.py
+uv run flet run -v
+uv run --frozen flet build apk --python-version 3.14 --split-per-abi -v
+```
+
+The CLI engine audit outputs used during the v1.0.0 preparation are kept outside Git in `audit-output/` so they can be inspected and deleted without affecting the repository.
+
 ## Privacy & Security
 
 1. **On-Device Processing** — media never leaves your phone; no cloud uploads, ever.
-2. **Zero Telemetry** — the only network calls are update checks and stream capture when you explicitly provide a URL.
+2. **Minimal Network Use** — the only network calls are update checks, in-app ads (AdMob, with startup UMP consent where required), and stream capture when you explicitly provide a URL. No analytics, no crash reporting, no media uploads.
 3. **Data Sovereignty** — outputs are written where you choose via the system picker or share sheet; nothing is auto-synced.
 4. **Local-First Storage** — settings, history and caches live in the app's private storage tiers and are fully clearable.
 
@@ -131,6 +158,10 @@ graph TB
 This app embeds FFmpeg libraries (LGPL/GPL components) via PyAV (BSD-3-Clause). You are solely responsible for ensuring your use of converted media complies with applicable copyright law and the terms of service of any platform you share content to. The authors take no responsibility for misuse of this tool.
 
 ---
+
+## License
+
+Proprietary © 2025–2026 Kiri Research Labs. See [`LICENSE`](LICENSE).
 
 ## Credits
 

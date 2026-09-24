@@ -13,9 +13,9 @@ Provides robust, thread-isolated implementations for:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
-import os
 import shutil
 import time
 from collections.abc import Callable
@@ -26,12 +26,122 @@ from pathlib import Path
 from threading import Event
 
 import av
+import av.codec
+import av.codec.hwaccel
+import av.filter
+import av.stream
 from av.error import FFmpegError
 from av.filter.loudnorm import stats as loudnorm_stats
+from av.video.reformatter import VideoReformatter
 
 from core.state import ChapterInfo, MediaInfo, MediaStreamInfo
+from core.storage_paths import get_cache_dir
 
 logger = logging.getLogger("EngineService")
+
+# Local media opens get bounded open/read waits so a disconnected SAF URI or
+# damaged SD card cannot freeze the serial worker indefinitely.
+_INPUT_TIMEOUT = (5.0, 15.0)
+
+# PyAV defaults to discarding native FFmpeg diagnostics. Keep warnings/errors
+# flowing into the app's logging bridge so a failed encode explains itself.
+try:
+    av.logging.set_level(av.logging.WARNING)
+except Exception:  # pragma: no cover - depends on the linked FFmpeg build
+    logger.debug("PyAV native logging could not be configured", exc_info=True)
+
+
+def _av_rational(value) -> av.AVRational:
+    """Convert PyAV's Fraction time bases to the type rescale_ts requires."""
+    if isinstance(value, av.AVRational):
+        return value
+    if value is None:
+        return av.AVRational(1, 1000)
+    return av.AVRational(value.numerator, value.denominator)
+
+
+def _decode_packet(packet):
+    """Yield decoded frames while isolating one malformed media packet.
+
+    Real-world files occasionally contain a truncated AAC/H.264 packet. FFmpeg
+    reports that packet as InvalidDataError; aborting an entire conversion for
+    one bad packet is less useful than continuing with the surrounding frames.
+    The warning is retained in the activity log so the output is not presented
+    as silently lossless.
+    """
+    try:
+        yield from packet.decode()
+    except av.error.InvalidDataError as exc:
+        stream = getattr(packet, "stream", None)
+        logger.warning(
+            "Skipping corrupt media packet (stream=%s pts=%s dts=%s): %s",
+            getattr(stream, "index", "?"),
+            getattr(packet, "pts", None),
+            getattr(packet, "dts", None),
+            exc,
+        )
+
+
+def _is_attached_picture(stream) -> bool:
+    """Matroska copy paths must skip cover-art video streams."""
+    try:
+        return stream.type == "video" and bool(
+            int(stream.disposition) & int(av.stream.Disposition.attached_pic)
+        )
+    except Exception:
+        return False
+
+
+def _codec_supports_mode(name: str, mode: str) -> bool:
+    """True if ``name`` can be constructed in ``mode`` ('w' encoder, 'r' decoder).
+
+    ``av.codec.codecs_available`` holds every descriptor name — decoders
+    included — so membership is NOT proof an encoder exists; constructing the
+    Codec in the target mode is the only honest check.
+    """
+    if name not in av.codec.codecs_available:
+        return False
+    try:
+        av.codec.Codec(name, mode=mode)
+        return True
+    except Exception:
+        return False
+
+
+def _hardware_decode(enabled: bool):
+    """Return a safe PyAV hardware decoder, or None when unavailable."""
+    if not enabled:
+        return None
+    try:
+        devices = list(av.codec.hwaccel.hwdevices_available())
+        for preferred in ("d3d11va", "qsv", "cuda", "vaapi", "dxva2"):
+            if preferred in devices:
+                logger.info("Using PyAV hardware decoder: %s", preferred)
+                return av.codec.hwaccel.HWAccel(preferred, allow_software_fallback=True)
+        logger.info("Hardware acceleration requested but no supported decoder is available")
+    except Exception as exc:
+        logger.info("Hardware acceleration unavailable: %s", exc)
+    return None
+
+
+def _pick_video_encoder(preferred: str = "libx264", fallback: str = "h264") -> str:
+    """Return ``preferred`` if this build can encode with it, else ``fallback``."""
+    return preferred if _codec_supports_mode(preferred, "w") else fallback
+
+
+def _supported_encoder_options(codec_name: str, requested: dict[str, str]) -> dict[str, str]:
+    """Keep only options advertised by this wheel's encoder context."""
+    try:
+        ctx = av.CodecContext.create(codec_name, "w")
+        valid = {str(option.name) for option in ctx.supported_options.private}
+    except Exception as exc:
+        logger.debug("Could not inspect options for %s: %s", codec_name, exc)
+        return requested
+    dropped = sorted(set(requested) - valid)
+    if dropped:
+        logger.info("Dropping unsupported %s encoder options: %s", codec_name, ", ".join(dropped))
+    return {key: value for key, value in requested.items() if key in valid}
+
 
 # Stream disposition flags surfaced in the dossier (av.stream.Disposition names)
 _DISPOSITION_FLAG_NAMES = (
@@ -62,7 +172,7 @@ def _fmt_srt_time(sec: float) -> str:
     """00:00:02,000 style (SRT)."""
     if sec < 0:
         sec = 0.0
-    ms = int(round(sec * 1000))
+    ms = round(sec * 1000)
     h, ms = divmod(ms, 3_600_000)
     m, ms = divmod(ms, 60_000)
     s, ms = divmod(ms, 1000)
@@ -73,7 +183,7 @@ def _fmt_vtt_time(sec: float) -> str:
     """00:00:02.000 style (WebVTT)."""
     if sec < 0:
         sec = 0.0
-    ms = int(round(sec * 1000))
+    ms = round(sec * 1000)
     h, ms = divmod(ms, 3_600_000)
     m, ms = divmod(ms, 60_000)
     s, ms = divmod(ms, 1000)
@@ -84,7 +194,7 @@ def _fmt_ass_time(sec: float) -> str:
     """0:00:02.00 style (ASS, centiseconds)."""
     if sec < 0:
         sec = 0.0
-    cs = int(round(sec * 100))
+    cs = round(sec * 100)
     h, cs = divmod(cs, 360_000)
     m, cs = divmod(cs, 6_000)
     s, cs = divmod(cs, 100)
@@ -111,17 +221,18 @@ _ASS_HEADER = (
 
 
 def _write_srt(path: str, cues: list[SubCue]) -> None:
-    blocks = []
-    for i, c in enumerate(cues, start=1):
-        blocks.append(f"{i}\n{_fmt_srt_time(c.start_s)} --> {_fmt_srt_time(c.end_s)}\n{c.text}\n")
+    blocks = [
+        f"{i}\n{_fmt_srt_time(c.start_s)} --> {_fmt_srt_time(c.end_s)}\n{c.text}\n"
+        for i, c in enumerate(cues, start=1)
+    ]
     Path(path).write_text("\n".join(blocks) + ("\n" if blocks else ""), encoding="utf-8")
 
 
 def _write_vtt(path: str, cues: list[SubCue]) -> None:
-    blocks = []
-    for c in cues:
-        blocks.append(f"{_fmt_vtt_time(c.start_s)} --> {_fmt_vtt_time(c.end_s)}\n{c.text}\n")
-    Path(path).write_text("WEBVTT\n\n" + "\n".join(blocks) + ("\n" if blocks else ""), encoding="utf-8")
+    blocks = [f"{_fmt_vtt_time(c.start_s)} --> {_fmt_vtt_time(c.end_s)}\n{c.text}\n" for c in cues]
+    Path(path).write_text(
+        "WEBVTT\n\n" + "\n".join(blocks) + ("\n" if blocks else ""), encoding="utf-8"
+    )
 
 
 def _write_ass(path: str, cues: list[SubCue]) -> None:
@@ -150,9 +261,11 @@ def _mjpeg_bytes(frame: av.VideoFrame, width: int) -> bytes:
     ctx.height = h
     ctx.pix_fmt = "yuvj420p"
     ctx.time_base = Fraction(1, 25)
+    ctx.open()
     packets = list(ctx.encode(rf))
     packets.extend(ctx.encode(None))
     return b"".join(bytes(p) for p in packets)
+
 
 # Fine-grained time base for the video filter pipeline: setpts at speed≠1 on a
 # coarse stream tb (e.g. 1/30) quantizes to duplicate pts → non-monotonic dts →
@@ -279,9 +392,7 @@ def _build_video_filter_graph(
         # hqdn3d is preferred but compiled out of this build; nlmeans and
         # atadenoise are the verified fallbacks.
         if "hqdn3d" in avail:
-            middle.append(
-                ("hqdn3d", "3:2:6:4" if denoise == "low" else "6:4:12:8")
-            )
+            middle.append(("hqdn3d", "3:2:6:4" if denoise == "low" else "6:4:12:8"))
         elif "nlmeans" in avail:
             middle.append(("nlmeans", f"s={'3' if denoise == 'low' else '7'}"))
         elif "atadenoise" in avail:
@@ -363,8 +474,7 @@ def _build_audio_filter_graph(
     nodes: list = [g.add_abuffer(**ab_kwargs)]
     if volume_pct != 100:
         nodes.append(g.add("volume", f"{volume_pct / 100.0}"))
-    for factor in _atempo_factors(speed):
-        nodes.append(g.add("atempo", str(factor)))
+    nodes.extend(g.add("atempo", str(factor)) for factor in _atempo_factors(speed))
     if len(nodes) == 1:
         return None
     nodes.append(g.add("abuffersink"))
@@ -378,8 +488,8 @@ def _discard_cancelled(path: str, *, directory: bool = False) -> None:
     try:
         if directory:
             shutil.rmtree(path, ignore_errors=True)
-        elif os.path.exists(path):
-            os.remove(path)
+        elif Path(path).exists():
+            Path(path).unlink()
     except OSError as exc:
         logger.warning("Failed to remove cancelled output %s: %s", path, exc)
 
@@ -420,7 +530,7 @@ def available_filters() -> set[str]:
     if _FILTERS_AVAIL is None:
         try:
             _FILTERS_AVAIL = set(av.filter.filters_available or [])
-        except Exception as exc:  # noqa: BLE001 — degrade to empty (all gated off)
+        except Exception as exc:
             logger.warning("Filter enumeration failed: %s", exc)
             _FILTERS_AVAIL = set()
     return _FILTERS_AVAIL
@@ -435,6 +545,7 @@ def _crop_dims(width: int, height: int, aspect: str) -> tuple[int, int]:
         rw, rh = (int(p) for p in aspect.split(":", 1))
         target = rw / rh
     except (ValueError, ZeroDivisionError):
+        logger.warning("Bad crop aspect %r — keeping %sx%s", aspect, width, height)
         return width, height
     current = width / height
     if current > target:
@@ -474,7 +585,7 @@ class EngineService:
         fmt_long = ""
         raw_dump = ""
 
-        with av.open(file_path, "r") as container:
+        with av.open(file_path, "r", timeout=_INPUT_TIMEOUT) as container:
             fmt_name = container.format.name
             fmt_long = container.format.long_name or fmt_name
             if container.duration is not None:
@@ -554,13 +665,13 @@ class EngineService:
             first_video = next((s for s in streams_info if s.stream_type == "video"), None)
             if first_video is not None and container.streams.video:
                 try:
-                    for _pkt in container.demux([container.streams.video[0]]):
+                    for _pkt in container.demux([container.streams.best("video")]):
                         _frames = _pkt.decode()
                         if _frames:
                             first_video.rotation = int(getattr(_frames[0], "rotation", 0) or 0)
                         break
-                except Exception as exc:  # noqa: BLE001 — badge is cosmetic
-                    logger.debug("Rotation probe failed: %s", exc)
+                except Exception as exc:
+                    logger.warning("Rotation probe failed: %s", exc)
 
             # Chapters (container dicts → ChapterInfo with seconds)
             chapters: list[ChapterInfo] = []
@@ -577,8 +688,8 @@ class EngineService:
                             end_s=float(raw_ch.get("end", 0) * tb),
                         )
                     )
-            except Exception as exc:  # noqa: BLE001
-                logger.debug("Chapter read failed: %s", exc)
+            except Exception as exc:
+                logger.warning("Chapter read failed: %s", exc)
 
             # Generate formatted overview text
             summary_lines = [
@@ -637,16 +748,30 @@ class EngineService:
         denoise: str | None = None,
         sharpen: int | None = None,
         watermark: dict | None = None,
+        hardware_accel: bool = False,
         on_progress: Callable[[float, str], None] | None = None,
         cancel_event: Event | None = None,
     ) -> str:
         """Transcode video/audio with quality, scaling, filters, and transforms."""
-        inp = av.open(input_path, "r")
-        out = av.open(output_path, "w")
+        hwaccel = _hardware_decode(hardware_accel)
+        inp = av.open(input_path, "r", timeout=_INPUT_TIMEOUT, hwaccel=hwaccel)
+        try:
+            out = av.open(output_path, "w")
+        except Exception:
+            inp.close()
+            raise
 
         try:
-            in_video = inp.streams.video[0] if inp.streams.video else None
-            in_audio = inp.streams.audio[0] if inp.streams.audio else None
+            # Container metadata + chapters ride along — only remux used to keep them.
+            if inp.metadata:
+                out.metadata.update(inp.metadata)
+            try:
+                out.set_chapters(inp.chapters())
+            except Exception as exc:
+                logger.debug("Chapter copy skipped: %s", exc)
+
+            in_video = inp.streams.best("video")
+            in_audio = inp.streams.best("audio")
 
             need_vfilter = (
                 rotation % 360 != 0
@@ -667,15 +792,16 @@ class EngineService:
                 target_fps = fps or int(in_video.average_rate or 30)
                 out_fps = max(1, min(target_fps, 60))
 
-                # Fallback to h264 if libx264 is unavailable
+                # Fallback to h264 when libx264 is not an available ENCODER
+                # (membership in codecs_available also covers decoders-only names).
                 chosen_vcodec = video_codec
-                if chosen_vcodec == "libx264" and "libx264" not in av.codec.codecs_available:
+                if chosen_vcodec == "libx264" and not _codec_supports_mode("libx264", "w"):
                     chosen_vcodec = "h264"
 
                 # setpts changes the effective frame rate (30fps sped 1.5x arrives
                 # as 45fps); declare it so the encoder's DTS model matches reality.
                 eff_rate = (
-                    max(1, -(-int(round(out_fps * speed * 1000)) // 1000))
+                    max(1, -(-round(out_fps * speed * 1000) // 1000))
                     if need_vfilter and speed > 0
                     else out_fps
                 )
@@ -707,12 +833,11 @@ class EngineService:
                 # With the filter graph active, timestamps arrive on the fine
                 # 1/90000 tb with speed-warped spacing; bf=0 makes dts==pts so the
                 # muxer sees the same strict sequence the graph produced.
-                out_video.time_base = (
-                    _FINE_VIDEO_TB if need_vfilter else Fraction(1, out_fps)
+                out_video.time_base = _FINE_VIDEO_TB if need_vfilter else Fraction(1, out_fps)
+                out_video.options = _supported_encoder_options(
+                    chosen_vcodec,
+                    {"crf": str(crf), "preset": preset} | ({"bf": "0"} if need_vfilter else {}),
                 )
-                out_video.options = {"crf": str(crf), "preset": preset}
-                if need_vfilter:
-                    out_video.options["bf"] = "0"
 
             out_audio = None
             if in_audio:
@@ -721,6 +846,47 @@ class EngineService:
                 # PyAV 18: channels is read-only; layout is the writable source of truth
                 n_ch = min(2, in_audio.channels or 2)
                 out_audio.layout = "stereo" if n_ch == 2 else "mono"
+
+            video_reformatter = VideoReformatter()
+            last_video_pts = -1
+
+            def _monotonic_video_pts(frame: av.VideoFrame) -> None:
+                """Rebase every output frame to the encoder time base.
+
+                Hardware decoders and VFR sources can hand FFmpeg duplicate or
+                backwards timestamps.  The MP4 muxer requires strict DTS
+                monotonicity, so preserve timing when possible and advance by
+                one tick when the source timestamp is not strictly increasing.
+                """
+                nonlocal last_video_pts
+                out_tb = out_video.time_base or Fraction(1, out_fps)
+                candidate = None
+                if frame.pts is not None and frame.time_base is not None:
+                    candidate = round(Fraction(frame.pts) * frame.time_base / out_tb)
+                if candidate is None or candidate <= last_video_pts:
+                    candidate = last_video_pts + 1
+                frame.pts = candidate
+                frame.time_base = out_tb
+                # Decoder keyframe hints describe the source GOP, not the
+                # output encoder's GOP; forwarding them makes libx264 force
+                # extra I-frames (and can interact badly with hw decode).
+                frame.pict_type = 0
+                frame.key_frame = False
+                last_video_pts = candidate
+
+            last_audio_pts = -1
+
+            def _monotonic_audio_pts(frame: av.AudioFrame) -> None:
+                nonlocal last_audio_pts
+                out_tb = out_audio.time_base or Fraction(1, out_audio.rate or 44100)
+                candidate = None
+                if frame.pts is not None and frame.time_base is not None:
+                    candidate = round(Fraction(frame.pts) * frame.time_base / out_tb)
+                if candidate is None or candidate <= last_audio_pts:
+                    candidate = last_audio_pts + max(1, frame.samples)
+                frame.pts = candidate
+                frame.time_base = out_tb
+                last_audio_pts = candidate
 
             total_duration = float(inp.duration or 0) / float(av.time_base) if inp.duration else 1.0
             last_report = 0.0
@@ -734,11 +900,11 @@ class EngineService:
                     logger.info("Transcode cancelled by user.")
                     break
 
-                if packet.dts is None:
+                if packet.size == 0 or (packet.pts is None and packet.dts is None):
                     continue
 
                 if in_video and packet.stream == in_video:
-                    for frame in packet.decode():
+                    for frame in _decode_packet(packet):
                         if cancel_event and cancel_event.is_set():
                             break
 
@@ -770,20 +936,20 @@ class EngineService:
                                 or frame.height != out_video.height
                                 or frame.format.name != "yuv420p"
                             ):
-                                frame = frame.reformat(
+                                frame = video_reformatter.reformat(
+                                    frame,
                                     width=out_video.width,
                                     height=out_video.height,
                                     format="yuv420p",
                                 )
 
                             if out_video:
-                                if video_graph is None:
-                                    frame.pts = None  # let encoder handle sequential pts
+                                _monotonic_video_pts(frame)
                                 for enc_pkt in out_video.encode(frame):
                                     out.mux(enc_pkt)
 
                 elif in_audio and packet.stream == in_audio:
-                    for frame in packet.decode():
+                    for frame in _decode_packet(packet):
                         if cancel_event and cancel_event.is_set():
                             break
                         if not out_audio:
@@ -794,8 +960,7 @@ class EngineService:
                         if audio_graph is not None:
                             out_frames = _push_pull(audio_graph, frame)
                         for frame in out_frames:
-                            if audio_graph is None:
-                                frame.pts = None
+                            _monotonic_audio_pts(frame)
                             for enc_pkt in out_audio.encode(frame):
                                 out.mux(enc_pkt)
 
@@ -817,11 +982,13 @@ class EngineService:
                         or frame.height != out_video.height
                         or frame.format.name != "yuv420p"
                     ):
-                        frame = frame.reformat(
+                        frame = video_reformatter.reformat(
+                            frame,
                             width=out_video.width,
                             height=out_video.height,
                             format="yuv420p",
                         )
+                    _monotonic_video_pts(frame)
                     for enc_pkt in out_video.encode(frame):
                         out.mux(enc_pkt)
             if audio_graph is not None and out_audio:
@@ -843,9 +1010,9 @@ class EngineService:
             out.close()
 
         if cancel_event and cancel_event.is_set():
-            if os.path.exists(output_path):
+            if Path(output_path).exists():
                 try:
-                    os.remove(output_path)
+                    Path(output_path).unlink()
                 except OSError as e:
                     logging.getLogger(__name__).warning("Failed to remove cancelled output: %s", e)
             raise InterruptedError("Transcoding was cancelled")
@@ -874,29 +1041,34 @@ class EngineService:
         scale_h = None
         v_stream = info.video_stream
         if v_stream and v_stream.width and v_stream.height:
-            if video_bitrate < 400000:  # < 400kbps -> 480p
-                if v_stream.width > 854:
-                    scale_w = 854
-                    scale_h = int(854 * (v_stream.height / v_stream.width))
+            if video_bitrate < 400000 and v_stream.width > 854:  # <400kbps -> 480p
+                scale_w = 854
+                scale_h = int(854 * (v_stream.height / v_stream.width))
             elif video_bitrate < 1000000:  # < 1Mbps -> 720p
                 if v_stream.width > 1280:
                     scale_w = 1280
                     scale_h = int(1280 * (v_stream.height / v_stream.width))
 
         # Perform 1-pass constrained transcode with target bitrate
-        inp = av.open(input_path, "r")
-        out = av.open(output_path, "w")
+        inp = av.open(input_path, "r", timeout=_INPUT_TIMEOUT)
+        try:
+            out = av.open(output_path, "w")
+        except Exception:
+            inp.close()
+            raise
 
         try:
-            in_video = inp.streams.video[0] if inp.streams.video else None
-            in_audio = inp.streams.audio[0] if inp.streams.audio else None
+            if inp.metadata:
+                out.metadata.update(inp.metadata)
+
+            in_video = inp.streams.best("video")
+            in_audio = inp.streams.best("audio")
 
             out_video = None
             if in_video:
                 fps = int(in_video.average_rate or 30)
-                out_video = out.add_stream(
-                    "libx264" if "libx264" in av.codec.codecs_available else "h264", rate=fps
-                )
+                chosen_vcodec = _pick_video_encoder()
+                out_video = out.add_stream(chosen_vcodec, rate=fps)
                 target_w = (scale_w or in_video.width or 640) // 2 * 2
                 target_h = (scale_h or in_video.height or 360) // 2 * 2
                 out_video.width = target_w
@@ -904,14 +1076,42 @@ class EngineService:
                 out_video.pix_fmt = "yuv420p"
                 out_video.time_base = Fraction(1, fps)
                 out_video.bit_rate = video_bitrate
-                out_video.max_bit_rate = int(video_bitrate * 1.3)
-                out_video.options = {"preset": "fast"}
+                out_video.options = _supported_encoder_options(chosen_vcodec, {"preset": "fast"})
 
             out_audio = None
             if in_audio:
                 out_audio = out.add_stream("aac", rate=in_audio.rate or 44100)
                 out_audio.bit_rate = audio_bitrate
                 out_audio.layout = "stereo"
+
+            last_video_pts = -1
+            last_audio_pts = -1
+
+            def _monotonic_video_pts(frame: av.VideoFrame) -> None:
+                nonlocal last_video_pts
+                out_tb = out_video.time_base or Fraction(1, 30)
+                candidate = None
+                if frame.pts is not None and frame.time_base is not None:
+                    candidate = round(Fraction(frame.pts) * frame.time_base / out_tb)
+                if candidate is None or candidate <= last_video_pts:
+                    candidate = last_video_pts + 1
+                frame.pts = candidate
+                frame.time_base = out_tb
+                frame.pict_type = 0
+                frame.key_frame = False
+                last_video_pts = candidate
+
+            def _monotonic_audio_pts(frame: av.AudioFrame) -> None:
+                nonlocal last_audio_pts
+                out_tb = out_audio.time_base or Fraction(1, out_audio.rate or 44100)
+                candidate = None
+                if frame.pts is not None and frame.time_base is not None:
+                    candidate = round(Fraction(frame.pts) * frame.time_base / out_tb)
+                if candidate is None or candidate <= last_audio_pts:
+                    candidate = last_audio_pts + max(1, frame.samples)
+                frame.pts = candidate
+                frame.time_base = out_tb
+                last_audio_pts = candidate
 
             last_report = 0.0
             processed_pts = 0.0
@@ -920,11 +1120,11 @@ class EngineService:
                 _pause_hook(cancel_event)
                 if cancel_event and cancel_event.is_set():
                     break
-                if packet.dts is None:
+                if packet.size == 0 or (packet.pts is None and packet.dts is None):
                     continue
 
                 if in_video and packet.stream == in_video:
-                    for frame in packet.decode():
+                    for frame in _decode_packet(packet):
                         if cancel_event and cancel_event.is_set():
                             break
                         if out_video:
@@ -936,18 +1136,18 @@ class EngineService:
                                 frame = frame.reformat(
                                     width=out_video.width, height=out_video.height, format="yuv420p"
                                 )
-                            frame.pts = None
+                            _monotonic_video_pts(frame)
                             for enc_pkt in out_video.encode(frame):
                                 out.mux(enc_pkt)
                         if frame.time:
                             processed_pts = frame.time
 
                 elif in_audio and packet.stream == in_audio:
-                    for frame in packet.decode():
+                    for frame in _decode_packet(packet):
                         if cancel_event and cancel_event.is_set():
                             break
                         if out_audio:
-                            frame.pts = None
+                            _monotonic_audio_pts(frame)
                             for enc_pkt in out_audio.encode(frame):
                                 out.mux(enc_pkt)
 
@@ -971,9 +1171,9 @@ class EngineService:
             out.close()
 
         if cancel_event and cancel_event.is_set():
-            if os.path.exists(output_path):
+            if Path(output_path).exists():
                 try:
-                    os.remove(output_path)
+                    Path(output_path).unlink()
                 except OSError as e:
                     logging.getLogger(__name__).warning("Failed to remove cancelled output: %s", e)
             raise InterruptedError("Compression cancelled")
@@ -1018,8 +1218,8 @@ class EngineService:
             if snapped < 0:
                 return 0.0
             return min(snapped, start_s)
-        except Exception as exc:  # noqa: BLE001 — snap is best-effort
-            logger.debug("Keyframe snap unavailable: %s", exc)
+        except Exception as exc:
+            logger.warning("Keyframe snap unavailable: %s", exc)
             return start_s
 
     @staticmethod
@@ -1031,20 +1231,30 @@ class EngineService:
         on_progress: Callable[[float, str], None] | None = None,
         cancel_event: Event | None = None,
     ) -> str:
-        inp = av.open(input_path, "r")
-        out = av.open(output_path, "w")
+        inp = av.open(input_path, "r", timeout=_INPUT_TIMEOUT)
+        try:
+            out = av.open(output_path, "w")
+        except Exception:
+            inp.close()
+            raise
 
         try:
             stream_map = {}
             for s in inp.streams:
-                if s.type in ("video", "audio", "subtitle"):
+                if s.type in ("video", "audio", "subtitle") and not _is_attached_picture(s):
                     out_s = out.add_stream_from_template(s, opaque=True)
                     stream_map[s] = out_s
+            if inp.metadata:
+                out.metadata.update(inp.metadata)
+            try:
+                out.set_chapters(inp.chapters())
+            except Exception as exc:
+                logger.debug("Chapter copy skipped: %s", exc)
 
             # Seek to start timestamp
             # Instant cuts must begin on a keyframe — snap and tell the user.
             actual_start = start_s
-            video_src = inp.streams.video[0] if inp.streams.video else None
+            video_src = inp.streams.best("video")
             if video_src is not None:
                 snapped = EngineService._snap_start_to_keyframe(video_src, start_s)
                 if snapped < start_s - 1e-6:
@@ -1066,22 +1276,33 @@ class EngineService:
                 _pause_hook(cancel_event)
                 if cancel_event and cancel_event.is_set():
                     break
-                if packet.pts is None:
+                if packet.size == 0:
+                    continue
+                ts = packet.pts if packet.pts is not None else packet.dts
+                if ts is None:
                     continue
 
-                pkt_time = float(packet.pts * packet.stream.time_base)
+                pkt_time = float(ts * packet.stream.time_base)
                 if pkt_time < actual_start:
                     continue
                 if pkt_time > end_s:
                     break
 
                 out_s = stream_map[packet.stream]
-                # Rebase PTS/DTS to start at 0
-                if packet.stream.index not in start_pts_map:
-                    start_pts_map[packet.stream.index] = packet.pts
+                # Template streams normally share the input time base; rescale
+                # when they don't.  PyAV 18 exposes stream bases as Fraction
+                # but rescale_ts requires AVRational.
+                if out_s.time_base is not None and packet.time_base != out_s.time_base:
+                    packet.rescale_ts(_av_rational(out_s.time_base))
 
-                base = start_pts_map[packet.stream.index]
-                packet.pts = packet.pts - base
+                # Rebase PTS/DTS to start at 0, in the OUTPUT time base
+                stream_idx = packet.stream.index
+                if stream_idx not in start_pts_map:
+                    start_pts_map[stream_idx] = packet.pts if packet.pts is not None else packet.dts
+
+                base = start_pts_map[stream_idx]
+                if packet.pts is not None:
+                    packet.pts = packet.pts - base
                 if packet.dts is not None:
                     packet.dts = packet.dts - base
                 packet.stream = out_s
@@ -1114,29 +1335,63 @@ class EngineService:
         on_progress: Callable[[float, str], None] | None = None,
         cancel_event: Event | None = None,
     ) -> str:
-        inp = av.open(input_path, "r")
-        out = av.open(output_path, "w")
+        inp = av.open(input_path, "r", timeout=_INPUT_TIMEOUT)
+        try:
+            out = av.open(output_path, "w")
+        except Exception:
+            inp.close()
+            raise
 
         try:
-            in_video = inp.streams.video[0] if inp.streams.video else None
-            in_audio = inp.streams.audio[0] if inp.streams.audio else None
+            in_video = inp.streams.best("video")
+            in_audio = inp.streams.best("audio")
 
             out_video = None
             if in_video:
                 fps = int(in_video.average_rate or 30)
-                out_video = out.add_stream(
-                    "libx264" if "libx264" in av.codec.codecs_available else "h264", rate=fps
-                )
+                chosen_vcodec = _pick_video_encoder()
+                out_video = out.add_stream(chosen_vcodec, rate=fps)
                 out_video.width = in_video.width
                 out_video.height = in_video.height
                 out_video.pix_fmt = "yuv420p"
                 out_video.time_base = Fraction(1, fps)
-                out_video.options = {"crf": "20", "preset": "fast"}
+                out_video.options = _supported_encoder_options(
+                    chosen_vcodec, {"crf": "20", "preset": "fast"}
+                )
 
             out_audio = None
             if in_audio:
                 out_audio = out.add_stream("aac", rate=in_audio.rate or 44100)
                 out_audio.layout = "stereo"
+
+            last_video_pts = -1
+            last_audio_pts = -1
+
+            def _monotonic_video_pts(frame: av.VideoFrame) -> None:
+                nonlocal last_video_pts
+                out_tb = out_video.time_base or Fraction(1, 30)
+                candidate = None
+                if frame.pts is not None and frame.time_base is not None:
+                    candidate = round(Fraction(frame.pts) * frame.time_base / out_tb)
+                if candidate is None or candidate <= last_video_pts:
+                    candidate = last_video_pts + 1
+                frame.pts = candidate
+                frame.time_base = out_tb
+                frame.pict_type = 0
+                frame.key_frame = False
+                last_video_pts = candidate
+
+            def _monotonic_audio_pts(frame: av.AudioFrame) -> None:
+                nonlocal last_audio_pts
+                out_tb = out_audio.time_base or Fraction(1, out_audio.rate or 44100)
+                candidate = None
+                if frame.pts is not None and frame.time_base is not None:
+                    candidate = round(Fraction(frame.pts) * frame.time_base / out_tb)
+                if candidate is None or candidate <= last_audio_pts:
+                    candidate = last_audio_pts + max(1, frame.samples)
+                frame.pts = candidate
+                frame.time_base = out_tb
+                last_audio_pts = candidate
 
             # Seek close to start
             inp.seek(int(max(0.0, start_s - 2.0) * av.time_base), backward=True)
@@ -1149,13 +1404,13 @@ class EngineService:
                     break
 
                 if in_video and packet.stream == in_video:
-                    for frame in packet.decode():
+                    for frame in _decode_packet(packet):
                         if frame.time is None or frame.time < start_s:
                             continue
                         if frame.time > end_s:
                             break
                         if out_video:
-                            frame.pts = None
+                            _monotonic_video_pts(frame)
                             for enc_pkt in out_video.encode(frame):
                                 out.mux(enc_pkt)
                         now = time.monotonic()
@@ -1165,13 +1420,13 @@ class EngineService:
                             on_progress(prog, f"Encoding cut... {int(prog * 100)}%")
 
                 elif in_audio and packet.stream == in_audio:
-                    for frame in packet.decode():
+                    for frame in _decode_packet(packet):
                         if frame.time is None or frame.time < start_s:
                             continue
                         if frame.time > end_s:
                             break
                         if out_audio:
-                            frame.pts = None
+                            _monotonic_audio_pts(frame)
                             for enc_pkt in out_audio.encode(frame):
                                 out.mux(enc_pkt)
 
@@ -1202,7 +1457,7 @@ class EngineService:
         is given (it NULLs the Python wrapper's handle before the C pass), so this
         container is intentionally never closed — closing would double-free.
         """
-        stats_container = av.open(input_path, "r")
+        stats_container = av.open(input_path, "r", timeout=_INPUT_TIMEOUT)
         audio_streams = stats_container.streams.audio
         if not audio_streams:
             stats_container.close()
@@ -1213,9 +1468,7 @@ class EngineService:
             return data if isinstance(data, dict) else {}
         except Exception as exc:
             # Handle already NULLed on entry to stats(); do not close.
-            logger.warning(
-                "Loudnorm measurement failed, falling back to dynamic mode: %s", exc
-            )
+            logger.warning("Loudnorm measurement failed, falling back to dynamic mode: %s", exc)
             return {}
 
     @staticmethod
@@ -1231,12 +1484,14 @@ class EngineService:
         cancel_event: Event | None = None,
     ) -> str:
         """Extract audio with optional LUFS mastering, channel mix, and soxr resampling."""
+        # Do not create a partial output while the serial queue is paused.
+        _pause_hook(cancel_event)
         codec_map = {
-            "mp3": "libmp3lame" if "libmp3lame" in av.codec.codecs_available else "mp3",
+            "mp3": "libmp3lame" if _codec_supports_mode("libmp3lame", "w") else "mp3",
             "aac": "aac",
             "m4a": "aac",
             "flac": "flac",
-            "opus": "libopus" if "libopus" in av.codec.codecs_available else "opus",
+            "opus": "libopus" if _codec_supports_mode("libopus", "w") else "opus",
             "wav": "pcm_s16le",
         }
 
@@ -1247,11 +1502,15 @@ class EngineService:
             else None
         )
 
-        inp = av.open(input_path, "r")
-        out = av.open(output_path, "w")
+        inp = av.open(input_path, "r", timeout=_INPUT_TIMEOUT)
+        try:
+            out = av.open(output_path, "w")
+        except Exception:
+            inp.close()
+            raise
 
         try:
-            in_audio = inp.streams.audio[0] if inp.streams.audio else None
+            in_audio = inp.streams.best("audio")
             if not in_audio:
                 raise ValueError("No audio stream found in source media")
 
@@ -1267,6 +1526,15 @@ class EngineService:
             if chosen_codec != "pcm_s16le":
                 out_audio.bit_rate = bitrate_kbps * 1000
             out_audio.layout = target_layout
+
+            # Open the encoder before the first packet so fixed-frame codecs
+            # (AAC/MP3/FLAC) expose their real frame_size. AudioFifo then keeps
+            # partial decoder frames instead of relying on lucky buffer sizes.
+            try:
+                out.start_encoding()
+            except Exception as exc:
+                logger.debug("Audio encoder pre-open deferred: %s", exc)
+            audio_fifo = av.AudioFifo() if out_audio.frame_size > 0 else None
 
             # soxr-quality rate/layout conversion when this FFmpeg build has
             # libsoxr; otherwise _emit falls back to plain swr on first use.
@@ -1307,7 +1575,24 @@ class EngineService:
             cur_pts = 0.0
 
             def _encode(f: av.AudioFrame) -> None:
+                nonlocal audio_fifo
                 f.pts = None  # encoder assigns sequential sample positions
+                if audio_fifo is not None:
+                    try:
+                        audio_fifo.write(f)
+                        while audio_fifo.samples >= out_audio.frame_size:
+                            full = audio_fifo.read(out_audio.frame_size, partial=False)
+                            if full is None:
+                                break
+                            for enc_pkt in out_audio.encode(full):
+                                out.mux(enc_pkt)
+                        return
+                    except (TypeError, ValueError) as exc:
+                        # A decoder format that the FIFO cannot represent is
+                        # still valid for the encoder's own resampler; fall
+                        # back rather than dropping the take.
+                        logger.debug("AudioFifo fallback to encoder resampler: %s", exc)
+                        audio_fifo = None
                 for enc_pkt in out_audio.encode(f):
                     out.mux(enc_pkt)
 
@@ -1321,9 +1606,7 @@ class EngineService:
                             logger.warning(
                                 "soxr resampler unavailable (%s); falling back to swr", exc
                             )
-                            resampler = av.AudioResampler(
-                                layout=target_layout, rate=out_rate
-                            )
+                            resampler = av.AudioResampler(layout=target_layout, rate=out_rate)
                             resampled = resampler.resample(f)
                         for rf in resampled:
                             _encode(rf)
@@ -1334,7 +1617,7 @@ class EngineService:
                 _pause_hook(cancel_event)
                 if cancel_event and cancel_event.is_set():
                     break
-                for frame in packet.decode():
+                for frame in _decode_packet(packet):
                     if cancel_event and cancel_event.is_set():
                         break
                     if frame.time:
@@ -1372,6 +1655,11 @@ class EngineService:
             if resampler is not None:
                 for rf in resampler.resample(None):
                     _encode(rf)
+            if audio_fifo is not None:
+                tail = audio_fifo.read(partial=True)
+                if tail is not None:
+                    for enc_pkt in out_audio.encode(tail):
+                        out.mux(enc_pkt)
             for enc_pkt in out_audio.encode(None):
                 out.mux(enc_pkt)
 
@@ -1407,9 +1695,9 @@ class EngineService:
         total = len(timestamps)
         idx = 0
 
-        inp = av.open(input_path, "r")
+        inp = av.open(input_path, "r", timeout=_INPUT_TIMEOUT)
         try:
-            v_stream = inp.streams.video[0] if inp.streams.video else None
+            v_stream = inp.streams.best("video")
             if not v_stream:
                 raise ValueError("No video stream found in source media")
 
@@ -1420,13 +1708,11 @@ class EngineService:
                 _pause_hook(cancel_event)
                 if cancel_event and cancel_event.is_set():
                     break
-                for frame in packet.decode():
+                for frame in _decode_packet(packet):
                     t = frame.time
                     while idx < total and t is not None and t >= timestamps[idx]:
                         ts = timestamps[idx]
-                        frame_path = str(
-                            out_p / f"frame_{idx + 1:03d}_{int(ts)}s.{format_name}"
-                        )
+                        frame_path = str(out_p / f"frame_{idx + 1:03d}_{int(ts)}s.{format_name}")
                         try:
                             frame.save(frame_path)
                         except Exception as save_err:
@@ -1473,11 +1759,15 @@ class EngineService:
         so every frame is dithered against the segment-wide palette; falls back to
         a direct rgb8 encode if the palette filters are unavailable on this build.
         """
-        inp = av.open(input_path, "r")
-        out = av.open(output_path, "w", format="gif")
+        inp = av.open(input_path, "r", timeout=_INPUT_TIMEOUT)
+        try:
+            out = av.open(output_path, "w", format="gif")
+        except Exception:
+            inp.close()
+            raise
 
         try:
-            in_video = inp.streams.video[0] if inp.streams.video else None
+            in_video = inp.streams.best("video")
             if not in_video:
                 raise ValueError("No video stream found")
 
@@ -1509,7 +1799,7 @@ class EngineService:
                 if cancel_event and cancel_event.is_set():
                     break
                 segment_done = False
-                for frame in packet.decode():
+                for frame in _decode_packet(packet):
                     if frame.time is None or frame.time < start_s:
                         continue
                     if frame.time > end_s:
@@ -1560,14 +1850,12 @@ class EngineService:
                 raise InterruptedError("cancelled")
 
             if graph is not None:
-                drained = 0
-                for rf in _drain_graph(graph):
+                for drained, rf in enumerate(_drain_graph(graph), start=1):
                     if rf.width != out_w or rf.height != out_h or rf.format.name != "rgb8":
                         rf = rf.reformat(width=out_w, height=out_h, format="rgb8")
                     rf.pts = None
                     for enc_pkt in out_video.encode(rf):
                         out.mux(enc_pkt)
-                    drained += 1
                     if on_progress:
                         frac = min(1.0, drained / max(1, pushed))
                         on_progress(
@@ -1612,7 +1900,7 @@ class EngineService:
         if writer is None:
             raise ValueError(f"Unsupported subtitle format: {format_name}")
 
-        inp = av.open(input_path, "r")
+        inp = av.open(input_path, "r", timeout=_INPUT_TIMEOUT)
         try:
             subs = inp.streams.subtitles
             if not subs:
@@ -1695,26 +1983,39 @@ class EngineService:
         """
         if not times:
             return []
+        # CACHE read-through: keyed on file identity (path + mtime_ns + size)
+        # and the exact request — Cut-screen revisits load instantly; only a
+        # complete strip is written back, so partial failures re-decode.
+        cache_dir: Path | None = None
+        try:
+            st = Path(input_path).stat()
+            sig = f"{input_path}|{st.st_mtime_ns}|{st.st_size}|{width}|{times}"
+            key = hashlib.sha256(sig.encode()).hexdigest()[:16]
+            cache_dir = get_cache_dir() / f"thumbs_{key}"
+            hits = [cache_dir / f"{i:02d}.jpg" for i in range(len(times))]
+            if all(f.is_file() for f in hits):
+                return [f.read_bytes() for f in hits]
+        except OSError as exc:
+            logger.warning("Thumbnail cache read failed: %s", exc)
+            cache_dir = None
         order = sorted(range(len(times)), key=lambda i: times[i])
         results: dict[int, bytes] = {}
-        inp = av.open(input_path, "r")
+        inp = av.open(input_path, "r", timeout=_INPUT_TIMEOUT)
         try:
-            v = inp.streams.video[0] if inp.streams.video else None
+            v = inp.streams.best("video")
             if not v:
                 return []
             inp.seek(int(max(0.0, times[order[0]] - 1.0) * av.time_base), backward=True)
             idx = 0
             done = False
             for packet in inp.demux([v]):
-                for frame in packet.decode():
+                for frame in _decode_packet(packet):
                     t = frame.time
                     while idx < len(order) and t is not None and t >= times[order[idx]]:
                         try:
                             results[order[idx]] = _mjpeg_bytes(frame, width)
-                        except Exception as exc:  # noqa: BLE001 — cosmetic
-                            logger.debug(
-                                "Thumb at %.2fs failed: %s", times[order[idx]], exc
-                            )
+                        except Exception as exc:
+                            logger.warning("Thumb at %.2fs failed: %s", times[order[idx]], exc)
                         idx += 1
                         if idx >= len(order):
                             done = True
@@ -1725,7 +2026,15 @@ class EngineService:
                     break
         finally:
             inp.close()
-        return [results[i] for i in range(len(times)) if i in results]
+        ordered = [results[i] for i in range(len(times)) if i in results]
+        if cache_dir is not None and len(ordered) == len(times):
+            try:
+                cache_dir.mkdir(parents=True, exist_ok=True)
+                for i, data in enumerate(ordered):
+                    (cache_dir / f"{i:02d}.jpg").write_bytes(data)
+            except OSError as exc:
+                logger.warning("Thumbnail cache write failed: %s", exc)
+        return ordered
 
     @staticmethod
     def keyframe_times(input_path: str, limit: int = 24) -> list[float]:
@@ -1735,8 +2044,8 @@ class EngineService:
         container has no usable index (MPEG-TS etc.) — UI degrades gracefully.
         """
         try:
-            with av.open(input_path, "r") as inp:
-                v = inp.streams.video[0] if inp.streams.video else None
+            with av.open(input_path, "r", timeout=_INPUT_TIMEOUT) as inp:
+                v = inp.streams.best("video")
                 if v is None:
                     return []
                 entries = v.index_entries
@@ -1749,8 +2058,8 @@ class EngineService:
                 sampled = keys[::step][:limit]
                 tb = v.time_base
                 return sorted(float(e.timestamp * tb) for e in sampled)
-        except Exception as exc:  # noqa: BLE001 — markers are cosmetic
-            logger.debug("Keyframe index unavailable: %s", exc)
+        except Exception as exc:
+            logger.warning("Keyframe index unavailable: %s", exc)
             return []
 
     @staticmethod
@@ -1769,14 +2078,37 @@ class EngineService:
         copied explicitly. Cancel follows the M1 pattern: remove + InterruptedError.
         """
         drop = set(drop_indices or [])
-        inp = av.open(input_path, "r")
-        out = av.open(output_path, "w", format="matroska")
+        inp = av.open(input_path, "r", timeout=_INPUT_TIMEOUT)
         try:
+            out = av.open(output_path, "w", format="matroska")
+        except Exception:
+            inp.close()
+            raise
+        try:
+            if inp.metadata:
+                out.metadata.update(inp.metadata)
             stream_map = {}
+            kept_attachments = False
+            for attachment in inp.streams.attachments:
+                try:
+                    out.add_attachment(
+                        attachment.name,
+                        attachment.mimetype,
+                        attachment.data,
+                    )
+                    kept_attachments = True
+                except Exception as exc:
+                    logger.debug("Attachment copy skipped (%s): %s", attachment.name, exc)
             for s in inp.streams:
                 if s.index in drop or s.type not in ("video", "audio", "subtitle"):
                     continue
-                out_s = out.add_stream_from_template(s, opaque=True)
+                if _is_attached_picture(s):
+                    continue
+                try:
+                    out_s = out.add_stream_from_template(s, opaque=True)
+                except Exception as exc:
+                    logger.debug("Data/stream copy skipped for %s: %s", s.index, exc)
+                    continue
                 # add_stream_from_template is a NO-OP for metadata/disposition
                 # on this build (verified: both come across empty) — copy them
                 # explicitly before the header is written. Disposition is an
@@ -1784,16 +2116,16 @@ class EngineService:
                 out_s.metadata.update(s.metadata)
                 try:
                     out_s.disposition = int(s.disposition)
-                except Exception as exc:  # noqa: BLE001 — flags are best-effort
+                except Exception as exc:
                     logger.debug("Disposition copy skipped: %s", exc)
                 stream_map[s] = out_s
-            if not stream_map:
+            if not stream_map and not kept_attachments:
                 raise ValueError("Nothing to keep — every stream was excluded")
 
             try:
                 out.set_chapters(inp.chapters())
-            except Exception as exc:  # noqa: BLE001 — chapters are best-effort
-                logger.debug("Chapter copy skipped: %s", exc)
+            except Exception as exc:
+                logger.warning("Chapter copy skipped: %s", exc)
 
             total_s = (float(inp.duration or 0) / float(av.time_base)) if inp.duration else 0.0
             last_report = 0.0
@@ -1802,18 +2134,17 @@ class EngineService:
                 _pause_hook(cancel_event)
                 if cancel_event and cancel_event.is_set():
                     break
-                if packet.size == 0 or packet.pts is None:
+                if packet.size == 0 or (packet.pts is None and packet.dts is None):
                     continue
-                pkt_time = float(packet.pts * packet.stream.time_base)
+                ts = packet.pts if packet.pts is not None else packet.dts
+                pkt_time = float(ts * packet.stream.time_base)
                 packet.stream = stream_map[packet.stream]
                 out.mux(packet)
 
                 now = time.monotonic()
                 if on_progress and (now - last_report >= 0.25):
                     last_report = now
-                    prog = (
-                        min(0.99, max(0.01, pkt_time / total_s)) if total_s > 0 else 0.5
-                    )
+                    prog = min(0.99, max(0.01, pkt_time / total_s)) if total_s > 0 else 0.5
                     on_progress(prog, f"Copying streams... {int(prog * 100)}%")
 
             if on_progress:
@@ -1842,10 +2173,25 @@ class EngineService:
         anything else → uniform re-encode (scaled to the first clip's shape)."""
         if not paths or len(paths) < 2:
             raise ValueError("Pick at least two files to join")
-        if transition != "cut":
-            raise ValueError(f"Unsupported transition: {transition}")
 
         infos = [EngineService.probe(p) for p in paths]
+
+        if transition == "crossfade":
+            gate_reason = EngineService._crossfade_gate(infos, fade_s)
+            if gate_reason is None:
+                return EngineService._concat_crossfade(
+                    paths,
+                    infos,
+                    output_path,
+                    container_format,
+                    fade_s,
+                    on_progress,
+                    cancel_event,
+                )
+            logger.warning("Crossfade unavailable (%s) — falling back to instant join", gate_reason)
+        elif transition != "cut":
+            raise ValueError(f"Unsupported transition: {transition}")
+
         if EngineService._concat_copyable(infos):
             return EngineService._concat_stream_copy(
                 paths, output_path, container_format, on_progress, cancel_event
@@ -1853,6 +2199,52 @@ class EngineService:
         return EngineService._concat_reencode(
             paths, infos, output_path, container_format, on_progress, cancel_event
         )
+
+    @staticmethod
+    def _crossfade_gate(infos: list[MediaInfo], fade_s: float) -> str | None:
+        """None when crossfade can run; otherwise a human-readable reason.
+
+        Gates (all proven necessary by the window empirics): alphamerge +
+        overlay (+ acrossfade when audio present) compiled in; every clip has
+        video, matching fps, ≤1080p, and room for both windows; audio layouts
+        match; fade snaps cleanly to the frame grid.
+        """
+        avail = available_filters()
+        needed = {"alphamerge", "overlay"}
+        if any(s.audio_stream for s in infos):
+            needed.add("acrossfade")
+        missing = needed - avail
+        if missing:
+            return f"filters not in this build: {', '.join(sorted(missing))}"
+
+        first = infos[0]
+        fv = first.video_stream
+        if fv is None:
+            return "first file has no video"
+        for other in infos:
+            ov = other.video_stream
+            if ov is None:
+                return "a file has no video stream"
+            if abs((ov.fps or 0) - (fv.fps or 0)) > 0.05:
+                return "frame rates differ"
+            if (ov.width or 0) > 1920 or (ov.height or 0) > 1080:
+                return "sources above 1080p"
+            if other.duration_s <= fade_s * 2 + 0.2:
+                return f"{other.file_name} is too short for a {fade_s}s fade"
+            oa, fa = other.audio_stream, first.audio_stream
+            if (oa is None) != (fa is None):
+                return "some clips have audio, others don't"
+            if (
+                oa is not None
+                and fa is not None
+                and (oa.sample_rate != fa.sample_rate or oa.channels != fa.channels)
+            ):
+                return "audio layouts differ"
+        # fade must land on a frame boundary for every clip's timeline
+        fps = fv.fps or 30.0
+        if abs(round(fade_s * fps) - fade_s * fps) > 1e-6:
+            return f"{fade_s}s doesn't snap to {fps:g} fps frames"
+        return None
 
     @staticmethod
     def _concat_copyable(infos: list[MediaInfo]) -> bool:
@@ -1899,20 +2291,23 @@ class EngineService:
             out_by_pos: list = []
             tb_by_pos: list = []
             last_pts: dict[int, int] = {}
+            last_dts: dict[int, int] = {}
 
             for fi, path in enumerate(paths):
                 if cancel_event and cancel_event.is_set():
                     cancelled = True
                     break
-                inp = av.open(path, "r")
+                inp = av.open(path, "r", timeout=_INPUT_TIMEOUT)
                 try:
                     src_streams = [
-                        s for s in inp.streams if s.type in ("video", "audio", "subtitle")
+                        s
+                        for s in inp.streams
+                        if s.type in ("video", "audio", "subtitle") and not _is_attached_picture(s)
                     ]
                     if fi == 0:
                         for s in src_streams:
                             out_by_pos.append(out.add_stream_from_template(s, opaque=True))
-                            tb_by_pos.append(s.time_base or Fraction(1, 1000))
+                            tb_by_pos.append(_av_rational(s.time_base or Fraction(1, 1000)))
 
                     # Boundary constant per stream: land one tick past the previous
                     # file's final pts (computed on the FIRST packet of this file).
@@ -1931,21 +2326,33 @@ class EngineService:
                             packet.rescale_ts(target_tb)
 
                         key = pos
+                        native_pts = packet.pts if packet.pts is not None else 0
+                        native_dts = packet.dts if packet.dts is not None else native_pts
                         if key not in first_native:
-                            first_native[key] = packet.pts or 0
-                            prev = last_pts.get(key)
-                            if prev is not None:
-                                shift[key] = prev + 1 - first_native[key]
-                            else:
-                                shift[key] = 0
+                            first_native[key] = native_pts
+                            prev_pts = last_pts.get(key)
+                            prev_dts = last_dts.get(key)
+                            shift[key] = max(
+                                prev_pts + 1 - native_pts if prev_pts is not None else 0,
+                                prev_dts + 1 - native_dts if prev_dts is not None else 0,
+                            )
                         delta = shift.get(key, 0)
                         if packet.pts is not None:
                             packet.pts = packet.pts + delta
                         if packet.dts is not None:
                             packet.dts = packet.dts + delta
-                        if packet.pts is not None:
-                            cur = last_pts.get(pos)
-                            last_pts[pos] = packet.pts if cur is None else max(cur, packet.pts)
+                        if packet.pts is None:
+                            packet.pts = native_pts + delta
+                        if packet.dts is None:
+                            packet.dts = native_dts + delta
+                        previous_dts = last_dts.get(pos)
+                        if previous_dts is not None and packet.dts <= previous_dts:
+                            packet.dts = previous_dts + 1
+                        previous_pts = last_pts.get(pos)
+                        if previous_pts is not None and packet.pts <= previous_pts:
+                            packet.pts = previous_pts + 1
+                        last_pts[pos] = packet.pts
+                        last_dts[pos] = packet.dts
 
                         packet.stream = out_by_pos[pos]
                         out.mux(packet)
@@ -1993,13 +2400,15 @@ class EngineService:
             out_w = max(2, (fv.width or 640 // 2 * 2) // 2 * 2)
             out_h = max(2, (fv.height or 360 // 2 * 2) // 2 * 2)
             out_video = None
-            chosen_v = "libx264" if "libx264" in av.codec.codecs_available else "h264"
+            chosen_v = _pick_video_encoder()
             out_video = out.add_stream(chosen_v, rate=out_fps)
             out_video.width = out_w
             out_video.height = out_h
             out_video.pix_fmt = "yuv420p"
             out_video.time_base = Fraction(1, out_fps)
-            out_video.options = {"crf": "23", "preset": "fast"}
+            out_video.options = _supported_encoder_options(
+                chosen_v, {"crf": "23", "preset": "fast"}
+            )
 
             out_audio = None
             if fa is not None:
@@ -2010,10 +2419,10 @@ class EngineService:
                 if cancel_event and cancel_event.is_set():
                     cancelled = True
                     break
-                inp = av.open(path, "r")
+                inp = av.open(path, "r", timeout=_INPUT_TIMEOUT)
                 try:
-                    in_video = inp.streams.video[0] if inp.streams.video else None
-                    in_audio = inp.streams.audio[0] if inp.streams.audio else None
+                    in_video = inp.streams.best("video")
+                    in_audio = inp.streams.best("audio")
                     streams = [s for s in (in_video, in_audio) if s]
 
                     for packet in inp.demux(streams):
@@ -2022,7 +2431,7 @@ class EngineService:
                             break
                         _pause_hook(cancel_event)
                         if in_video and packet.stream == in_video:
-                            for frame in packet.decode():
+                            for frame in _decode_packet(packet):
                                 if out_video is None:
                                     break
                                 if (
@@ -2039,7 +2448,7 @@ class EngineService:
                                 for enc_pkt in out_video.encode(frame):
                                     out.mux(enc_pkt)
                         elif in_audio and packet.stream == in_audio and out_audio is not None:
-                            for frame in packet.decode():
+                            for frame in _decode_packet(packet):
                                 frame.pts = None
                                 for enc_pkt in out_audio.encode(frame):
                                     out.mux(enc_pkt)
@@ -2068,6 +2477,443 @@ class EngineService:
             _discard_cancelled(output_path)
             raise InterruptedError("Join cancelled")
         return output_path
+
+    @staticmethod
+    def _concat_crossfade(
+        paths: list[str],
+        infos: list[MediaInfo],
+        output_path: str,
+        container_format: str | None,
+        fade_s: float,
+        on_progress: Callable[[float, str], None] | None,
+        cancel_event: Event | None,
+    ) -> str:
+        """Uniform re-encode join with crossfades at every boundary.
+
+        Video timeline is OUTPUT-INDEX based (pts = round(idx·90000/fps)) —
+        immune to the per-clip pts-domain traps the xfade path fell into.
+        Each boundary runs the empirically-verified window recipe:
+        alphamerge(B + Python-generated alpha ramp) composited over A via
+        overlay, with B shifted into A's native domain for framesync pairing;
+        output frames are then re-stamped by index like the mid segments.
+        Audio windows use acrossfade (native pts in, encode-time +cursor shift
+        out — verified monotonic); mid audio is seconds-based (t - start + cursor).
+        """
+        first = infos[0]
+        fps = first.video_stream.fps or 30.0
+        fade_frames = max(1, round(fade_s * fps))
+        fade = fade_frames / fps  # grid-snapped fade duration
+        out_w = max(2, ((first.video_stream.width or 640) // 2) * 2)
+        out_h = max(2, ((first.video_stream.height or 360) // 2) * 2)
+        first_audio = first.audio_stream
+        fine = Fraction(1, 90000)
+        out_rate = int(first_audio.sample_rate) if first_audio else 0
+
+        def vid_pts(idx: int) -> int:
+            return round(idx * 90000.0 / fps)
+
+        out = av.open(output_path, "w", format=container_format)
+        cancelled = False
+        try:
+            chosen_v = _pick_video_encoder()
+            out_video = out.add_stream(chosen_v, rate=max(1, round(fps)))
+            out_video.width = out_w
+            out_video.height = out_h
+            out_video.pix_fmt = "yuv420p"
+            out_video.time_base = fine
+            out_video.options = _supported_encoder_options(
+                chosen_v, {"crf": "23", "preset": "fast", "bf": "0"}
+            )
+
+            out_audio = None
+            if first_audio is not None:
+                out_audio = out.add_stream("aac", rate=out_rate)
+                out_audio.layout = "stereo" if (first_audio.channels or 2) >= 2 else "mono"
+
+            v_idx = 0  # output video frame index → the ONLY video timeline
+            audio_pts_cursor = -1
+            last_audio_packet_dts = -1
+            last_audio_packet_pts = -1
+            cursor = 0.0  # output seconds where the next segment begins
+
+            def enc_video(frame) -> None:
+                nonlocal v_idx
+                frame.time_base = fine
+                frame.pts = vid_pts(v_idx)
+                v_idx += 1
+                for enc_pkt in out_video.encode(frame):
+                    out.mux(enc_pkt)
+
+            def enc_audio(frame, out_seconds: float) -> None:
+                nonlocal audio_pts_cursor, last_audio_packet_dts, last_audio_packet_pts
+                if out_audio is None:
+                    return
+                frame.time_base = Fraction(1, out_rate)
+                candidate = round(out_seconds * out_rate)
+                if candidate <= audio_pts_cursor:
+                    candidate = audio_pts_cursor + max(1, frame.samples)
+                frame.pts = candidate
+                audio_pts_cursor = candidate
+                for enc_pkt in out_audio.encode(frame):
+                    if enc_pkt.dts is None or enc_pkt.dts <= last_audio_packet_dts:
+                        enc_pkt.dts = last_audio_packet_dts + 1
+                    if enc_pkt.pts is None or enc_pkt.pts <= last_audio_packet_pts:
+                        enc_pkt.pts = last_audio_packet_pts + 1
+                    last_audio_packet_dts = enc_pkt.dts
+                    last_audio_packet_pts = enc_pkt.pts
+                    out.mux(enc_pkt)
+
+            def reformat_to_out(frame):
+                if frame.width != out_w or frame.height != out_h or frame.format.name != "yuv420p":
+                    return frame.reformat(width=out_w, height=out_h, format="yuv420p")
+                return frame
+
+            for i, path in enumerate(paths):
+                if cancel_event and cancel_event.is_set():
+                    cancelled = True
+                    break
+                _pause_hook(cancel_event)
+                info = infos[i]
+                d_i = info.duration_s
+                has_next = i < len(paths) - 1
+                in_start = fade if i > 0 else 0.0
+                in_end = (d_i - fade) if has_next else d_i
+
+                inp = av.open(path, "r", timeout=_INPUT_TIMEOUT)
+                try:
+                    in_video = inp.streams.best("video")
+                    if in_video is None:
+                        raise ValueError(f"{info.file_name} has no video stream")
+
+                    # ── Video mid-segment (index-timeline: pts = out_idx·step)
+                    if in_start > 0:
+                        inp.seek(
+                            int(max(0.0, in_start - 1.0) * av.time_base),
+                            backward=True,
+                        )
+                    mid_done = False
+                    for packet in inp.demux([in_video]):
+                        if cancel_event and cancel_event.is_set():
+                            cancelled = True
+                            break
+                        _pause_hook(cancel_event)
+                        for frame in _decode_packet(packet):
+                            t = frame.time
+                            if t is None or t < in_start:
+                                continue
+                            if t >= in_end:
+                                mid_done = True
+                                break
+                            enc_video(reformat_to_out(frame))
+                        if mid_done:
+                            break
+                finally:
+                    inp.close()
+
+                # Cursor = output seconds where the segment's tail/window starts
+                cursor += in_end - in_start
+
+                # ── Audio mid (seconds-based: out = t - in_start + pre-mid cursor)
+                if out_audio is not None and info.audio_stream is not None:
+                    mid_cursor = cursor - (in_end - in_start)
+                    a_inp = av.open(path, "r", timeout=_INPUT_TIMEOUT)
+                    try:
+                        a_stream = a_inp.streams.best("audio")
+                        if in_start > 0:
+                            a_inp.seek(
+                                int(max(0.0, in_start - 1.0) * av.time_base),
+                                backward=True,
+                            )
+                        a_mid_done = False
+                        for packet in a_inp.demux([a_stream]):
+                            if cancel_event and cancel_event.is_set():
+                                cancelled = True
+                                break
+                            _pause_hook(cancel_event)
+                            for frame in _decode_packet(packet):
+                                t = frame.time
+                                if t is None or t < in_start:
+                                    continue
+                                if t >= in_end:
+                                    a_mid_done = True
+                                    break
+                                enc_audio(frame, (t - in_start) + mid_cursor)
+                            if a_mid_done:
+                                break
+                    finally:
+                        a_inp.close()
+
+                # ── Boundary window AFTER cursor reflects the mid segment ──
+                if has_next and not cancelled:
+                    EngineService._xfade_window(
+                        source_path=path,
+                        next_path=paths[i + 1],
+                        out_w=out_w,
+                        out_h=out_h,
+                        window_start=in_end,
+                        clip_end=d_i,
+                        fade=fade,
+                        enc_video=enc_video,
+                        reformat=reformat_to_out,
+                        cancel_event=cancel_event,
+                    )
+                    if out_audio is not None and info.audio_stream is not None:
+                        EngineService._acrossfade_window(
+                            path=path,
+                            next_path=paths[i + 1],
+                            tail_start=in_end,
+                            clip_end=d_i,
+                            cursor=cursor,
+                            fade=fade,
+                            out_rate=out_rate,
+                            enc_audio=enc_audio,
+                            cancel_event=cancel_event,
+                        )
+                    cursor += fade
+
+                if on_progress:
+                    on_progress(
+                        min(0.95, (i + 1) / len(paths) * 0.95),
+                        f"Joining with crossfade… ({i + 1}/{len(paths)})",
+                    )
+
+            if not cancelled:
+                if out_video:
+                    for enc_pkt in out_video.encode(None):
+                        out.mux(enc_pkt)
+                if out_audio:
+                    for enc_pkt in out_audio.encode(None):
+                        out.mux(enc_pkt)
+                if on_progress:
+                    on_progress(1.0, f"Joined {len(paths)} clips with crossfades")
+        finally:
+            out.close()
+
+        if cancelled or (cancel_event and cancel_event.is_set()):
+            _discard_cancelled(output_path)
+            raise InterruptedError("Join cancelled")
+        return output_path
+
+    @staticmethod
+    def _xfade_window(
+        *,
+        source_path: str,
+        next_path: str,
+        out_w: int,
+        out_h: int,
+        window_start: float,
+        clip_end: float,
+        fade: float,
+        enc_video,
+        reformat,
+        cancel_event: Event | None,
+    ) -> None:
+        """Emit the fade window: A-tail blended with B-head via the
+        alphamerge+overlay recipe (empirically verified: pairing works when B
+        is shifted into A's tail domain; alpha ramp generated as constant-bytes
+        gray frames — memset-cheap)."""
+        inp_a = av.open(source_path, "r", timeout=_INPUT_TIMEOUT)
+        try:
+            inp_b = av.open(next_path, "r", timeout=_INPUT_TIMEOUT)
+        except Exception:
+            inp_a.close()
+            raise
+        try:
+            va = inp_a.streams.best("video")
+            vb = inp_b.streams.best("video")
+            vtb = va.time_base
+            # A-window native domain is [clip_end-fade, clip_end]; B's [0,fade)
+            # must map onto it → shift = window START (empirics: T = durA - fade).
+            shift_b = int((clip_end - fade) / vtb)
+
+            # Collect both windows first (small: fade·fps frames each)
+            a_win: list = []
+            done = False
+            inp_a.seek(int(max(0.0, window_start - 1.0) * av.time_base), backward=True)
+            for packet in inp_a.demux([va]):
+                if cancel_event and cancel_event.is_set():
+                    return
+                for frame in _decode_packet(packet):
+                    t = frame.time
+                    if t is None or t < window_start - 1e-6:
+                        continue
+                    if t > clip_end + 1e-6:
+                        done = True
+                        break
+                    a_win.append(frame)
+                if done:
+                    break
+
+            b_win: list = []
+            done = False
+            for packet in inp_b.demux([vb]):
+                if cancel_event and cancel_event.is_set():
+                    return
+                for frame in _decode_packet(packet):
+                    t = frame.time
+                    if t is None or t < 0:
+                        continue
+                    if t >= fade - 1e-6:
+                        done = True
+                        break
+                    if frame.pts is not None:
+                        frame.pts = frame.pts + shift_b
+                    b_win.append(frame)
+                if done:
+                    break
+
+            n = min(len(a_win), len(b_win))
+            if n == 0:
+                logger.debug("Crossfade window empty — skipping boundary")
+                return
+
+            g = av.filter.Graph()
+            buf_a = g.add_buffer(template=va)  # 0 — background
+            buf_b = g.add_buffer(template=vb)  # 1 — main into alphamerge
+            buf_al = g.add_buffer(
+                width=out_w, height=out_h, format="gray", time_base=vtb
+            )  # 2 — alpha ramp
+            am = g.add("alphamerge")
+            ov = g.add("overlay", "format=auto")
+            sink = g.add("buffersink")
+            buf_b.link_to(am, 0, 0)
+            buf_al.link_to(am, 0, 1)
+            am.link_to(ov, 0, 1)
+            buf_a.link_to(ov, 0, 0)
+            ov.link_to(sink)
+            g.configure()
+
+            for k in range(n):
+                if cancel_event and cancel_event.is_set():
+                    return
+                alpha = av.VideoFrame(out_w, out_h, "gray")
+                val = round(255 * k / max(1, n - 1))
+                for pl in alpha.planes:
+                    pl.update(bytes([val]) * pl.buffer_size)
+                alpha.pts = b_win[k].pts
+                alpha.time_base = b_win[k].time_base
+                g.push(alpha, at=2)
+                g.push(b_win[k], at=1)
+                g.push(a_win[k], at=0)
+            g.push(None, at=2)
+            g.push(None, at=1)
+            g.push(None, at=0)
+
+            while True:
+                try:
+                    of = g.pull()
+                except EOFError:
+                    break
+                except FFmpegError as exc:
+                    if exc.errno == EAGAIN:
+                        continue
+                    raise
+                enc_video(reformat(of))
+        finally:
+            inp_a.close()
+            inp_b.close()
+
+    @staticmethod
+    def _acrossfade_window(
+        *,
+        path: str,
+        next_path: str,
+        tail_start: float,
+        clip_end: float,
+        cursor: float,
+        fade: float,
+        out_rate: int,
+        enc_audio,
+        cancel_event: Event | None,
+    ) -> None:
+        """Audio half of a boundary: A's tail [tail_start, clip_end] + B's head
+        [0, fade] through acrossfade; output (normalized to ~0) is re-based onto
+        the running cursor at encode time — verified monotonic by empirics."""
+        inp_a = av.open(path, "r", timeout=_INPUT_TIMEOUT)
+        try:
+            inp_b = av.open(next_path, "r", timeout=_INPUT_TIMEOUT)
+        except Exception:
+            inp_a.close()
+            raise
+        try:
+            sa = inp_a.streams.best("audio")
+            sb = inp_b.streams.best("audio")
+
+            a_tail: list = []
+            if tail_start > 0:
+                inp_a.seek(int(max(0.0, tail_start - 1.0) * av.time_base), backward=True)
+            done = False
+            for packet in inp_a.demux([sa]):
+                if cancel_event and cancel_event.is_set():
+                    return
+                for frame in _decode_packet(packet):
+                    t = frame.time
+                    if t is None or t < tail_start - 1e-6:
+                        continue
+                    if t > clip_end + 1e-6:
+                        done = True
+                        break
+                    a_tail.append(frame)
+                if done:
+                    break
+
+            b_head: list = []
+            done = False
+            for packet in inp_b.demux([sb]):
+                if cancel_event and cancel_event.is_set():
+                    return
+                for frame in _decode_packet(packet):
+                    t = frame.time
+                    if t is None or t < 0:
+                        continue
+                    if t >= fade - 1e-6:
+                        done = True
+                        break
+                    b_head.append(frame)
+                if done:
+                    break
+
+            n = min(len(a_tail), len(b_head))
+            if n == 0:
+                logger.debug("Audio crossfade window empty — skipping boundary")
+                return
+
+            g = av.filter.Graph()
+            buf_a = g.add_abuffer(template=sa)
+            buf_b = g.add_abuffer(template=sb)
+            ac = g.add("acrossfade", f"d={fade}")
+            sink = g.add("abuffersink")
+            buf_a.link_to(ac, 0, 0)
+            buf_b.link_to(ac, 0, 1)
+            ac.link_to(sink)
+            g.configure()
+
+            for frame in a_tail:
+                if cancel_event and cancel_event.is_set():
+                    return
+                g.push(frame, at=0)
+            g.push(None, at=0)
+            for frame in b_head:
+                if cancel_event and cancel_event.is_set():
+                    return
+                g.push(frame, at=1)
+            g.push(None, at=1)
+
+            while True:
+                try:
+                    of = g.pull()
+                except EOFError:
+                    break
+                except FFmpegError as exc:
+                    if exc.errno == EAGAIN:
+                        continue
+                    raise
+                # acrossfade normalizes output to ~0 — shift onto the cursor
+                base = (of.pts / out_rate) if of.pts else 0.0
+                enc_audio(of, cursor + base)
+        finally:
+            inp_a.close()
+            inp_b.close()
 
     @staticmethod
     def record(
@@ -2127,8 +2973,16 @@ class EngineService:
         try:
             stream_map = {}
             for s in inp.streams:
-                if s.type in ("video", "audio", "subtitle", "data"):
+                if s.type not in ("video", "audio", "subtitle", "data"):
+                    continue
+                if _is_attached_picture(s):
+                    continue
+                try:
                     stream_map[s] = out.add_stream_from_template(s, opaque=True)
+                except ValueError as exc:
+                    # MP4 cannot carry SRT/data or cover-art codecs; keep the
+                    # recordable A/V tracks instead of failing the whole URL.
+                    logger.info("Record stream %s skipped: %s", s.index, exc)
             if not stream_map:
                 raise ValueError("No recordable streams found in that URL")
 
@@ -2151,12 +3005,10 @@ class EngineService:
                     if bsf_name:
                         try:
                             bsfs[s.index] = (
-                                av.BitStreamFilterContext(
-                                    bsf_name, in_stream=s, out_stream=out_s
-                                ),
+                                av.BitStreamFilterContext(bsf_name, in_stream=s, out_stream=out_s),
                                 out_s,
                             )
-                        except Exception as exc:  # noqa: BLE001 — fall back unfiltered
+                        except Exception as exc:
                             logger.warning("BSF %s unavailable: %s", bsf_name, exc)
 
             start = time.monotonic()
@@ -2199,9 +3051,7 @@ class EngineService:
             for packet in inp.demux(list(stream_map)):
                 _pause_hook(cancel_event)
                 if cancel_event and cancel_event.is_set():
-                    logger.info(
-                        "Recording stopped by user (%d bytes) — keeping output", bytes_out
-                    )
+                    logger.info("Recording stopped by user (%d bytes) — keeping output", bytes_out)
                     break
                 elapsed = time.monotonic() - start
                 if duration_s is not None and elapsed >= duration_s:
@@ -2224,7 +3074,7 @@ class EngineService:
                     )
 
             # Drain BSF-delayed packets (EOF marker)
-            for _src_idx, (bsf_ctx, out_s) in bsfs.items():
+            for bsf_ctx, out_s in bsfs.values():
                 for pkt in bsf_ctx.filter(None):
                     pkt.stream = out_s
                     out.mux(pkt)

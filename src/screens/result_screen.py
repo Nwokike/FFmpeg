@@ -3,12 +3,11 @@
 from __future__ import annotations
 
 import logging
-import os
 from pathlib import Path
 
 import flet as ft
 
-from core.state import state
+from core.state import use_app_state
 from core.storage_paths import format_bytes
 from core.styles import card_container, status_badge
 from core.theme import PRIMARY, TEXT_MUTED_DARK, TEXT_MUTED_LIGHT, is_dark_mode
@@ -37,7 +36,7 @@ except ImportError:
     _HAS_VIDEO = False
 
 try:
-    from flet_audio import Audio, ReleaseMode
+    from flet_audio import Audio, AudioState, ReleaseMode
 
     _HAS_AUDIO_PLAYER = True
 except ImportError:  # pragma: no cover — package is in the dev tree
@@ -55,10 +54,11 @@ def ResultScreen() -> ft.Control:
     """Finished job presentation with hardware-accelerated preview player and export actions."""
     page = ft.context.page
     ctrl = use_controller()
-    is_dark = is_dark_mode(page)
+    app_state = use_app_state()
+    is_dark = is_dark_mode(page, app_state)
     muted = TEXT_MUTED_DARK if is_dark else TEXT_MUTED_LIGHT
 
-    job = state.last_completed_job or state.active_job
+    job = app_state.last_completed_job or app_state.active_job
 
     # ── Preview lifecycles — hooks run on EVERY render (incl. the no-job
     # early return below), and controls are built ONCE per job mount so
@@ -70,6 +70,8 @@ def ResultScreen() -> ft.Control:
     players_ready, set_players_ready = ft.use_state(False)
     video_ref = ft.use_ref(None)
     audio_ref = ft.use_ref(None)
+    dragging_ref = ft.use_ref(False)  # slider drag in flight — ignore position events
+    audio_state_ref = ft.use_ref(AudioState.STOPPED)
 
     def _set_compare(target: str) -> None:
         if target == compare:
@@ -85,20 +87,22 @@ def ResultScreen() -> ft.Control:
                 await v.jump_to(idx)
             except IndexError as exc:
                 logger.debug("jump_to(%s) out of range: %s", idx, exc)
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 logger.warning("A/B preview switch failed: %s", exc)
 
         page.run_task(_jump)
 
     def _stop_video_player() -> None:
         v = video_ref.current
+        video_ref.current = None  # job change must rebuild — a stopped stale
+        # player kept in the ref made the next job show the previous output
         if v is None:
             return
 
         async def _stop():
             try:
                 await v.stop()
-            except Exception as exc:  # noqa: BLE001 — unmount must not raise
+            except Exception as exc:
                 logger.debug("Preview stop failed: %s", exc)
 
         page.run_task(_stop)
@@ -112,32 +116,53 @@ def ResultScreen() -> ft.Control:
         async def _release():
             try:
                 await a.release()
+            except Exception as exc:
+                logger.warning("Audio release failed: %s", exc)
             finally:
                 if a in page.services:
                     page.services.remove(a)
 
         page.run_task(_release)
 
+    def _on_audio_state(e) -> None:
+        next_state = getattr(e, "state", AudioState.STOPPED)
+        audio_state_ref.current = next_state
+        set_playing(next_state == AudioState.PLAYING)
+        if next_state == AudioState.COMPLETED:
+            # Keep the slider truthful when the native player reaches its end;
+            # the next tap must start a fresh take rather than call resume().
+            set_pos_ms(dur_ms)
+
     def _mount_players():
+        # Job changed: clear the previous job's preview flags first so a stale
+        # A/B choice, playing state or position can't leak into the new result.
+        set_compare("output")
+        set_playing(False)
+        audio_state_ref.current = AudioState.STOPPED
+        set_pos_ms(0)
+        set_dur_ms(0)
+        # Back to False first: True→True is a no-op for the render scheduler,
+        # which left the new player hidden behind the "Preparing preview" spinner.
+        set_players_ready(False)
         if job is None or not job.output_path:
             return None
         out_p = Path(job.output_path)
+        if not out_p.is_file():
+            return None
         suffix = out_p.suffix.lower()
 
         if suffix in _VIDEO_EXTS and _HAS_VIDEO and video_ref.current is None:
             try:
                 playlist = [ftv.VideoMedia(str(out_p))]
-                if job.input_path and os.path.exists(job.input_path):
+                if job.input_path and Path(job.input_path).exists():
                     playlist.append(ftv.VideoMedia(job.input_path))
                 video_ref.current = ftv.Video(
                     playlist=playlist,
                     autoplay=False,
                     filter_quality=ft.FilterQuality.MEDIUM,
-                    on_error=lambda e: logger.warning(
-                        "Preview error: %s", getattr(e, "data", e)
-                    ),
+                    on_error=lambda e: logger.warning("Preview error: %s", getattr(e, "data", e)),
                 )
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 logger.warning("Preview construction failed: %s", exc)
 
         if suffix in _AUDIO_EXTS and _HAS_AUDIO_PLAYER and audio_ref.current is None:
@@ -145,11 +170,13 @@ def ResultScreen() -> ft.Control:
                 player = Audio(
                     src=str(out_p),
                     release_mode=ReleaseMode.STOP,
-                    on_state_change=lambda e: set_playing(
-                        getattr(e, "state", "") == "playing"
-                    ),
-                    on_position_change=lambda e: set_pos_ms(
-                        int(getattr(e, "position", 0) or 0)
+                    # e.state is an AudioState ENUM — compare the enum and keep
+                    # the terminal COMPLETED state for replay decisions.
+                    on_state_change=_on_audio_state,
+                    on_position_change=lambda e: (
+                        set_pos_ms(int(getattr(e, "position", 0) or 0))
+                        if not dragging_ref.current
+                        else None
                     ),
                     on_duration_change=lambda e: (
                         set_dur_ms(int(e.duration.in_milliseconds))
@@ -159,7 +186,7 @@ def ResultScreen() -> ft.Control:
                 )
                 page.services.append(player)
                 audio_ref.current = player
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 logger.warning("Audio player construction failed: %s", exc)
 
         set_players_ready(True)
@@ -171,7 +198,9 @@ def ResultScreen() -> ft.Control:
         cleanup=lambda: (_stop_video_player(), _release_audio()),
     )
 
-    if not job or not os.path.exists(job.output_path):
+    # Guard order matters: Path("") resolves to the CWD (which exists) and
+    # Path(None) raises — an empty/None output path must bail before either.
+    if not job or not job.output_path or not Path(job.output_path).exists():
         return ft.ListView(
             controls=[
                 ft.Row(
@@ -214,7 +243,7 @@ def ResultScreen() -> ft.Control:
     out_name = Path(out_path).name
 
     orig_size = job.original_size_bytes
-    out_size = os.path.getsize(out_path) if os.path.exists(out_path) else job.output_size_bytes
+    out_size = Path(out_path).stat().st_size if Path(out_path).exists() else job.output_size_bytes
 
     size_saved_str = ""
     if orig_size > 0 and out_size > 0:
@@ -228,6 +257,8 @@ def ResultScreen() -> ft.Control:
     # Determine preview player based on extension
     is_video = out_path.lower().endswith(_VIDEO_EXTS)
     is_image = out_path.lower().endswith((".jpg", ".jpeg", ".png", ".gif"))
+    # Same condition _mount_players uses to append the Original to the playlist
+    has_orig = bool(job.input_path and Path(job.input_path).exists())
 
     preview_control: ft.Control
     export_titles = {
@@ -237,9 +268,7 @@ def ResultScreen() -> ft.Control:
     }
     export_title = export_titles.get(job.op, "Export Complete")
     export_icon = (
-        ft.Icons.SUBTITLES_ROUNDED
-        if job.op == "extract_subtitles"
-        else ft.Icons.AUDIOTRACK_ROUNDED
+        ft.Icons.SUBTITLES_ROUNDED if job.op == "extract_subtitles" else ft.Icons.AUDIOTRACK_ROUNDED
     )
     if is_video and _HAS_VIDEO:
         video_control = video_ref.current
@@ -268,13 +297,19 @@ def ResultScreen() -> ft.Control:
                             )
                         ]
                     ),
-                    ft.SegmentedButton(
-                        selected={compare},
-                        segments=[
-                            ft.Segment(value="output", label=ft.Text("Output")),
-                            ft.Segment(value="original", label=ft.Text("Original")),
-                        ],
-                        on_change=lambda e: _set_compare(list(e.control.selected)[0]),
+                    *(
+                        [
+                            ft.SegmentedButton(
+                                selected=[compare],
+                                segments=[
+                                    ft.Segment(value="output", label=ft.Text("Output")),
+                                    ft.Segment(value="original", label=ft.Text("Original")),
+                                ],
+                                on_change=lambda e: _set_compare(next(iter(e.control.selected))),
+                            )
+                        ]
+                        if has_orig  # single-item playlist: Original would doom jump_to(1)
+                        else []
                     ),
                 ],
                 horizontal_alignment=ft.CrossAxisAlignment.CENTER,
@@ -301,9 +336,7 @@ def ResultScreen() -> ft.Control:
                 ft.Icon(export_icon, size=40, color=PRIMARY),
                 ft.Column(
                     controls=[
-                        ft.Text(
-                            export_title, size=FONT_MD, weight=ft.FontWeight.BOLD
-                        ),
+                        ft.Text(export_title, size=FONT_MD, weight=ft.FontWeight.BOLD),
                         ft.Text(out_name, size=FONT_SM, color=muted),
                     ],
                     spacing=2,
@@ -322,46 +355,57 @@ def ResultScreen() -> ft.Control:
                     try:
                         if playing:
                             await player.pause()
+                        elif audio_state_ref.current == AudioState.COMPLETED:
+                            await player.play()
                         elif pos_ms > 0:
                             await player.resume()
                         else:
                             await player.play()
-                    except Exception as exc:  # noqa: BLE001
+                    except Exception as exc:
                         logger.warning("Playback control failed: %s", exc)
 
                 page.run_task(_t)
 
+            def _drag(e):
+                dragging_ref.current = True
+                set_pos_ms(int(e.control.value))
+
             def _seek_player(e):
+                # Always release the drag guard here — a cancelled drag that
+                # never fires on_change_end would mute position events forever.
+                dragging_ref.current = False
                 target = int(e.control.value)
                 set_pos_ms(target)
 
                 async def _seek():
                     try:
                         await player.seek(ft.Duration(milliseconds=target))
-                    except Exception as exc:  # noqa: BLE001
-                        logger.debug("Seek failed: %s", exc)
+                    except Exception as exc:
+                        logger.warning("Seek failed: %s", exc)
 
                 page.run_task(_seek)
 
-            slider_max = float(max(dur_ms, 1))
             audio_player = [
                 ft.Row(
                     controls=[
                         ft.IconButton(
-                            icon=ft.Icons.PAUSE_ROUNDED
-                            if playing
-                            else ft.Icons.PLAY_ARROW_ROUNDED,
+                            icon=ft.Icons.PAUSE_ROUNDED if playing else ft.Icons.PLAY_ARROW_ROUNDED,
                             icon_size=32,
                             on_click=_toggle_play,
                             tooltip="Play" if not playing else "Pause",
                         ),
-                        ft.Slider(
-                            min=0.0,
-                            max=slider_max,
-                            value=float(min(pos_ms, int(slider_max))),
-                            expand=True,
-                            on_change=lambda e: set_pos_ms(int(e.control.value)),
-                            on_change_end=_seek_player,
+                        # Until duration arrives, a 0..1 slider mis-seeks to 0
+                        (
+                            ft.Slider(
+                                min=0.0,
+                                max=float(dur_ms),
+                                value=float(min(pos_ms, dur_ms)),
+                                expand=True,
+                                on_change=_drag,
+                                on_change_end=_seek_player,
+                            )
+                            if dur_ms > 0
+                            else ft.Container(expand=True)
                         ),
                     ],
                     spacing=SPACE_SM,

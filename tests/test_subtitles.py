@@ -46,6 +46,7 @@ def srt_input(tmp_path: Path) -> str:
 
 # ── Time formatting ──────────────────────────────────────────────────────
 
+
 def test_srt_time_format():
     assert _fmt_srt_time(2.0) == "00:00:02,000"
     assert _fmt_srt_time(3.5) == "00:00:03,500"
@@ -99,6 +100,7 @@ def test_write_ass(tmp_path: Path):
 
 
 # ── End-to-end extraction (real demux + decode2 path) ────────────────────
+
 
 def test_extract_srt_to_srt(srt_input, tmp_path: Path):
     out = str(tmp_path / "out.srt")

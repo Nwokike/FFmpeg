@@ -9,12 +9,46 @@ cancelling a still-pending job removes it before it ever starts.
 from __future__ import annotations
 
 import logging
+import shutil
 import threading
 from collections.abc import Callable
+from pathlib import Path
 
 from core.state import Job
 
 logger = logging.getLogger("JobQueue")
+
+
+def _set_worker_field(job: Job, name: str, value) -> None:
+    """Update an observable Job from the worker without notifying Flet."""
+    object.__setattr__(job, name, value)
+
+
+# Pre-flight floor: muxer scratch, thumbnails and frame exports all land
+# beside the output, and a disk that fills mid-encode loses the whole take.
+_MIN_FREE_BYTES = 100 * 1024 * 1024
+
+
+def free_space_error(job: Job) -> str | None:
+    """None when the output's filesystem plausibly has room; else why not.
+
+    Estimate = source size (outputs are usually smaller) with the floor for
+    scratch. A failed probe returns None — the engine is the final authority.
+    """
+    try:
+        target = Path(job.output_path)
+        probe_dir = target.parent if str(target.parent) else Path.cwd()
+        free = shutil.disk_usage(probe_dir).free
+    except OSError as exc:
+        logger.debug("Disk-space probe failed for %s: %s", job.output_path, exc)
+        return None
+    needed = max(job.original_size_bytes, _MIN_FREE_BYTES)
+    if free < needed:
+        return (
+            f"Not enough free space ({free // (1024 * 1024)} MB free, "
+            f"needs about {needed // (1024 * 1024)} MB)"
+        )
+    return None
 
 
 class JobQueue:
@@ -93,9 +127,7 @@ class JobQueue:
             self._shutdown = True
             pending = list(self._pending)
             self._pending.clear()
-            running_evt = (
-                self._cancel_events.get(self._current.id) if self._current else None
-            )
+            running_evt = self._cancel_events.get(self._current.id) if self._current else None
             running = self._current
         for job in pending:
             job.status = "cancelled"
@@ -153,7 +185,7 @@ class JobQueue:
             return
         try:
             self._on_finished(job)
-        except Exception:  # noqa: BLE001 — callback must never kill the worker
+        except Exception:
             logger.exception("on_finished callback failed for job %s", job.id)
 
     def _loop(self) -> None:
@@ -176,10 +208,19 @@ class JobQueue:
                 self._cancel_events[job.id] = cancel_evt
 
             try:
-                if self._on_started is not None:
-                    self._on_started(job)
-                self._runner(job, cancel_evt)
-            except Exception:  # noqa: BLE001 — runner marks job failed itself,
+                space_err = free_space_error(job)
+                if space_err is not None:
+                    _set_worker_field(job, "status", "failed")
+                    _set_worker_field(job, "status_message", space_err)
+                    _set_worker_field(job, "error_message", space_err)
+                    logger.warning(
+                        "Pre-flight space check failed for job %s: %s", job.id, space_err
+                    )
+                else:
+                    if self._on_started is not None:
+                        self._on_started(job)
+                    self._runner(job, cancel_evt)
+            except Exception:
                 logger.exception("Runner raised for job %s", job.id)  # belt & braces
             finally:
                 with self._lock:

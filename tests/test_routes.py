@@ -7,6 +7,8 @@ every route including /engine-info and the old dead name.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from flet.components.router import _match_routes, _normalize_path
 
 from app_shell import _ROUTES
@@ -54,3 +56,40 @@ def test_tool_routes_resolve_to_leaf_path():
     chain = _match_routes(_ROUTES, _normalize_path("/engine-info"))
     assert chain is not None
     assert chain[-1].route.path == "engine-info"
+
+
+def test_router_views_declare_explicit_routes():
+    source = (Path(__file__).resolve().parents[1] / "src" / "app_shell.py").read_text(
+        encoding="utf-8"
+    )
+    assert 'route="/"' in source
+    assert 'route=f"/{name}"' in source
+
+
+def test_select_tab_from_tool_route_returns_to_dashboard():
+    from core.state import state
+    from main import _select_tab
+
+    class Page:
+        route = "/convert"
+
+        def __init__(self):
+            self.navigated = []
+            self.updates = 0
+
+        def navigate(self, route):
+            self.navigated.append(route)
+
+        def update(self):
+            self.updates += 1
+
+    before = (state.selected_tab, state.active_view)
+    try:
+        page = Page()
+        _select_tab(page, 1)
+        assert state.selected_tab == 1
+        assert state.active_view == "dashboard"
+        assert page.navigated == ["/"]
+        assert page.updates == 0
+    finally:
+        state.selected_tab, state.active_view = before

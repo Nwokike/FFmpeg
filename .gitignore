@@ -14,8 +14,10 @@ Thumbs.db
 upload-key.jks
 kiri_keystore.jks
 release_notes.md
+audit-output/
 .zcode/
 wheels/
 *.apk
 *.aab
 ui-spike/
+.zcodeignore

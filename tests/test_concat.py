@@ -10,7 +10,9 @@ import pytest
 from services.engine_service import EngineService
 
 
-def _make_clip(tmp_path, name: str, w: int = 96, h: int = 64, fps: int = 30, frames: int = 30) -> str:
+def _make_clip(
+    tmp_path, name: str, w: int = 96, h: int = 64, fps: int = 30, frames: int = 30
+) -> str:
     import array
     import math
 
@@ -44,10 +46,7 @@ def _make_clip(tmp_path, name: str, w: int = 96, h: int = 64, fps: int = 30, fra
             (
                 v
                 for k in range(1024)
-                for v in (
-                    int(9000 * math.sin(2 * math.pi * 440 * (n + k) / 44100)),
-                )
-                * 2
+                for v in (int(9000 * math.sin(2 * math.pi * 440 * (n + k) / 44100)),) * 2
             ),
         )
         n += 1024
@@ -111,7 +110,13 @@ def test_concat_to_mkv(tmp_path):
 def test_concat_missing_file_raises(tmp_path, synthetic_media):
     out = str(tmp_path / "nope.mp4")
     with pytest.raises(Exception):  # noqa: B017 — probe raises FileNotFoundError/FFmpegError
-        EngineService.concat([synthetic_media.path, str(tmp_path / "ghost.mp4"),], out)
+        EngineService.concat(
+            [
+                synthetic_media.path,
+                str(tmp_path / "ghost.mp4"),
+            ],
+            out,
+        )
 
 
 def test_concat_cancel_cleans_up(tmp_path):

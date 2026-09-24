@@ -7,6 +7,7 @@ from services.engine_service import EngineService, _mjpeg_bytes
 
 # ── Result screen time label ─────────────────────────────────────────────
 
+
 def test_fmt_ms():
     assert _fmt_ms(0) == "00:00"
     assert _fmt_ms(999) == "00:00"
@@ -16,6 +17,7 @@ def test_fmt_ms():
 
 
 # ── Thumbnail strip (in-memory JPEGs, single decode pass) ────────────────
+
 
 def test_thumbnail_strip_returns_jpegs(synthetic_media):
     thumbs = EngineService.thumbnail_strip(synthetic_media.path, [0.5, 1.0, 1.5], width=64)
@@ -27,7 +29,6 @@ def test_thumbnail_strip_returns_jpegs(synthetic_media):
 
 def test_thumbnail_strip_empty_and_no_video(synthetic_media, tmp_path):
     assert EngineService.thumbnail_strip(synthetic_media.path, []) == []
-
 
     srt = tmp_path / "only.srt"
     srt.write_text("1\n00:00:01,000 --> 00:00:02,000\nhi\n", encoding="utf-8")
@@ -47,6 +48,7 @@ def test_mjpeg_bytes_rejects_nothing(synthetic_media):
 
 
 # ── Keyframe index ───────────────────────────────────────────────────────
+
 
 def test_keyframe_times_sorted_and_bounded(synthetic_media):
     from services.engine_service import EngineService as E
@@ -72,6 +74,7 @@ def test_keyframe_times_no_video(synthetic_media, tmp_path):
 
 
 # ── Keyframe snap (instant cuts) ─────────────────────────────────────────
+
 
 def test_stream_copy_snaps_start_to_keyframe(synthetic_media):
     """Cut from a mid-GOP point must begin at the prior keyframe, not 1.05s."""

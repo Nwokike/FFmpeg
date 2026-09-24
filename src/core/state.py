@@ -84,6 +84,7 @@ class MediaInfo:
         return None
 
 
+@ft.observable
 @dataclass
 class Job:
     """A single queued or executing media transformation job."""
@@ -137,6 +138,14 @@ class AppState:
         self.update_data: dict[str, Any] | None = None
         self.probe_info: EngineProbe | None = None
 
+        # Theme — whole-value observable writes ONLY (dict-item mutation of
+        # settings["theme_mode"] never published, so headers/tints stayed stale
+        # until an unrelated re-render — the "must change screen to finish the
+        # switch" bug). theme_revision bumps on toggle AND platform-brightness
+        # change so SYSTEM mode re-themes instantly (CollabShell pattern).
+        self.theme_mode: ft.ThemeMode = ft.ThemeMode.SYSTEM
+        self.theme_revision: int = 0
+
         # Settings
         self.settings: dict[str, Any] = {
             "theme_mode": "system",  # "system", "dark", "light"
@@ -145,8 +154,39 @@ class AppState:
             "default_crf": 23,
             "save_to_downloads": True,
             "http_proxy": "",
+            "hardware_accel": True,
         }
+
+    def set_setting(self, key: str, value: Any) -> None:
+        """Write one settings key as a WHOLE-VALUE assignment.
+
+        A dict-item write (``self.settings[key] = v``) mutates in place and
+        never reaches the observable's ``__setattr__`` hook — subscribers kept
+        rendering the old value until an unrelated re-render.
+        """
+        self.settings = {**self.settings, key: value}
 
 
 state = AppState()
+
+# Flet components must receive observables through a context (or component
+# argument) to subscribe to changes.  Reading the module-level singleton
+# directly still returns the new value, but leaves the rendered component
+# stale -- which is how tab, banner, and theme controls appeared inert.
 AppStateCtx = ft.create_context(state)
+
+
+def use_app_state() -> AppState:
+    """Return the app state and subscribe the current Flet component to it."""
+    return ft.use_context(AppStateCtx)
+
+
+__all__ = [
+    "AppState",
+    "AppStateCtx",
+    "Job",
+    "MediaInfo",
+    "MediaStreamInfo",
+    "state",
+    "use_app_state",
+]

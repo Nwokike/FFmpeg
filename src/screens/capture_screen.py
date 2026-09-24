@@ -9,6 +9,7 @@ Settings deep link (6-status handling per flet-permission-handler).
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import math
 import struct
@@ -19,7 +20,7 @@ import flet as ft
 
 from components.empty_state import empty_state_view
 from core.notify import ERROR, SUCCESS, show_snack
-from core.state import state
+from core.state import use_app_state
 from core.storage_paths import format_bytes, get_temp_dir
 from core.styles import card_container, section_header
 from core.theme import ACCENT_RED, PRIMARY, TEXT_MUTED_DARK, TEXT_MUTED_LIGHT, is_dark_mode
@@ -117,7 +118,8 @@ def _can_capture(page: ft.Page) -> bool:
     """Camera requires web/mobile (desktop raises in flet-camera's guard)."""
     try:
         return bool(page.web or (page.platform and page.platform.is_mobile()))
-    except Exception:  # noqa: BLE001 — unknown platform → treat as desktop
+    except Exception as exc:
+        logger.warning("Capture capability check failed: %s", exc)
         return False
 
 
@@ -127,7 +129,8 @@ def CaptureScreen() -> ft.Control:
     page = ft.context.page
     ctrl = use_controller()
     services = use_services()
-    is_dark = is_dark_mode(page)
+    app_state = use_app_state()
+    is_dark = is_dark_mode(page, app_state)
     muted = TEXT_MUTED_DARK if is_dark else TEXT_MUTED_LIGHT
 
     mode, set_mode = ft.use_state("photo")  # "photo" | "video" | "mic"
@@ -144,6 +147,11 @@ def CaptureScreen() -> ft.Control:
 
     camera_ref = ft.use_ref(None)
     camera_inited_ref = ft.use_ref(False)
+    camera_audio_mode_ref = ft.use_ref(None)
+    taking_ref = ft.use_ref(False)
+    recording_ref = ft.use_ref(
+        False
+    )  # queryable from unmount cleanup (effect captures first render)
     ticking_ref = ft.use_ref(False)
     elapsed_ref = ft.use_ref(0)
     chunks_ref = ft.use_ref([])
@@ -153,10 +161,40 @@ def CaptureScreen() -> ft.Control:
     mic_codec_ref = ft.use_ref("pcm16")
     mic_preset_ref = ft.use_ref("studio")
 
-    # ── Unmount: stop the ticker (camera is disposed client-side on unmount) ──
+    # ── Unmount: stop ticker + release mic/camera — the effect body captured
+    # the FIRST render, so live state must be read from refs, never closures.
 
     def _cleanup():
         ticking_ref.current = False
+        taking_ref.current = False
+        cam = camera_ref.current
+        rec = services.audio_recorder
+
+        async def _teardown():
+            # Mid-take navigate-away is a DISCARD, not a silent save.
+            if rec is not None:
+                try:
+                    if await rec.is_recording():
+                        await rec.cancel_recording()
+                except Exception as exc:
+                    logger.debug("Recorder cancel on unmount failed: %s", exc)
+                rec.on_stream = None
+                set_rec_paused(False)
+            if cam is not None:
+                if recording_ref.current:
+                    try:
+                        await cam.stop_video_recording()
+                    except Exception as exc:
+                        logger.debug("Stop video on unmount failed: %s", exc)
+                try:
+                    await cam.pause_preview()
+                except Exception as exc:
+                    logger.debug("Pause preview on unmount failed: %s", exc)
+            camera_inited_ref.current = False
+            camera_audio_mode_ref.current = None
+            camera_ref.current = None
+
+        page.run_task(_teardown)
 
     ft.use_effect(lambda: _cleanup, [])
 
@@ -193,7 +231,15 @@ def CaptureScreen() -> ft.Control:
     # ── Permission flow ─────────────────────────────────────────────────────
 
     def _perm_rationale(perm, settings_only: bool) -> None:
-        name = "camera" if perm == Permission.CAMERA else "microphone"
+        # Only camera/mic are requested today; anything else gets a neutral
+        # label instead of being misnamed as one of the two.
+        name = (
+            "camera"
+            if perm == Permission.CAMERA
+            else "microphone"
+            if perm == Permission.MICROPHONE
+            else "this"
+        )
         if settings_only:
             body = (
                 f"{name.title()} access is blocked for this app. Enable it in "
@@ -207,8 +253,25 @@ def CaptureScreen() -> ft.Control:
 
         def _open_settings(_):
             page.pop_dialog()
-            if services.permission_handler:
-                page.run_task(services.permission_handler.open_app_settings)
+            if not services.permission_handler:
+                return
+
+            async def _open():
+                try:
+                    # open_app_settings returns False when the OS refuses —
+                    # tell the user instead of leaving a dead tap.
+                    opened = await services.permission_handler.open_app_settings()
+                    if not opened:
+                        show_snack(
+                            page,
+                            f"Couldn't open Settings — enable {name} there manually",
+                            bgcolor=ERROR,
+                        )
+                except Exception as exc:
+                    logger.warning("open_app_settings failed: %s", exc)
+                    show_snack(page, "Couldn't open Settings", bgcolor=ERROR)
+
+            page.run_task(_open)
 
         def _retry(_):
             page.pop_dialog()
@@ -245,8 +308,8 @@ def CaptureScreen() -> ft.Control:
                 return True
             _perm_rationale(perm, settings_only=(action == "settings"))
             return False
-        except Exception as exc:  # noqa: BLE001 — degrade with a message
-            logger.error("Permission flow failed: %s", exc)
+        except Exception:
+            logger.exception("Permission flow failed")
             show_snack(page, "Couldn't request permission — check app settings.", bgcolor=ERROR)
             return False
 
@@ -255,25 +318,38 @@ def CaptureScreen() -> ft.Control:
     def _on_camera_state(e) -> None:
         if getattr(e, "has_error", False):
             show_snack(
-                page, f"Camera error: {getattr(e, 'error_description', None) or 'unknown'}",
+                page,
+                f"Camera error: {getattr(e, 'error_description', None) or 'unknown'}",
                 bgcolor=ERROR,
             )
-        set_recording(bool(getattr(e, "is_recording_video", False)))
+        is_recording = bool(getattr(e, "is_recording_video", False))
+        set_recording(is_recording)
+        recording_ref.current = is_recording
         set_rec_paused(bool(getattr(e, "is_recording_paused", False)))
+        # The native state event is the truth for "camera is live" — the local
+        # flag used to go stale when init completed on a different render pass.
+        if getattr(e, "is_initialized", False):
+            camera_inited_ref.current = True
 
     async def _prepare_camera() -> None:
         if camera_ref.current is not None:
+            # Retry after a permission denial: the control exists, so re-arm
+            # the init effect instead of stranding camera_ready=False.
+            if not camera_ready:
+                set_camera_ready(True)
             return
         if not _HAS_CAMERA:
             show_snack(page, "Camera support is not installed", bgcolor=ERROR)
             return
         if not await _permission_ok(Permission.CAMERA):
             return
+        if mode == "video" and not await _permission_ok(Permission.MICROPHONE):
+            return
         try:
             camera_ref.current = ftc.Camera(on_state_change=_on_camera_state)
             set_camera_ready(True)
-        except Exception as exc:  # noqa: BLE001
-            logger.error("Camera creation failed: %s", exc)
+        except Exception as exc:
+            logger.exception("Camera creation failed")
             show_snack(page, f"Camera unavailable: {exc}", bgcolor=ERROR)
 
     async def _init_camera() -> None:
@@ -285,17 +361,59 @@ def CaptureScreen() -> ft.Control:
             if not cameras:
                 show_snack(page, "No camera found on this device", bgcolor=ERROR)
                 return
-            await cam.initialize(
-                cameras[0], ftc.ResolutionPreset.HIGH, enable_audio=True
+            # Prefer the back lens — cameras[0] is often the selfie.
+            target = next(
+                (
+                    c
+                    for c in cameras
+                    if getattr(c, "lens_direction", None) == ftc.CameraLensDirection.BACK
+                ),
+                cameras[0],
             )
-            camera_inited_ref.current = True
-        except Exception as exc:  # noqa: BLE001
-            logger.error("Camera init failed: %s", exc)
+            # Video is the ONLY consumer of the mic; asking for audio in photo
+            # mode risks silent video / OEM throws when MIC is denied.
+            enable_audio = mode == "video"
+            last_err: Exception | None = None
+            for preset in (ftc.ResolutionPreset.HIGH, ftc.ResolutionPreset.MEDIUM):
+                try:
+                    await cam.initialize(target, preset, enable_audio=enable_audio)
+                    camera_inited_ref.current = True
+                    camera_audio_mode_ref.current = enable_audio
+                    return
+                except Exception as exc:
+                    last_err = exc
+                    logger.warning("Camera init failed at %s: %s", preset, exc)
+            show_snack(page, f"Camera failed to start: {last_err}", bgcolor=ERROR)
+        except Exception as exc:
+            logger.exception("Camera init failed")
             show_snack(page, f"Camera failed to start: {exc}", bgcolor=ERROR)
 
+    async def _reconfigure_camera() -> None:
+        """Recreate the controller when photo/video changes its audio contract."""
+        cam = camera_ref.current
+        if cam is None:
+            return
+        try:
+            await cam.pause_preview()
+        except Exception as exc:
+            logger.debug("Camera preview pause during mode switch failed: %s", exc)
+        camera_ref.current = None
+        camera_inited_ref.current = False
+        camera_audio_mode_ref.current = None
+        set_camera_ready(False)
+        await _prepare_camera()
+
     def _effect_prepare():
-        if mode in ("photo", "video") and camera_ref.current is None and not recording:
-            page.run_task(_prepare_camera)
+        desired_audio = mode == "video"
+        if mode in ("photo", "video") and not recording:
+            if (
+                camera_ref.current is not None
+                and camera_inited_ref.current
+                and camera_audio_mode_ref.current != desired_audio
+            ):
+                page.run_task(_reconfigure_camera)
+            elif camera_ref.current is None:
+                page.run_task(_prepare_camera)
         return None
 
     ft.use_effect(_effect_prepare, [mode])
@@ -324,7 +442,7 @@ def CaptureScreen() -> ft.Control:
                         await _finish_mic()
                     break
         except asyncio.CancelledError:
-            pass
+            logger.debug("Capture ticker cancelled")
 
     def _start_ticker() -> None:
         elapsed_ref.current = 0
@@ -343,16 +461,14 @@ def CaptureScreen() -> ft.Control:
 
         try:
             info = await asyncio.to_thread(EngineService.probe, path)
-        except Exception as exc:  # noqa: BLE001 — corrupt/unsupported take
-            logger.error("Capture probe failed for %s: %s", path, exc)
-            try:
-                Path(path).unlink(missing_ok=True)
-            except OSError:
-                pass
+        except Exception:
+            logger.exception("Capture probe failed for %s", path)
+            with contextlib.suppress(OSError):
+                Path(path).unlink(missing_ok=True)  # noqa: ASYNC240 — trivial stat/exists check
             show_snack(page, "That capture couldn't be read — try again.", bgcolor=ERROR)
             return
-        state.current_media_path = path
-        state.current_media_info = info
+        app_state.current_media_path = path
+        app_state.current_media_info = info
         set_captured_path(path)
         set_captured_info(info)
         show_snack(page, "Capture ready — pick a tool or save it", bgcolor=SUCCESS)
@@ -368,16 +484,20 @@ def CaptureScreen() -> ft.Control:
         if not camera_inited_ref.current:
             show_snack(page, "Camera is still starting…")
             return
+        if taking_ref.current:  # native shutter busy — ignore double taps
+            return
+        taking_ref.current = True
         set_busy(True)
         try:
             data = await cam.take_picture()
             out = get_temp_dir() / f"photo_{int(time.time())}.jpg"
             out.write_bytes(data)
             await _finalize_capture(str(out))
-        except Exception as exc:  # noqa: BLE001
-            logger.error("Photo capture failed: %s", exc)
+        except Exception as exc:
+            logger.exception("Photo capture failed")
             show_snack(page, f"Photo failed: {exc}", bgcolor=ERROR)
         finally:
+            taking_ref.current = False
             set_busy(False)
 
     # ── Video ───────────────────────────────────────────────────────────────
@@ -396,10 +516,11 @@ def CaptureScreen() -> ft.Control:
             out = get_temp_dir() / f"video_{int(time.time())}.{ext}"
             out.write_bytes(data)
             await _finalize_capture(str(out))
-        except Exception as exc:  # noqa: BLE001
-            logger.error("Video capture failed: %s", exc)
+        except Exception as exc:
+            logger.exception("Video capture failed")
             show_snack(page, f"Video failed: {exc}", bgcolor=ERROR)
         finally:
+            recording_ref.current = False
             set_recording(False)
             set_busy(False)
 
@@ -414,16 +535,22 @@ def CaptureScreen() -> ft.Control:
         if not camera_inited_ref.current:
             show_snack(page, "Camera is still starting…")
             return
+        # Video mode initializes the camera WITH audio — gate on the mic grant
+        # or the start silently fails (or throws) on OEM builds.
+        if not await _permission_ok(Permission.MICROPHONE):
+            return
         set_busy(True)
         try:
             await cam.prepare_for_video_recording()
             await cam.start_video_recording()
             set_recording(True)
+            recording_ref.current = True
             _start_ticker()
-        except Exception as exc:  # noqa: BLE001
-            logger.error("Video record start failed: %s", exc)
+        except Exception as exc:
+            logger.exception("Video record start failed")
             show_snack(page, f"Recording failed: {exc}", bgcolor=ERROR)
             set_recording(False)
+            recording_ref.current = False
         finally:
             set_busy(False)
 
@@ -436,7 +563,8 @@ def CaptureScreen() -> ft.Control:
                 await cam.resume_video_recording()
             else:
                 await cam.pause_video_recording()
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
+            logger.warning("Pause toggle failed: %s", exc)
             show_snack(page, f"Pause failed: {exc}", bgcolor=ERROR)
 
     # ── Mic ─────────────────────────────────────────────────────────────────
@@ -450,7 +578,9 @@ def CaptureScreen() -> ft.Control:
             last_level_ts_ref.current = now
             set_level(_pcm_rms(chunk))
             if chunk_bytes_ref.current >= _MAX_PCM_BYTES:
-                logger.warning("PCM cap reached (%d bytes) — auto-stopping", chunk_bytes_ref.current)
+                logger.warning(
+                    "PCM cap reached (%d bytes) — auto-stopping", chunk_bytes_ref.current
+                )
                 page.run_task(_finish_mic)
 
     def _codec_for(mic_codec_name: str):
@@ -471,23 +601,28 @@ def CaptureScreen() -> ft.Control:
             out_path = mic_out_ref.current
             returned = await rec.stop_recording()
             if codec_name == "pcm16":
-                rate, ch = _PCM_RATE_CHANNELS[mic_preset_ref.current]
-                _write_wav(out_path, b"".join(chunks_ref.current), rate, ch)
-                final = out_path
+                if not chunks_ref.current and returned:
+                    final = returned  # no streamed PCM — use the file mode take
+                else:
+                    rate, ch = _PCM_RATE_CHANNELS[mic_preset_ref.current]
+                    _write_wav(out_path, b"".join(chunks_ref.current), rate, ch)
+                    final = out_path
             else:
                 final = returned or out_path
             set_level(0.0)
-            if final and Path(final).exists():
+            if final and Path(final).exists():  # noqa: ASYNC240 — trivial stat/exists check
                 await _finalize_capture(final)
             else:
                 show_snack(page, "Recording produced no file", bgcolor=ERROR)
-        except Exception as exc:  # noqa: BLE001
-            logger.error("Mic stop failed: %s", exc)
+        except Exception as exc:
+            logger.exception("Mic stop failed")
             show_snack(page, f"Recording failed: {exc}", bgcolor=ERROR)
         finally:
+            rec.on_stream = None
             chunks_ref.current = []
             chunk_bytes_ref.current = 0
             set_recording(False)
+            set_rec_paused(False)
             set_busy(False)
 
     async def _toggle_mic() -> None:
@@ -500,15 +635,31 @@ def CaptureScreen() -> ft.Control:
             return
         if not await _permission_ok(Permission.MICROPHONE):
             return
-        codec_name = mic_codec_ref.current
+        try:
+            # Revoked mid-session surfaces as a generic start refusal without
+            # this just-in-time check.
+            if not await rec.has_permission():
+                show_snack(
+                    page,
+                    "Microphone access is off — enable it in Settings",
+                    bgcolor=ERROR,
+                )
+                return
+        except Exception as exc:
+            logger.debug("Recorder has_permission check failed: %s", exc)
+        # The chip value is the current render state; the ref is only a
+        # snapshot for asynchronous teardown.  Reading the ref here made Opus
+        # and AAC selections silently fall back to the initial PCM16 take.
+        codec_name = mic_codec
+        mic_codec_ref.current = codec_name
         enc = _codec_for(codec_name)
         try:
             if not await rec.is_supported_encoder(enc):
                 show_snack(page, "Codec unavailable — recording WAV instead")
                 codec_name = "pcm16"
                 enc = _codec_for("pcm16")
-        except Exception:  # noqa: BLE001 — capability query failed → try anyway
-            pass
+        except Exception as exc:
+            logger.warning("Encoder probe failed, recording WAV instead: %s", exc)
 
         if codec_name == "pcm16":
             rate, ch = _PCM_RATE_CHANNELS[mic_preset_ref.current]
@@ -532,14 +683,32 @@ def CaptureScreen() -> ft.Control:
         mic_out_ref.current = out_path
         try:
             started = await rec.start_recording(output_path=out_path, configuration=cfg)
-        except Exception as exc:  # noqa: BLE001
-            logger.error("Mic start failed: %s", exc)
+        except Exception as exc:
+            logger.exception("Mic start failed")
+            rec.on_stream = None  # don't stream into chunks nobody will write
+            chunks_ref.current = []
+            chunk_bytes_ref.current = 0
             show_snack(page, f"Recording failed: {exc}", bgcolor=ERROR)
             return
         if not started:
+            rec.on_stream = None
+            chunks_ref.current = []
+            chunk_bytes_ref.current = 0
             show_snack(page, "Recorder refused to start", bgcolor=ERROR)
             return
+        try:
+            # start_recording can report success while the native side refused
+            # (mic held by a call, OEM policy).
+            if not await rec.is_recording():
+                rec.on_stream = None
+                chunks_ref.current = []
+                chunk_bytes_ref.current = 0
+                show_snack(page, "Recorder didn't start — mic may be in use", bgcolor=ERROR)
+                return
+        except Exception as exc:
+            logger.debug("is_recording check failed: %s", exc)
         set_recording(True)
+        set_rec_paused(False)
         _start_ticker()
 
     async def _pause_mic() -> None:
@@ -551,8 +720,10 @@ def CaptureScreen() -> ft.Control:
                 await rec.resume_recording()
             else:
                 await rec.pause_recording()
-            set_rec_paused(not rec_paused)
-        except Exception as exc:  # noqa: BLE001
+            # Read the recorder's truth — a local flip desyncs on native failure.
+            set_rec_paused(bool(await rec.is_paused()))
+        except Exception as exc:
+            logger.warning("Pause toggle failed: %s", exc)
             show_snack(page, f"Pause failed: {exc}", bgcolor=ERROR)
 
     # ── After-capture actions ───────────────────────────────────────────────
@@ -560,8 +731,8 @@ def CaptureScreen() -> ft.Control:
     def _use_in(tool: str) -> None:
         if not captured_path or captured_info is None:
             return
-        state.current_media_path = captured_path
-        state.current_media_info = captured_info
+        app_state.current_media_path = captured_path
+        app_state.current_media_info = captured_info
         ctrl.navigate(tool)
 
     async def _save_capture() -> None:
@@ -826,12 +997,18 @@ def CaptureScreen() -> ft.Control:
                             ft.Chip(
                                 label=ft.Text("Studio WAV 44.1k"),
                                 selected=mic_codec == "pcm16" and pcm_preset == "studio",
-                                on_select=lambda _: (set_mic_codec("pcm16"), set_pcm_preset("studio")),
+                                on_select=lambda _: (
+                                    set_mic_codec("pcm16"),
+                                    set_pcm_preset("studio"),
+                                ),
                             ),
                             ft.Chip(
                                 label=ft.Text("Voice WAV 16k"),
                                 selected=mic_codec == "pcm16" and pcm_preset == "voice",
-                                on_select=lambda _: (set_mic_codec("pcm16"), set_pcm_preset("voice")),
+                                on_select=lambda _: (
+                                    set_mic_codec("pcm16"),
+                                    set_pcm_preset("voice"),
+                                ),
                             ),
                             ft.Chip(
                                 label=ft.Text("Opus"),
@@ -870,7 +1047,14 @@ def CaptureScreen() -> ft.Control:
                     ),
                     ft.Text("Capture", size=FONT_LG, weight=ft.FontWeight.BOLD),
                     *(
-                        [ft.Text(elapsed_str, size=FONT_MD, weight=ft.FontWeight.BOLD, color=ACCENT_RED)]
+                        [
+                            ft.Text(
+                                elapsed_str,
+                                size=FONT_MD,
+                                weight=ft.FontWeight.BOLD,
+                                color=ACCENT_RED,
+                            )
+                        ]
                         if recording
                         else []
                     ),
@@ -887,4 +1071,4 @@ def CaptureScreen() -> ft.Control:
     )
 
 
-__all__ = ["CaptureScreen", "next_permission_action", "_write_wav", "_pcm_rms", "_can_capture"]
+__all__ = ["CaptureScreen", "_can_capture", "_pcm_rms", "_write_wav", "next_permission_action"]

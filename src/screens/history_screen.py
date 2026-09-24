@@ -9,7 +9,7 @@ import flet as ft
 from components.empty_state import empty_state_view
 from components.job_card import job_card_view
 from core.notify import ERROR, show_snack
-from core.state import state
+from core.state import use_app_state
 from core.styles import section_header
 from core.theme import ACCENT_RED, is_dark_mode
 from core.tokens import RADIUS_MD, SPACE_LG, SPACE_MD, SPACE_SM
@@ -21,18 +21,21 @@ def HistoryScreen() -> ft.Control:
     """Historical archive of media operations with Dismissible delete actions."""
     page = ft.context.page
     ctrl = use_controller()
-    is_dark = is_dark_mode(page)
+    app_state = use_app_state()
+    is_dark = is_dark_mode(page, app_state)
 
     search_query, set_search_query = ft.use_state("")
-    history_items = state.history
+    history_items = app_state.history
 
     filtered_items = (
         [
             j
             for j in history_items
-            if search_query.lower() in Path(j.input_path).name.lower()
-            or search_query.lower() in j.op.lower()
-            or search_query.lower() in Path(j.output_path).name.lower()
+            # Restored jobs can carry None paths/ops (explicit JSON null) —
+            # Path(None) raised the moment the user typed a character.
+            if search_query.lower() in Path(j.input_path or "").name.lower()
+            or search_query.lower() in (j.op or "").lower()
+            or search_query.lower() in Path(j.output_path or "").name.lower()
         ]
         if search_query
         else history_items
@@ -64,7 +67,7 @@ def HistoryScreen() -> ft.Control:
             ctrl.delete_job(job.id)
             show_snack(
                 page,
-                f"Deleted {Path(job.output_path).name or job.op}",
+                f"Deleted {Path(job.output_path or '').name or (job.op or 'job')}",
                 bgcolor=ERROR,
                 duration_ms=5000,
                 action=ft.SnackBarAction(
@@ -80,8 +83,10 @@ def HistoryScreen() -> ft.Control:
                 content=ft.Row(
                     [ft.Icon(ft.Icons.DELETE_OUTLINE_ROUNDED, color="#FFFFFF", size=24)],
                     alignment=ft.MainAxisAlignment.START,
-                    padding=ft.Padding.only(left=SPACE_LG),
                 ),
+                # padding lives on Container — ft.Row has NO padding kwarg
+                # (pre-existing TypeError that froze the History tab).
+                padding=ft.Padding.only(left=SPACE_LG),
                 bgcolor=ACCENT_RED,
                 border_radius=RADIUS_MD,
                 alignment=ft.Alignment.CENTER_LEFT,
@@ -90,8 +95,8 @@ def HistoryScreen() -> ft.Control:
                 content=ft.Row(
                     [ft.Icon(ft.Icons.DELETE_OUTLINE_ROUNDED, color="#FFFFFF", size=24)],
                     alignment=ft.MainAxisAlignment.END,
-                    padding=ft.Padding.only(right=SPACE_LG),
                 ),
+                padding=ft.Padding.only(right=SPACE_LG),
                 bgcolor=ACCENT_RED,
                 border_radius=RADIUS_MD,
                 alignment=ft.Alignment.CENTER_RIGHT,
@@ -99,7 +104,8 @@ def HistoryScreen() -> ft.Control:
             on_dismiss=_on_dismiss,
         )
 
-    return ft.ListView(
+    return ft.Column(
+        scroll=ft.ScrollMode.AUTO,
         controls=[
             # Header
             section_header(
@@ -132,20 +138,18 @@ def HistoryScreen() -> ft.Control:
                     section_header(
                         "Now Processing",
                         (
-                            f"{len(state.jobs)} in queue"
-                            if len(state.jobs) > 1
-                            else ("1 running" if state.jobs else "")
+                            f"{len(app_state.jobs)} in queue"
+                            if len(app_state.jobs) > 1
+                            else ("1 running" if app_state.jobs else "")
                         ),
                         is_dark=is_dark,
                     ),
                     ft.Column(
-                        controls=[
-                            job_card_view(j, is_dark=is_dark) for j in state.jobs
-                        ],
+                        controls=[job_card_view(j, is_dark=is_dark) for j in app_state.jobs],
                         spacing=SPACE_SM,
                     ),
                 ]
-                if state.jobs
+                if app_state.jobs
                 else []
             ),
             # Items or empty state
@@ -171,6 +175,10 @@ def HistoryScreen() -> ft.Control:
                     )
                 ]
             ),
+            # Nav-bar clearance INSIDE the scroll (sibling pattern — the shell's
+            # fixed outer inset is gone; without this the last card sat under
+            # the NavigationBar on gesture-nav phones).
+            ft.Container(height=88),
         ],
         spacing=SPACE_MD,
         expand=True,

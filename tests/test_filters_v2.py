@@ -15,6 +15,7 @@ from services.engine_service import (
 
 # ── Availability cache ───────────────────────────────────────────────────
 
+
 def test_available_filters_cached_and_contains_core_set():
     a = available_filters()
     b = available_filters()
@@ -25,6 +26,7 @@ def test_available_filters_cached_and_contains_core_set():
 
 
 # ── Crop math ────────────────────────────────────────────────────────────
+
 
 def test_crop_dims_center_crop_square():
     assert _crop_dims(1920, 1080, "1:1") == (1080, 1080)
@@ -44,9 +46,11 @@ def test_crop_dims_never_upscales():
 def test_crop_dims_bad_aspect_passthrough():
     assert _crop_dims(640, 480, "original") == (640, 480)
     assert _crop_dims(640, 480, "bogus") == (640, 480)
+    assert _crop_dims(640, 480, "1:0") == (640, 480)
 
 
 # ── Gated builder ────────────────────────────────────────────────────────
+
 
 def _first_frame(path: str) -> av.VideoFrame:
     with av.open(path) as inp:
@@ -77,6 +81,7 @@ def test_builder_builds_for_rotation(synthetic_media):
 
 
 # ── End-to-end: crop + sharpen + denoise + watermark in one job ──────────
+
 
 def _make_logo(tmp_path) -> str:
     logo = tmp_path / "logo.png"

@@ -13,7 +13,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
 
-from core.engine_probe import run  # noqa: E402
+from core.engine_probe import run
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 

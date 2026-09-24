@@ -4,13 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 import time
 from pathlib import Path
 
 import flet as ft
 
-from core.state import Job, state
+from core.state import Job, use_app_state
 from core.storage_paths import format_bytes, get_temp_dir
 from core.styles import card_container, section_header
 from core.theme import ACCENT_AMBER, PRIMARY, TEXT_MUTED_DARK, TEXT_MUTED_LIGHT, is_dark_mode
@@ -40,15 +39,16 @@ def CutScreen() -> ft.Control:
     """Segment trimmer view supporting lossless copy and frame-accurate cutting."""
     page = ft.context.page
     ctrl = use_controller()
-    is_dark = is_dark_mode(page)
+    app_state = use_app_state()
+    is_dark = is_dark_mode(page, app_state)
     muted = TEXT_MUTED_DARK if is_dark else TEXT_MUTED_LIGHT
 
-    media_path = state.current_media_path
-    info = state.current_media_info
+    media_path = app_state.current_media_path
+    info = app_state.current_media_info
     file_name = Path(media_path).name if media_path else "No file selected"
     file_size_str = (
         format_bytes(Path(media_path).stat().st_size)
-        if media_path and os.path.exists(media_path)
+        if media_path and Path(media_path).exists()
         else "0 B"
     )
     total_dur = max(1.0, info.duration_s if info else 60.0)
@@ -74,7 +74,7 @@ def CutScreen() -> ft.Control:
             return
         try:
             await v.seek(ft.Duration(milliseconds=int(seconds * 1000)))
-        except Exception as exc:  # noqa: BLE001 — cosmetic preview
+        except Exception as exc:
             logger.debug("Scrub seek failed: %s", exc)
 
     def _scrub_to(seconds: float) -> None:
@@ -86,16 +86,30 @@ def CutScreen() -> ft.Control:
 
     def _stop_scrub() -> None:
         v = scrub_ref.current
+        scrub_ref.current = None  # media_path change must rebuild the scrubber
         if v is None:
             return
 
         async def _stop():
             try:
                 await v.stop()
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 logger.debug("Scrub stop failed: %s", exc)
 
         page.run_task(_stop)
+
+    def _pause_scrub() -> None:
+        v = scrub_ref.current
+        if v is None:
+            return
+
+        async def _pause():
+            try:
+                await v.pause()
+            except Exception as exc:
+                logger.debug("Scrub pause failed: %s", exc)
+
+        page.run_task(_pause)
 
     def _mount_scrub():
         if not media_path or not _HAS_VIDEO or scrub_ref.current is not None:
@@ -104,10 +118,13 @@ def CutScreen() -> ft.Control:
             scrub_ref.current = ftv.Video(
                 playlist=[ftv.VideoMedia(media_path)],
                 autoplay=False,
+                # No chrome on a 160px scrubber — default controls cover the frame
+                controls=None,
                 filter_quality=ft.FilterQuality.MEDIUM,
+                on_error=lambda e: logger.warning("Scrub preview error: %s", getattr(e, "data", e)),
             )
             set_scrub_ready(True)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             logger.warning("Scrub preview unavailable: %s", exc)
         return None
 
@@ -118,19 +135,24 @@ def CutScreen() -> ft.Control:
             kfs = await asyncio.to_thread(EngineService.keyframe_times, media_path)
             set_thumbs(imgs)
             set_keyframes(kfs)
-        except Exception as exc:  # noqa: BLE001 — strip is cosmetic
-            logger.debug("Thumbnail strip failed: %s", exc)
+        except Exception as exc:
+            logger.warning("Thumbnail strip failed: %s", exc)
         finally:
             set_strip_loaded(True)
 
     def _effect_strip():
         if not media_path:
             return None
+        set_thumbs([])  # a new file must not keep showing the old file's frames
+        set_keyframes([])
+        set_strip_loaded(False)
         page.run_task(_load_strip)
         return None
 
-    ft.use_effect(_mount_scrub, [], cleanup=_stop_scrub)
-    ft.use_effect(_effect_strip, [])
+    # media_path in deps: picking a new file tears down + rebuilds scrub & strip
+    # (empty deps kept the previous file's player/frames forever)
+    ft.use_effect(_mount_scrub, [media_path or ""], cleanup=_stop_scrub)
+    ft.use_effect(_effect_strip, [media_path or ""])
 
     def _set_trim_range(lo: float, hi: float) -> None:
         """RangeSlider handler: keep an ordered, non-empty trim window."""
@@ -146,6 +168,7 @@ def CutScreen() -> ft.Control:
         if not media_path or cut_duration <= 0.05:
             return
         set_is_processing(True)
+        _pause_scrub()  # the encode needs the CPU the preview would otherwise burn
 
         ext = Path(media_path).suffix or ".mp4"
         out_name = f"{Path(media_path).stem}_trimmed{ext}"
@@ -160,9 +183,7 @@ def CutScreen() -> ft.Control:
                 "end_seconds": float(end_s),
                 "stream_copy": bool(stream_copy),
             },
-            original_size_bytes=Path(media_path).stat().st_size
-            if os.path.exists(media_path)
-            else 0,
+            original_size_bytes=Path(media_path).stat().st_size if Path(media_path).exists() else 0,
         )
         ctrl.start_job(job)
 
@@ -336,9 +357,7 @@ def CutScreen() -> ft.Control:
                 if thumbs
                 else [
                     ft.Text(
-                        "Building thumbnails…"
-                        if not strip_loaded
-                        else "Thumbnails unavailable",
+                        "Building thumbnails…" if not strip_loaded else "Thumbnails unavailable",
                         size=FONT_SM,
                         color=muted,
                     )

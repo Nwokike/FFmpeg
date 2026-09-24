@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from collections import deque
-from datetime import datetime
+from datetime import UTC, datetime
 
 
 class MemoryLogHandler(logging.Handler):
@@ -19,7 +19,11 @@ class MemoryLogHandler(logging.Handler):
 
     def emit(self, record: logging.LogRecord) -> None:
         try:
-            timestamp = datetime.fromtimestamp(record.created).strftime("%H:%M:%S")
+            # UTC → local conversion is DST-correct; a naive fromtimestamp()
+            # is ambiguous during the repeated hour each fall.
+            timestamp = (
+                datetime.fromtimestamp(record.created, tz=UTC).astimezone().strftime("%H:%M:%S")
+            )
             level = record.levelname[:4]
             msg = self.format(record)
             self.records.append((timestamp, level, msg))

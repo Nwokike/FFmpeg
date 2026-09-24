@@ -3,17 +3,23 @@
 from __future__ import annotations
 
 import logging
-import os
 import time
 from pathlib import Path
 
 import flet as ft
 
 from core.notify import ERROR, show_snack
-from core.state import Job, MediaInfo, state
+from core.state import Job, MediaInfo, use_app_state
 from core.storage_paths import format_bytes, get_temp_dir
 from core.styles import card_container, section_header, status_badge
-from core.theme import ACCENT_BLUE, PRIMARY, TEXT_MUTED_DARK, TEXT_MUTED_LIGHT, is_dark_mode
+from core.theme import (
+    ACCENT_AMBER,
+    ACCENT_BLUE,
+    PRIMARY,
+    TEXT_MUTED_DARK,
+    TEXT_MUTED_LIGHT,
+    is_dark_mode,
+)
 from core.tokens import (
     FONT_LG,
     FONT_MD,
@@ -79,9 +85,7 @@ def build_media_report(info: MediaInfo) -> str:
         lines.append(base + (f" — {', '.join(details)}" if details else ""))
     if info.chapters:
         lines += ["", "## Chapters"]
-        lines += [
-            f"- {_fmt_ct(c.start_s)} → {_fmt_ct(c.end_s)}  {c.title}" for c in info.chapters
-        ]
+        lines += [f"- {_fmt_ct(c.start_s)} → {_fmt_ct(c.end_s)}  {c.title}" for c in info.chapters]
     lines += ["", "_Generated on-device by FFmpeg — Media Dossier._"]
     return "\n".join(lines) + "\n"
 
@@ -92,16 +96,17 @@ def ProbeScreen() -> ft.Control:
     page = ft.context.page
     ctrl = use_controller()
     services = use_services()
-    is_dark = is_dark_mode(page)
+    app_state = use_app_state()
+    is_dark = is_dark_mode(page, app_state)
     muted = TEXT_MUTED_DARK if is_dark else TEXT_MUTED_LIGHT
 
     # Hooks first (discipline): excluded-stream set survives info swaps.
     excluded, set_excluded = ft.use_state([])
 
-    info = state.current_media_info
-    media_path = state.current_media_path
+    info = app_state.current_media_info
+    media_path = app_state.current_media_path
 
-    if not info or not media_path or not os.path.exists(media_path):
+    if not info or not media_path or not Path(media_path).exists():
         return ft.ListView(
             controls=[
                 ft.Row(
@@ -178,6 +183,12 @@ def ProbeScreen() -> ft.Control:
                 ft.Text(f"Channels: {s.channels} ({s.channel_layout})", size=FONT_SM),
                 ft.Text(f"Language: {s.language or 'Undetermined'}", size=FONT_SM),
             ]
+        elif s.stream_type in ("data", "attachment"):
+            # Fonts, covers and chapter tracks used to fall into the subtitle
+            # branch below and wear the wrong icon.
+            icon = ft.Icons.DATA_OBJECT_OUTLINED
+            color = ACCENT_AMBER
+            props = [ft.Text("Embedded data / attachment stream", size=FONT_SM)]
         else:
             icon = ft.Icons.SUBTITLES_OUTLINED
             color = muted
@@ -226,7 +237,7 @@ def ProbeScreen() -> ft.Control:
                                             weight=ft.FontWeight.BOLD,
                                         ),
                                         status_badge(
-                                            s.codec_name.upper(),
+                                            (s.codec_name or "unknown").upper(),
                                             text_color=color,
                                             bg_color=f"{color}22",
                                         ),
@@ -272,8 +283,8 @@ def ProbeScreen() -> ft.Control:
             ok = await services.media_io.share_file(str(out))
             if not ok:
                 show_snack(page, "Couldn't open the share sheet", bgcolor=ERROR)
-        except Exception as exc:  # noqa: BLE001
-            logger.error("Dossier report failed: %s", exc)
+        except Exception as exc:
+            logger.exception("Dossier report failed")
             show_snack(page, f"Report failed: {exc}", bgcolor=ERROR)
 
     return ft.ListView(
@@ -364,9 +375,7 @@ def ProbeScreen() -> ft.Control:
                             controls=[
                                 ft.Row(
                                     controls=[
-                                        ft.Icon(
-                                            ft.Icons.FLAG_ROUNDED, size=16, color=PRIMARY
-                                        ),
+                                        ft.Icon(ft.Icons.FLAG_ROUNDED, size=16, color=PRIMARY),
                                         ft.Text(
                                             ch.title,
                                             size=FONT_SM,

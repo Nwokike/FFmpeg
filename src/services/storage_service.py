@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import threading
+from pathlib import Path
 from typing import Any
 
 from core.storage_paths import get_data_dir
@@ -20,10 +21,10 @@ class StorageService:
 
     def __init__(self, data_dir: str | None = None) -> None:
         self._dir = data_dir or str(get_data_dir())
-        self._path = os.path.join(self._dir, "storage.json")
+        self._path = str(Path(self._dir) / "storage.json")
         self._lock = threading.Lock()
         self._timer: threading.Timer | None = None
-        os.makedirs(self._dir, exist_ok=True)
+        Path(self._dir).mkdir(parents=True, exist_ok=True)
         self._cache: dict[str, Any] = self._read()
 
     def get(self, key: str, default: Any = None) -> Any:
@@ -59,9 +60,9 @@ class StorageService:
 
     def _read(self) -> dict[str, Any]:
         for path in (self._path, self._path + ".bak"):
-            if os.path.isfile(path):
+            if Path(path).is_file():
                 try:
-                    with open(path, encoding="utf-8") as f:
+                    with Path(path).open(encoding="utf-8") as f:
                         return json.load(f)
                 except (OSError, ValueError) as ex:
                     logger.warning("Failed reading %s: %s", path, ex)
@@ -71,24 +72,24 @@ class StorageService:
         tmp_path = self._path + ".tmp"
         bak_path = self._path + ".bak"
         try:
-            with open(tmp_path, "w", encoding="utf-8") as f:
+            with Path(tmp_path).open("w", encoding="utf-8") as f:
                 json.dump(data, f, indent=2)
                 f.flush()
                 os.fsync(f.fileno())
 
-            if os.path.exists(self._path):
+            if Path(self._path).exists():
                 try:
-                    if os.path.exists(bak_path):
-                        os.remove(bak_path)
-                    os.rename(self._path, bak_path)
+                    if Path(bak_path).exists():
+                        Path(bak_path).unlink()
+                    Path(self._path).rename(bak_path)
                 except OSError as e:
-                    logger.debug("Backup rotation skipped: %s", e)
+                    logger.warning("Backup rotation skipped: %s", e)
 
-            os.replace(tmp_path, self._path)
-        except OSError as ex:
-            logger.error("Failed writing storage: %s", ex)
-            if os.path.exists(tmp_path):
+            Path(tmp_path).replace(self._path)
+        except OSError:
+            logger.exception("Failed writing storage")
+            if Path(tmp_path).exists():
                 try:
-                    os.remove(tmp_path)
+                    Path(tmp_path).unlink()
                 except OSError as e:
                     logger.warning("Failed to clean up temp file: %s", e)

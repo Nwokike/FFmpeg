@@ -16,12 +16,12 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def _load_pyproject() -> dict:
-    with open(ROOT / "pyproject.toml", "rb") as fh:
+    with (ROOT / "pyproject.toml").open("rb") as fh:
         return tomllib.load(fh)
 
 
 def _load_version_json() -> dict:
-    with open(ROOT / "version.json", encoding="utf-8") as fh:
+    with (ROOT / "version.json").open(encoding="utf-8") as fh:
         return json.load(fh)
 
 
@@ -34,8 +34,8 @@ def test_pyproject_matches_version_json():
 
 def test_runtime_constants_match_pyproject():
     proj = _load_pyproject()
-    assert APP_VERSION == proj["project"]["version"]
-    assert BUILD_NUMBER == proj["tool"]["flet"]["build_number"]
+    assert proj["project"]["version"] == APP_VERSION
+    assert proj["tool"]["flet"]["build_number"] == BUILD_NUMBER
 
 
 def test_changelog_has_entry_for_current_version():

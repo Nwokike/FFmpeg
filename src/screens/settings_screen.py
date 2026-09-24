@@ -7,11 +7,13 @@ import logging
 
 import flet as ft
 
+from components.banner_ad import BannerAdView
+from core.assets import app_icon_svg
 from core.constants import APP_NAME, APP_VERSION, BUILD_NUMBER, GITHUB_RELEASE_URL
 from core.engine_probe import probe
 from core.logger_handler import MemoryLogHandler
-from core.notify import SUCCESS, show_snack
-from core.state import state
+from core.notify import ERROR, SUCCESS, show_snack
+from core.state import use_app_state
 from core.storage_paths import clear_cache, format_bytes, get_cache_size_bytes
 from core.styles import card_container, section_header
 from core.theme import (
@@ -27,7 +29,9 @@ from core.tokens import (
     FONT_SM,
     FONT_XS,
     RADIUS_MD,
+    SPACE_LG,
     SPACE_MD,
+    SPACE_SM,
 )
 from state.controller_ctx import use_controller
 from state.service_ctx import use_services
@@ -41,47 +45,78 @@ def SettingsScreen() -> ft.Control:
     page = ft.context.page
     ctrl = use_controller()
     services = use_services()
-    is_dark = is_dark_mode(page)
+    app_state = use_app_state()
+    is_dark = is_dark_mode(page, app_state)
     muted = TEXT_MUTED_DARK if is_dark else TEXT_MUTED_LIGHT
 
     cache_size, set_cache_size = ft.use_state(get_cache_size_bytes())
-    active_theme, set_active_theme = ft.use_state(state.settings.get("theme_mode", "system"))
+    # Derive this from the subscribed app state instead of caching a second
+    # local copy; the header toggle must update this picker immediately.
+    active_theme = app_state.settings.get("theme_mode", "system")
     engine_counts, set_engine_counts = ft.use_state("")
 
     async def _load_engine_counts() -> None:
         # Capability probe off the UI loop; counts fill the subtitle live
-        # instead of the hardcoded (and rotted) "557 codecs, 468 filters".
+        # instead of hardcoded numerals that would rot as the wheel changes.
         try:
             p = await asyncio.to_thread(probe)
             set_engine_counts(
                 f"Inspect {p.codec_count} codecs, {p.filter_count} filters, and formats in PyAV 18"
             )
             page.update()
-        except Exception as exc:  # noqa: BLE001 — subtitle is cosmetic
-            logger.debug("Engine counts probe failed: %s", exc)
+        except Exception as exc:
+            logger.warning("Engine counts probe failed: %s", exc)
 
     ft.use_effect(lambda: page.run_task(_load_engine_counts), [])
 
     def _update_theme(mode_str: str):
-        set_active_theme(mode_str)
-        state.settings["theme_mode"] = mode_str
+        # Whole-value assignment — a dict-item write would never publish and
+        # the header would only re-tint after an unrelated re-render.
+        app_state.set_setting("theme_mode", mode_str)
         if mode_str == "dark":
             page.theme_mode = ft.ThemeMode.DARK
         elif mode_str == "light":
             page.theme_mode = ft.ThemeMode.LIGHT
         else:
             page.theme_mode = ft.ThemeMode.SYSTEM
+        # Mirror main.toggle_theme exactly: publish the observable AND bump the
+        # revision, otherwise is_dark_mode's subscription never fires and the
+        # whole app keeps the old palette until an unrelated interaction.
+        app_state.theme_mode = page.theme_mode
+        app_state.theme_revision += 1
         page.update()
         if services.storage:
             services.storage.set("theme_mode", mode_str)
+
+    def _set_hardware_accel(e) -> None:
+        enabled = bool(e.control.value)
+        app_state.set_setting("hardware_accel", enabled)
+        if services.storage:
+            services.storage.set("hardware_accel", enabled)
+        page.update()
 
     def _do_clear_cache(_):
         freed = clear_cache()
         set_cache_size(get_cache_size_bytes())
         page.update()
         show_snack(
-            page, f"Removed {format_bytes(freed)} of temporary files", bgcolor=SUCCESS
+            page, f"Removed {format_bytes(freed)} of cache & temporary files", bgcolor=SUCCESS
         )
+
+    def _copy_logs(text: str) -> None:
+        # services.clipboard defaults to None — tapping Copy without the
+        # service raised AttributeError on the None.
+        if services.clipboard is None:
+            show_snack(page, "Clipboard is unavailable on this platform", bgcolor=ERROR)
+            return
+        page.run_task(services.clipboard.set, text)
+
+    def _open_link(url: str) -> None:
+        # services.url_launcher also defaults to None.
+        if services.url_launcher is None:
+            show_snack(page, "No browser available to open links", bgcolor=ERROR)
+            return
+        page.run_task(services.url_launcher.launch_url, url)
 
     def _open_activity_terminal(_):
         logs = MemoryLogHandler.get_logs()
@@ -104,7 +139,7 @@ def SettingsScreen() -> ft.Control:
                 actions=[
                     ft.TextButton(
                         "Copy",
-                        on_click=lambda _: page.run_task(services.clipboard.set, log_text),
+                        on_click=lambda _: _copy_logs(log_text),
                     ),
                     ft.TextButton("Close", on_click=lambda _: page.pop_dialog()),
                 ],
@@ -116,8 +151,8 @@ def SettingsScreen() -> ft.Control:
         async def _load():
             try:
                 p = await asyncio.to_thread(probe)
-            except Exception as exc:  # noqa: BLE001 — surface, never crash the click
-                logger.error("Engine probe failed: %s", exc)
+            except Exception as exc:
+                logger.exception("Engine probe failed")
                 show_snack(page, f"Engine probe failed: {exc}")
                 return
             page.show_dialog(
@@ -146,9 +181,50 @@ def SettingsScreen() -> ft.Control:
 
         page.run_task(_load)
 
-    def _show_ad_privacy(_):
-        if services.ads:
-            page.run_task(services.ads.show_privacy_options)
+    def _open_about_update(_):
+        ctrl.show_update_dialog()
+
+    about_card = card_container(
+        content=ft.Column(
+            controls=[
+                ft.Image(
+                    src=app_icon_svg(),
+                    width=64,
+                    height=64,
+                    fit=ft.BoxFit.CONTAIN,
+                    color=ft.Colors.WHITE if is_dark else PRIMARY,
+                    color_blend_mode=ft.BlendMode.SRC_IN,
+                    semantics_label=f"{APP_NAME} icon",
+                ),
+                ft.Text(
+                    APP_NAME,
+                    size=FONT_MD,
+                    weight=ft.FontWeight.W_700,
+                ),
+                ft.Container(
+                    content=ft.Text(
+                        f"Version {APP_VERSION} (Build {BUILD_NUMBER})",
+                        size=FONT_SM,
+                        color=muted,
+                    ),
+                    ink=True,
+                    tooltip="Tap to view release notes",
+                    on_click=_open_about_update,
+                ),
+                ft.Text(
+                    "On-device media studio powered by FFmpeg 8 via PyAV.",
+                    size=FONT_SM,
+                    color=muted,
+                    text_align=ft.TextAlign.CENTER,
+                ),
+            ],
+            horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+            spacing=SPACE_SM,
+        ),
+        padding=SPACE_LG,
+        border_radius=RADIUS_MD,
+        is_dark=is_dark,
+    )
 
     return ft.ListView(
         controls=[
@@ -157,7 +233,7 @@ def SettingsScreen() -> ft.Control:
             # Appearance Section
             section_header("Appearance", "Theme preference", is_dark=is_dark),
             card_container(
-                content=ft.Row(
+                content=ft.Column(
                     controls=[
                         ft.Row(
                             controls=[
@@ -187,13 +263,59 @@ def SettingsScreen() -> ft.Control:
                             spacing=SPACE_MD,
                         ),
                         ft.SegmentedButton(
-                            selected={active_theme},
+                            # Keep the selector on its own row so it remains
+                            # comfortable on narrow phones instead of squeezing
+                            # the label and control into an overflowing row.
+                            selected=[active_theme],
                             segments=[
                                 ft.Segment(value="system", label=ft.Text("Auto")),
                                 ft.Segment(value="dark", label=ft.Text("Dark")),
                                 ft.Segment(value="light", label=ft.Text("Light")),
                             ],
-                            on_change=lambda e: _update_theme(list(e.control.selected)[0]),
+                            show_selected_icon=False,
+                            expand=True,
+                            on_change=lambda e: _update_theme(
+                                next(iter(e.control.selected), active_theme)
+                            ),
+                        ),
+                    ],
+                    spacing=SPACE_MD,
+                ),
+                padding=SPACE_MD,
+                border_radius=RADIUS_MD,
+                is_dark=is_dark,
+            ),
+            # Performance
+            section_header(
+                "Performance", "Use the fastest decoder exposed by this device", is_dark=is_dark
+            ),
+            card_container(
+                content=ft.Row(
+                    controls=[
+                        ft.Row(
+                            controls=[
+                                ft.Icon(ft.Icons.SPEED_ROUNDED, size=24, color=PRIMARY),
+                                ft.Column(
+                                    controls=[
+                                        ft.Text(
+                                            "Hardware Decode",
+                                            size=FONT_MD,
+                                            weight=ft.FontWeight.W_600,
+                                        ),
+                                        ft.Text(
+                                            "Hardware acceleration with software fallback",
+                                            size=FONT_SM,
+                                            color=muted,
+                                        ),
+                                    ],
+                                    spacing=2,
+                                ),
+                            ],
+                            spacing=SPACE_MD,
+                        ),
+                        ft.Switch(
+                            value=bool(app_state.settings.get("hardware_accel", True)),
+                            on_change=_set_hardware_accel,
                         ),
                     ],
                     alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
@@ -203,7 +325,9 @@ def SettingsScreen() -> ft.Control:
                 is_dark=is_dark,
             ),
             # Storage & Cache Section
-            section_header("Storage & Cache", "Temporary processing scratchpad", is_dark=is_dark),
+            section_header(
+                "Storage & Cache", "Cache & temporary files (regenerable)", is_dark=is_dark
+            ),
             card_container(
                 content=ft.Row(
                     controls=[
@@ -220,7 +344,7 @@ def SettingsScreen() -> ft.Control:
                                             weight=ft.FontWeight.W_600,
                                         ),
                                         ft.Text(
-                                            f"{format_bytes(cache_size)} used by temporary files",
+                                            f"{format_bytes(cache_size)} in cache & temporary files",
                                             size=FONT_SM,
                                             color=muted,
                                         ),
@@ -240,6 +364,8 @@ def SettingsScreen() -> ft.Control:
                 border_radius=RADIUS_MD,
                 is_dark=is_dark,
             ),
+            # UMP is intentionally not a settings row: Sherlock-style consent
+            # appears at startup only when the regulated region requires it.
             # Diagnostics & Engine
             section_header("Diagnostics", "Engine and runtime logs", is_dark=is_dark),
             card_container(
@@ -263,13 +389,6 @@ def SettingsScreen() -> ft.Control:
                             ),
                             on_click=_open_engine_inspector,
                         ),
-                        ft.Divider(height=1),
-                        ft.ListTile(
-                            leading=ft.Icon(ft.Icons.SECURITY_ROUNDED, color=muted),
-                            title=ft.Text("Ad Privacy & Consent", weight=ft.FontWeight.W_600),
-                            subtitle=ft.Text("Manage Google UMP ad preferences", color=muted),
-                            on_click=_show_ad_privacy,
-                        ),
                     ],
                     spacing=0,
                 ),
@@ -277,31 +396,16 @@ def SettingsScreen() -> ft.Control:
                 border_radius=RADIUS_MD,
                 is_dark=is_dark,
             ),
+            BannerAdView(),
             # About & Updates
             section_header("About", "Application release details", is_dark=is_dark),
+            about_card,
             card_container(
-                content=ft.Column(
-                    controls=[
-                        ft.ListTile(
-                            leading=ft.Icon(ft.Icons.SYSTEM_UPDATE_ROUNDED, color=PRIMARY),
-                            title=ft.Text(
-                                f"{APP_NAME} v{APP_VERSION} (Build {BUILD_NUMBER})",
-                                weight=ft.FontWeight.W_600,
-                            ),
-                            subtitle=ft.Text("Tap to check for latest updates", color=muted),
-                            on_click=lambda _: ctrl.check_update(),
-                        ),
-                        ft.Divider(height=1),
-                        ft.ListTile(
-                            leading=ft.Icon(ft.Icons.OPEN_IN_BROWSER_ROUNDED, color=muted),
-                            title=ft.Text("GitHub Repository", weight=ft.FontWeight.W_600),
-                            subtitle=ft.Text("Source code, releases, and discussions", color=muted),
-                            on_click=lambda _: page.run_task(
-                                services.url_launcher.launch_url, GITHUB_RELEASE_URL
-                            ),
-                        ),
-                    ],
-                    spacing=0,
+                content=ft.ListTile(
+                    leading=ft.Icon(ft.Icons.OPEN_IN_BROWSER_ROUNDED, color=PRIMARY),
+                    title=ft.Text("GitHub Repository", weight=ft.FontWeight.W_600),
+                    subtitle=ft.Text("Source code, releases, and discussions", color=muted),
+                    on_click=lambda _: _open_link(GITHUB_RELEASE_URL),
                 ),
                 padding=0,
                 border_radius=RADIUS_MD,

@@ -45,9 +45,9 @@ def show_snack(
                 page.show_dialog(snack)
             else:
                 logger.info("Snack suppressed: %r dialog was open", type(popped).__name__)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             logger.warning("Snack suppressed after pop failure: %s", exc)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         logger.warning("Snack failed: %s", exc)
 
 

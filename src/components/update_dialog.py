@@ -4,14 +4,33 @@ from __future__ import annotations
 
 import logging
 from typing import Any
+from urllib.parse import urlsplit
 
 import flet as ft
 
 from core.changelog import notes_for
 from core.constants import APP_NAME, APP_VERSION, GITHUB_RELEASE_URL, PLAYSTORE_URL
+from core.notify import ERROR, show_snack
 from core.tokens import RADIUS_LG
 
 logger = logging.getLogger(__name__)
+
+# Release notes are REMOTE markdown — a tampered or hijacked manifest could
+# otherwise hand the user any URL (market://, intent://, custom deep links) on
+# a single tap. Only https links into the project's own domains may launch.
+_ALLOWED_HOSTS = frozenset({"github.com", "raw.githubusercontent.com", "play.google.com"})
+
+
+def is_allowed_launch_url(url: str) -> bool:
+    """True for https URLs on the project's own domains (subdomains included)."""
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return False
+    if parts.scheme != "https":
+        return False
+    host = (parts.hostname or "").lower()
+    return any(host == d or host.endswith(f".{d}") for d in _ALLOWED_HOSTS)
 
 
 def build_update_dialog(
@@ -36,8 +55,13 @@ def build_update_dialog(
     def _launch(url: str) -> None:
         # Flet 1.0: URLs open via the registered UrlLauncher service (async),
         # never page.launch_url which no longer exists on Page.
+        if not is_allowed_launch_url(url):
+            logger.warning("Blocked non-allowlisted link: %r", url)
+            show_snack(page, "That link isn't from an approved source", bgcolor=ERROR)
+            return
         if url_launcher is None:
             logger.warning("UrlLauncher unavailable; cannot open %s", url)
+            show_snack(page, "Couldn't open the link — no browser available", bgcolor=ERROR)
             return
         page.run_task(url_launcher.launch_url, url)
 

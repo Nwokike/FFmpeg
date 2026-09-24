@@ -1,7 +1,6 @@
-Resolved 30 packages in 2ms
 ffmpeg v1.0.0
 ├── av v18.1.0
-├── flet v1.0.0
+├── flet v1.0.1
 │   ├── httpx v0.28.1
 │   │   ├── anyio v4.15.1
 │   │   │   ├── idna v3.20
@@ -15,23 +14,55 @@ ffmpeg v1.0.0
 │   ├── oauthlib v3.3.1
 │   └── repath v0.9.0
 │       └── six v1.17.0
-├── flet-ads v1.0.0
-│   └── flet v1.0.0 (*)
-├── flet-audio v1.0.0
-│   └── flet v1.0.0 (*)
-├── flet-audio-recorder v1.0.0
-│   └── flet v1.0.0 (*)
-├── flet-camera v1.0.0
-│   └── flet v1.0.0 (*)
-├── flet-permission-handler v1.0.0
-│   └── flet v1.0.0 (*)
-├── flet-spinkit v1.0.0
-│   └── flet v1.0.0 (*)
-├── flet-video v1.0.0
-│   └── flet v1.0.0 (*)
+├── flet-ads v1.0.1
+│   └── flet v1.0.1 (*)
+├── flet-audio v1.0.1
+│   └── flet v1.0.1 (*)
+├── flet-audio-recorder v1.0.1
+│   └── flet v1.0.1 (*)
+├── flet-camera v1.0.1
+│   └── flet v1.0.1 (*)
+├── flet-permission-handler v1.0.1
+│   └── flet v1.0.1 (*)
+├── flet-video v1.0.1
+│   └── flet v1.0.1 (*)
 ├── httpx v0.28.1 (*)
-├── numpy v2.5.3
-├── pillow v12.3.0
+├── flet-cli v1.0.1 (group: dev)
+│   ├── binaryornot v0.4.4
+│   │   └── chardet v5.2.0
+│   ├── chardet v5.2.0
+│   ├── cookiecutter v2.7.1
+│   │   ├── arrow v1.4.0
+│   │   │   ├── python-dateutil v2.9.0.post0
+│   │   │   │   └── six v1.17.0
+│   │   │   └── tzdata v2026.4
+│   │   ├── binaryornot v0.4.4 (*)
+│   │   ├── click v8.5.0
+│   │   ├── jinja2 v3.1.6
+│   │   │   └── markupsafe v3.0.3
+│   │   ├── python-slugify v9.1.0
+│   │   │   └── text-unidecode v1.3
+│   │   ├── pyyaml v6.0.3
+│   │   ├── requests v2.34.2
+│   │   │   ├── certifi v2026.7.22
+│   │   │   ├── charset-normalizer v3.5.1
+│   │   │   ├── idna v3.20
+│   │   │   └── urllib3 v2.8.0
+│   │   └── rich v15.0.0
+│   │       ├── markdown-it-py v4.2.0
+│   │       │   └── mdurl v0.1.2
+│   │       └── pygments v2.21.0
+│   ├── flet v1.0.1 (*)
+│   ├── flet-platform-assets v1.0.1
+│   │   └── pillow v12.3.0
+│   ├── packaging v26.3
+│   ├── qrcode v8.2
+│   │   └── colorama v0.4.6
+│   ├── rich v15.0.0 (*)
+│   └── watchdog v6.0.0
+├── flet-desktop v1.0.1 (group: dev)
+│   ├── flet v1.0.1 (*)
+│   └── rich v15.0.0 (*)
 ├── pytest v9.1.1 (group: dev)
 │   ├── colorama v0.4.6
 │   ├── iniconfig v2.3.0

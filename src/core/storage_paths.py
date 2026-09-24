@@ -6,6 +6,7 @@ set by the Flet mobile launcher, falling back to ~/.ffmpeg/* on desktop dev.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 import shutil
@@ -16,10 +17,7 @@ from core.constants import STORAGE_CACHE_ENV, STORAGE_DATA_ENV, STORAGE_TEMP_ENV
 
 def _resolve_dir(env_key: str, default_subdir: str) -> Path:
     val = os.environ.get(env_key)
-    if val:
-        path = Path(val)
-    else:
-        path = Path.home() / ".ffmpeg" / default_subdir
+    path = Path(val) if val else Path.home() / ".ffmpeg" / default_subdir
     path.mkdir(parents=True, exist_ok=True)
     return path
 
@@ -39,6 +37,22 @@ def get_temp_dir() -> Path:
     return _resolve_dir(STORAGE_TEMP_ENV, "temp")
 
 
+def cache_bytes(name: str, data: bytes) -> Path:
+    """Store ``data`` in CACHE under a content-addressed name and return it.
+
+    Keyed by an 8-hex content digest plus the sanitized original name:
+    identical bytes are written once, and clear_cache() may reclaim the
+    file — it is a re-obtainable copy (re-pickable media, re-picked
+    watermark), never the only copy of user data.
+    """
+    digest = hashlib.sha256(data).hexdigest()[:8]
+    safe = "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in Path(name).name)
+    dest = get_cache_dir() / f"{digest}_{safe or 'file'}"
+    if not dest.exists():
+        dest.write_bytes(data)
+    return dest
+
+
 def get_cache_size_bytes() -> int:
     """Calculate total bytes occupied by cache and temp directories."""
     total = 0
@@ -47,9 +61,9 @@ def get_cache_size_bytes() -> int:
             for root, _, files in os.walk(d):
                 for f in files:
                     try:
-                        total += os.path.getsize(os.path.join(root, f))
+                        total += (Path(root) / f).stat().st_size
                     except OSError as e:
-                        logging.getLogger(__name__).debug("Failed to stat cache file: %s", e)
+                        logging.getLogger(__name__).warning("Failed to stat cache file: %s", e)
     return total
 
 

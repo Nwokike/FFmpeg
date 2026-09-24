@@ -107,3 +107,25 @@ def test_enqueue_sets_pending_status():
     assert j.status == "pending"
     assert j.status_message == "Queued"
     q.shutdown()
+
+
+def test_worker_space_failure_does_not_notify_outside_page_context(monkeypatch):
+    job = _job()
+    notified = []
+
+    def listener(_sender, _field):
+        notified.append(_field)
+
+    job.subscribe(listener)
+    monkeypatch.setattr("services.job_queue.free_space_error", lambda _job: "no space")
+    q = JobQueue(runner=lambda _job, _evt: None)
+    q.enqueue(job)
+    notified.clear()  # enqueue is a UI-thread mutation; test the worker phase only
+    deadline = time.time() + 5
+    while job.status == "pending" and time.time() < deadline:
+        time.sleep(0.01)
+    q.shutdown()
+    notified.clear()  # shutdown may run its own UI-side cancellation mutation
+
+    assert job.status == "failed"
+    assert notified == []

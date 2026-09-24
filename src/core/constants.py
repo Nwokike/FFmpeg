@@ -34,7 +34,7 @@ def _read_build_from_pyproject() -> tuple[str, int]:
         for parent in here.parents:
             cand = parent / "pyproject.toml"
             if cand.is_file():
-                with open(cand, "rb") as fh:
+                with Path(cand).open("rb") as fh:
                     data = tomllib.load(fh)
                 version = str(data.get("project", {}).get("version", version))
                 build = int(data.get("tool", {}).get("flet", {}).get("build_number", build))
@@ -42,7 +42,7 @@ def _read_build_from_pyproject() -> tuple[str, int]:
     except Exception as exc:
         import logging as _log
 
-        _log.getLogger(__name__).debug("pyproject read failed: %s", exc)
+        _log.getLogger(__name__).warning("pyproject read failed: %s", exc)
     return version, build
 
 
@@ -55,10 +55,18 @@ PLAYSTORE_URL = "https://play.google.com/store/apps/details?id=ng.kiri.ffmpeg"
 
 # AdMob — Google test App ID (matches AdService USE_TEST_IDS=True). The
 # [tool.flet.android.meta_data] block in pyproject.toml carries the matching
-# APPLICATION_ID; swap both to the production ID at release.
+# APPLICATION_ID; swap all three files at release with:
+#   uv run python tools/admob.py swap-ids --mode prod --app-id … --banner … --interstitial …
+# (the CI AdMob guard fails tag builds while the test App ID is still present.)
 ADMOB_APP_ID_TEST = "ca-app-pub-3940256099942544~3347511713"
 ADMOB_BANNER_UNIT_TEST = "ca-app-pub-3940256099942544/9214589741"
 ADMOB_INTERSTITIAL_UNIT_TEST = "ca-app-pub-3940256099942544/1033173712"
+
+# Production units — filled by tools/admob.py swap-ids --mode prod (empty = unset;
+# AdService falls back to the test IDs while these are blank).
+ADMOB_APP_ID_PROD = ""
+ADMOB_BANNER_UNIT_PROD = ""
+ADMOB_INTERSTITIAL_UNIT_PROD = ""
 
 # Storage-tier env vars set by the Flet mobile launcher (verified in 1.0 source).
 STORAGE_DATA_ENV = "FLET_APP_STORAGE_DATA"

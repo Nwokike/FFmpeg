@@ -36,11 +36,30 @@ jobs:
         with:
           python-version: '3.14'
       - name: Install dependencies (incl. dev group)
-        run: uv sync
+        run: uv sync --frozen
       - name: Ruff
-        run: uv run ruff check src/ tests/
-      - name: Tests
-        run: uv run pytest -q
+        run: uv run --frozen ruff check .
+      - name: Ruff format
+        run: uv run --frozen ruff format --check .
+      - name: Tests (offline only)
+        run: uv run --frozen pytest -m "not live" -q
+      - name: Release identity consistency
+        run: uv run --frozen python tools/check_release_consistency.py
+      - name: AdMob closed-testing/production ID guard
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            if grep -q "3940256099942544" pyproject.toml; then
+              if [[ "$GITHUB_REF_NAME" == "v1.0.0" ]]; then
+                echo "::warning::v1.0.0 is a closed-testing build and intentionally uses Google test AdMob units. Swap production IDs before the Play production release."
+              else
+                echo "::error::Google test AdMob IDs are forbidden for production tags. Run: uv run python tools/admob.py swap-ids --mode prod --app-id ... --banner ... --interstitial ..."
+                exit 1
+              fi
+            fi
+          elif grep -q "3940256099942544" pyproject.toml; then
+            echo "::warning::Test AdMob IDs in use (expected for PR/closed-test builds)"
+          fi
 
   # ─── 0. Create Release Tag & Placeholder ───────────────
   prepare-release:
@@ -93,11 +112,12 @@ jobs:
         with:
           distribution: temurin
           java-version: 17
-      - name: Pre-compile binary wheels (av)
+      - name: Pre-compile mobile wheels (PyAV and extensions)
         run: |
-          mkdir -p ${{ github.workspace }}/wheels
-          pip install wheel
-          uv export --no-dev --format requirements-txt | pip wheel -r /dev/stdin --no-deps -w ${{ github.workspace }}/wheels 2>/dev/null || true
+          set -euo pipefail
+          python -m pip install --upgrade wheel
+          uv export --frozen --no-dev --no-emit-project --format requirements-txt --output-file requirements.mobile.txt
+          python -m pip wheel -r requirements.mobile.txt --no-deps -w ${{ github.workspace }}/wheels
       - name: Decode Keystore
         env:
           KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
@@ -109,7 +129,21 @@ jobs:
           FLET_ANDROID_SIGNING_KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
           FLET_ANDROID_SIGNING_KEY_STORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
           FLET_ANDROID_SIGNING_KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
-        run: uv run flet build apk --yes --project ffmpeg --product "FFmpeg" --org ng.kiri --company "Kiri Research Labs" --build-version ${{ env.BUILD_VERSION }} --build-number ${{ env.BUILD_NUMBER }} --split-per-abi -v
+        run: uv run --frozen flet build apk --python-version 3.14 --yes --project ffmpeg --product "FFmpeg" --org ng.kiri --company "Kiri Research Labs" --build-version ${{ env.BUILD_VERSION }} --build-number ${{ env.BUILD_NUMBER }} --split-per-abi -v
+      - name: Verify APK artifacts and prune boundary
+        if: always()
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          artifacts=(build/apk/*.apk)
+          test "${#artifacts[@]}" -gt 0
+          ls -lh build/apk/*.apk
+          for artifact in "${artifacts[@]}"; do
+            if unzip -l "$artifact" | grep -qE 'pytest/|ruff/|uvicorn/|starlette/|fastapi/|docs/|screenshots/'; then
+              echo "Development-only files found in $artifact"
+              exit 1
+            fi
+          done
       - name: Upload directly to GitHub Release
         if: github.event_name != 'pull_request'
         uses: softprops/action-gh-release@v2
@@ -133,17 +167,38 @@ jobs:
         with:
           distribution: temurin
           java-version: 17
+      - name: Pre-compile mobile wheels (PyAV and extensions)
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade wheel
+          uv export --frozen --no-dev --no-emit-project --format requirements-txt --output-file requirements.mobile.txt
+          python -m pip wheel -r requirements.mobile.txt --no-deps -w ${{ github.workspace }}/wheels
       - name: Decode Keystore
         env:
           KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
         run: echo "$KEYSTORE_BASE64" | base64 --decode > kiri_keystore.jks
       - name: Build AAB
         env:
+          PIP_FIND_LINKS: ${{ github.workspace }}/wheels
           FLET_ANDROID_SIGNING_KEY_STORE: ${{ github.workspace }}/kiri_keystore.jks
           FLET_ANDROID_SIGNING_KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
           FLET_ANDROID_SIGNING_KEY_STORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
           FLET_ANDROID_SIGNING_KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
-        run: uv run flet build aab --yes --project ffmpeg --product "FFmpeg" --org ng.kiri --company "Kiri Research Labs" --build-version ${{ env.BUILD_VERSION }} --build-number ${{ env.BUILD_NUMBER }} -v
+        run: uv run --frozen flet build aab --python-version 3.14 --yes --project ffmpeg --product "FFmpeg" --org ng.kiri --company "Kiri Research Labs" --build-version ${{ env.BUILD_VERSION }} --build-number ${{ env.BUILD_NUMBER }} -v
+      - name: Verify AAB artifact and prune boundary
+        if: always()
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          artifacts=(build/aab/*.aab)
+          test "${#artifacts[@]}" -gt 0
+          ls -lh build/aab/*.aab
+          for artifact in "${artifacts[@]}"; do
+            if unzip -l "$artifact" | grep -qE 'pytest/|ruff/|uvicorn/|starlette/|fastapi/|docs/|screenshots/'; then
+              echo "Development-only files found in $artifact"
+              exit 1
+            fi
+          done
       - name: Upload directly to GitHub Release
         if: github.event_name != 'pull_request'
         uses: softprops/action-gh-release@v2
@@ -165,7 +220,7 @@ jobs:
           python-version: '3.14'
 
       - name: Build Windows Portable
-        run: uv run flet build windows --yes --project ffmpeg --product "FFmpeg" --org ng.kiri --company "Kiri Research Labs" --build-version ${{ env.BUILD_VERSION }} --build-number ${{ env.BUILD_NUMBER }} -v
+        run: uv run --frozen flet build windows --python-version 3.14 --yes --project ffmpeg --product "FFmpeg" --org ng.kiri --company "Kiri Research Labs" --build-version ${{ env.BUILD_VERSION }} --build-number ${{ env.BUILD_NUMBER }} -v
 
       - name: Generate Icon for Installer
         run: |
@@ -237,7 +292,7 @@ jobs:
           sudo apt-get install -y libgtk-3-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev rpm ruby ruby-dev
           sudo gem install --no-document fpm
       - name: Build Linux Bundle
-        run: uv run flet build linux --yes --project ffmpeg --product "FFmpeg" --org ng.kiri --company "Kiri Research Labs" --build-version ${{ env.BUILD_VERSION }} --build-number ${{ env.BUILD_NUMBER }} -v
+        run: uv run --frozen flet build linux --python-version 3.14 --yes --project ffmpeg --product "FFmpeg" --org ng.kiri --company "Kiri Research Labs" --build-version ${{ env.BUILD_VERSION }} --build-number ${{ env.BUILD_NUMBER }} -v
       - name: Create Linux Packages (.deb, .rpm, .tar.gz)
         run: |
           mkdir -p build/dist
@@ -277,8 +332,8 @@ jobs:
           <?xml version="1.0" encoding="UTF-8"?>
           <component type="desktop-application">
             <id>ng.kiri.ffmpeg</id>
-            <metadata_license>MIT</metadata_license>
-            <project_license>MIT</project_license>
+            <metadata_license>LicenseRef-Proprietary</metadata_license>
+            <project_license>LicenseRef-Proprietary</project_license>
             <name>FFmpeg</name>
             <summary>On-device media toolkit — transcode, compress, cut and extract any media with FFmpeg 8</summary>
             <description>

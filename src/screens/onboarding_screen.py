@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import flet as ft
 
+from core.assets import app_icon_svg
+from core.state import use_app_state
 from core.theme import PRIMARY, PRIMARY_DARK, TEXT_MUTED_DARK, TEXT_MUTED_LIGHT, is_dark_mode
 from core.tokens import (
     FONT_2XL,
@@ -45,7 +47,8 @@ def OnboardingScreen() -> ft.Control:
     """Three-step onboarding slide presentation."""
     page = ft.context.page
     ctrl = use_controller()
-    is_dark = is_dark_mode(page)
+    app_state = use_app_state()
+    is_dark = is_dark_mode(page, app_state)
     muted = TEXT_MUTED_DARK if is_dark else TEXT_MUTED_LIGHT
 
     slide_idx, set_slide_idx = ft.use_state(0)
@@ -82,7 +85,7 @@ def OnboardingScreen() -> ft.Control:
     # Hero: first slide shows your real FFmpeg icon.svg, others show themed icons
     if is_image:
         hero_content = ft.Image(
-            src=f"/{icon_src}",
+            src=app_icon_svg(),
             width=ICON_HERO * 2.2,
             height=ICON_HERO * 2.2,
             fit=ft.BoxFit.CONTAIN,

@@ -92,9 +92,7 @@ def test_record_cancel_keeps_output(synthetic_media):
 
     inp = _open_source(synthetic_media)
     try:
-        result = EngineService._record_from(
-            inp, out, None, None, progress, evt
-        )
+        result = EngineService._record_from(inp, out, None, None, progress, evt)
     finally:
         inp.close()
 
@@ -109,7 +107,7 @@ def test_record_rejects_non_urls(synthetic_media):
 
 
 def test_record_unknown_protocol_is_friendly():
-    with pytest.raises(ValueError, match="protocol|Couldn't|read"):
+    with pytest.raises(ValueError, match=r"protocol|Couldn't|read"):
         EngineService.record(
             "gopher://example.com/feed",
             "unused_out.mp4",

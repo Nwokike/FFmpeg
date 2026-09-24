@@ -6,23 +6,25 @@ from pathlib import Path
 
 import flet as ft
 
-from core.state import Job, state
+from core.state import Job, use_app_state
 from core.theme import ACCENT_RED, PRIMARY
 from core.tokens import FONT_SM, FONT_XS, ICON_SM, RADIUS_MD, SPACE_MD, SPACE_SM
 from state.controller_ctx import use_controller
 
 
+@ft.component
 def jobs_banner_view(active_job: Job | None, is_dark: bool = True) -> ft.Control:
     """Renders a compact progress bar strip when a job is actively processing in the background."""
+    app_state = use_app_state()
+    ctrl = use_controller()
     if not active_job or not active_job.is_running:
         return ft.Container(height=0, width=0, visible=False)
 
-    ctrl = use_controller()
     name = Path(active_job.input_path).name if active_job.input_path else "Media file"
     pct = int(active_job.progress * 100)
     is_live = active_job.op == "record"  # live streams have no total — animate
     paused = active_job.status_message == "Paused"
-    queued = max(0, len(state.jobs) - 1)
+    queued = max(0, len(app_state.jobs) - 1)
 
     return ft.Container(
         content=ft.Column(
@@ -33,9 +35,7 @@ def jobs_banner_view(active_job: Job | None, is_dark: bool = True) -> ft.Control
                             controls=[
                                 ft.ProgressRing(width=16, height=16, stroke_width=2, color=PRIMARY),
                                 ft.Text(
-                                    (
-                                        "Paused — " if paused else "Processing "
-                                    )
+                                    ("Paused — " if paused else "Processing ")
                                     + f"{active_job.op.title()}: {name}",
                                     size=FONT_SM,
                                     weight=ft.FontWeight.W_600,

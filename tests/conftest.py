@@ -44,10 +44,7 @@ def _build_synthetic(path: str) -> None:
             (
                 v
                 for k in range(1024)
-                for v in (
-                    int(12000 * math.sin(2 * math.pi * 440 * (n_samples + k) / _RATE)),
-                )
-                * 2
+                for v in (int(12000 * math.sin(2 * math.pi * 440 * (n_samples + k) / _RATE)),) * 2
             ),
         )
         n_samples += 1024

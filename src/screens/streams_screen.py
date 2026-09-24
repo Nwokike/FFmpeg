@@ -15,7 +15,7 @@ import time
 import flet as ft
 
 from core.engine_probe import _probe_protocol
-from core.state import Job
+from core.state import Job, use_app_state
 from core.storage_paths import get_temp_dir
 from core.styles import card_container, section_header
 from core.theme import (
@@ -45,7 +45,8 @@ def StreamsScreen() -> ft.Control:
     """URL entry + record controls with a live protocol-availability badge."""
     page = ft.context.page
     ctrl = use_controller()
-    is_dark = is_dark_mode(page)
+    app_state = use_app_state()
+    is_dark = is_dark_mode(page, app_state)
     muted = TEXT_MUTED_DARK if is_dark else TEXT_MUTED_LIGHT
 
     url, set_url = ft.use_state("")
@@ -58,8 +59,8 @@ def StreamsScreen() -> ft.Control:
         for scheme in ("https", "http"):
             try:
                 results.append(_probe_protocol(scheme))
-            except Exception as exc:  # noqa: BLE001 — badge is informational
-                logger.debug("Protocol probe %s failed: %s", scheme, exc)
+            except Exception as exc:
+                logger.warning("Protocol probe %s failed: %s", scheme, exc)
                 results.append("missing")
         if all(r == "present" for r in results):
             return "present", "present"
@@ -86,7 +87,9 @@ def StreamsScreen() -> ft.Control:
             label, color = "Network protocols unavailable", ACCENT_RED
         return ft.Chip(
             label=ft.Text(label, size=FONT_SM, color=color),
-            avatar=ft.Icon(
+            # Flet 1.0 Chip has no `avatar` prop — `leading` is the icon slot
+            # (avatar= raised TypeError at construction on every visit here).
+            leading=ft.Icon(
                 ft.Icons.CELL_TOWER_ROUNDED,
                 size=16,
                 color=color,
@@ -97,9 +100,7 @@ def StreamsScreen() -> ft.Control:
         if not url_ok:
             return
         ext, container_format = _FORMATS[fmt]
-        duration = next(
-            (d for label, d in _DURATION_CHOICES if label == dur_label), None
-        )
+        duration = next((d for label, d in _DURATION_CHOICES if label == dur_label), None)
         ts = int(time.time())
         job = Job(
             op="record",
@@ -165,9 +166,7 @@ def StreamsScreen() -> ft.Control:
                                     ft.Chip(
                                         label=ft.Text(label_text),
                                         selected=dur_label == label_text,
-                                        on_select=lambda _, text=label_text: set_dur_label(
-                                            text
-                                        ),
+                                        on_select=lambda _, text=label_text: set_dur_label(text),
                                     )
                                     for label_text, _dur_value in _DURATION_CHOICES
                                 ],

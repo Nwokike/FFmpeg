@@ -9,18 +9,18 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 from pathlib import Path
 
 import flet as ft
 
 from core.notify import ERROR, show_snack
-from core.state import Job, state
-from core.storage_paths import format_bytes, get_temp_dir
+from core.state import Job, use_app_state
+from core.storage_paths import cache_bytes, format_bytes, get_temp_dir
 from core.styles import card_container, section_header
 from core.theme import ACCENT_PURPLE, TEXT_MUTED_DARK, TEXT_MUTED_LIGHT, is_dark_mode
 from core.tokens import FONT_LG, FONT_MD, FONT_SM, FONT_XS, RADIUS_LG, SPACE_MD, SPACE_SM
 from services.engine_service import available_filters
+from services.media_io import picker_files
 from state.controller_ctx import use_controller
 from state.service_ctx import use_services
 
@@ -37,15 +37,16 @@ def FiltersScreen() -> ft.Control:
     page = ft.context.page
     ctrl = use_controller()
     services = use_services()
-    is_dark = is_dark_mode(page)
+    app_state = use_app_state()
+    is_dark = is_dark_mode(page, app_state)
     muted = TEXT_MUTED_DARK if is_dark else TEXT_MUTED_LIGHT
 
-    media_path = state.current_media_path
-    info = state.current_media_info
+    media_path = app_state.current_media_path
+    info = app_state.current_media_info
     file_name = Path(media_path).name if media_path else "No file selected"
     file_size_str = (
         format_bytes(Path(media_path).stat().st_size)
-        if media_path and os.path.exists(media_path)
+        if media_path and Path(media_path).exists()
         else "0 B"
     )
 
@@ -72,8 +73,8 @@ def FiltersScreen() -> ft.Control:
         try:
             names = await asyncio.to_thread(available_filters)
             set_avail(frozenset(names))
-        except Exception as exc:  # noqa: BLE001 — gates then stay optimistic
-            logger.debug("Filter availability load failed: %s", exc)
+        except Exception as exc:
+            logger.warning("Filter availability load failed: %s", exc)
 
     ft.use_effect(lambda: page.run_task(_load_avail), [])
 
@@ -94,19 +95,20 @@ def FiltersScreen() -> ft.Control:
                 dialog_title="Choose watermark image",
                 file_type=ft.FilePickerFileType.IMAGE,
                 allow_multiple=False,
+                with_data=True,
             )
-            if not res or not res.files:
+            files = picker_files(res)
+            if not files:
                 return
-            picked = res.files[0]
-            if picked.path and os.path.exists(picked.path):
+            picked = files[0]
+            if picked.path and Path(picked.path).exists():  # noqa: ASYNC240 — trivial stat/exists check
                 set_wm_path(picked.path)
             elif picked.bytes:
-                dest = get_temp_dir() / f"watermark_{Path(picked.name).name}"
-                dest.write_bytes(picked.bytes)
+                dest = cache_bytes(picked.name, picked.bytes)
                 set_wm_path(str(dest))
             else:
                 show_snack(page, "Couldn't read that image", bgcolor=ERROR)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             logger.warning("Watermark pick failed: %s", exc)
             show_snack(page, f"Image pick failed: {exc}", bgcolor=ERROR)
 
@@ -158,9 +160,7 @@ def FiltersScreen() -> ft.Control:
                     else None
                 ),
             },
-            original_size_bytes=Path(media_path).stat().st_size
-            if os.path.exists(media_path)
-            else 0,
+            original_size_bytes=Path(media_path).stat().st_size if Path(media_path).exists() else 0,
         )
         ctrl.start_job(job)
 
@@ -367,10 +367,7 @@ def FiltersScreen() -> ft.Control:
                         spacing=SPACE_SM,
                     )
                 ]
-                if not avail
-                or "hqdn3d" in avail
-                or "nlmeans" in avail
-                or "atadenoise" in avail
+                if not avail or "hqdn3d" in avail or "nlmeans" in avail or "atadenoise" in avail
                 else [_note("hqdn3d/nlmeans/atadenoise")]
             ),
             # Sharpen (gated: unsharp)

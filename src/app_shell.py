@@ -13,10 +13,11 @@ import logging
 
 import flet as ft
 
+from components.brand_header import BrandHeader
 from components.jobs_banner import jobs_banner_view
 from components.offline_banner import offline_banner_view
-from core.state import state
-from core.theme import ACCENT_RED, PRIMARY, is_dark_mode
+from core.state import AppState, state, use_app_state
+from core.theme import ACCENT_RED, is_dark_mode
 from core.tokens import SPACE_MD
 from screens.audio_screen import AudioScreen
 from screens.capture_screen import CaptureScreen
@@ -34,6 +35,7 @@ from screens.probe_screen import ProbeScreen
 from screens.result_screen import ResultScreen
 from screens.settings_screen import SettingsScreen
 from screens.streams_screen import StreamsScreen
+from screens.terminal_screen import TerminalScreen
 from state.controller_ctx import use_controller
 
 logger = logging.getLogger("AppShell")
@@ -43,18 +45,26 @@ _TAB_ICONS = (ft.Icons.HOME_OUTLINED, ft.Icons.HISTORY_ROUNDED, ft.Icons.SETTING
 _TAB_SELECTED_ICONS = (ft.Icons.HOME_ROUNDED, ft.Icons.HISTORY_ROUNDED, ft.Icons.SETTINGS_ROUNDED)
 
 
-def _shell_body(content: ft.Control, *, bottom_inset: bool) -> ft.Container:
-    """Banners run full-width; tool content gets the horizontal gutter.
+def _shell_body(
+    content: ft.Control,
+    app_state: AppState,
+    *,
+    header: ft.Control | None = None,
+) -> ft.Container:
+    """Banners run full-width; screen content gets the horizontal gutter.
 
-    ``bottom_inset`` keeps dashboard content clear of the NavigationBar —
-    tool routes are full-screen and need none.
+    Nav-bar clearance lives INSIDE each dashboard screen's scroll (trailing
+    spacer, sibling pattern) — a fixed outer inset here both fought the
+    scroll view's constraints and still fell short of gesture-nav phones.
+    ``header`` (dashboard only) sits above the banners inside the same gutter.
     """
-    is_dark = is_dark_mode(ft.context.page)
+    is_dark = is_dark_mode(ft.context.page, app_state)
     return ft.Container(
         content=ft.Column(
             controls=[
-                offline_banner_view(state.is_online),
-                jobs_banner_view(state.active_job, is_dark=is_dark),
+                *([header] if header is not None else []),
+                offline_banner_view(app_state.is_online),
+                jobs_banner_view(app_state.active_job, is_dark=is_dark),
                 ft.Container(
                     content=content,
                     expand=True,
@@ -65,45 +75,45 @@ def _shell_body(content: ft.Control, *, bottom_inset: bool) -> ft.Container:
             expand=True,
         ),
         expand=True,
-        padding=ft.Padding.only(bottom=88) if bottom_inset else 0,
     )
 
 
-def _build_navigation_bar(ctrl) -> ft.NavigationBar:
+def _build_navigation_bar(ctrl, app_state: AppState | None = None) -> ft.NavigationBar:
     """Dashboard NavigationBar — declared on the view, never mutated post-hoc."""
+    if app_state is None:
+        app_state = state
 
     def _on_tab_change(e):
         idx = e.control.selected_index
-        if idx == state.selected_tab:
+        if idx == app_state.selected_tab:
             return
         ctrl.select_tab(idx)
 
-    job_count = len(state.jobs)  # observable read → badge re-renders on queue change
+    job_count = len(app_state.jobs)  # observable read → badge re-renders on queue change
 
     def _icon_with_badge(base: ft.IconData):
         if job_count <= 0:
             return base
+        # Flet 1.0 has NO ft.Positioned (M2 regression that froze every tab) —
+        # the counter rides the icon via negative/offset margins inside a Stack.
         return ft.Stack(
             controls=[
                 ft.Icon(base),
-                ft.Positioned(
-                    top=-4,
-                    right=-8,
-                    child=ft.Container(
-                        width=16,
-                        height=16,
-                        border_radius=8,
-                        bgcolor=ACCENT_RED,
-                        alignment=ft.Alignment.CENTER,
-                        content=ft.Text(
-                            str(min(job_count, 99)),
-                            size=9,
-                            weight=ft.FontWeight.BOLD,
-                            color=ft.Colors.WHITE,
-                        ),
+                ft.Container(
+                    width=16,
+                    height=16,
+                    border_radius=8,
+                    bgcolor=ACCENT_RED,
+                    alignment=ft.Alignment.CENTER,
+                    margin=ft.Margin(left=16, top=-4, right=0, bottom=0),
+                    content=ft.Text(
+                        str(min(job_count, 99)),
+                        size=9,
+                        weight=ft.FontWeight.BOLD,
+                        color=ft.Colors.WHITE,
                     ),
                 ),
-            ]
+            ],
         )
 
     destinations = []
@@ -113,37 +123,36 @@ def _build_navigation_bar(ctrl) -> ft.NavigationBar:
 
     return ft.NavigationBar(
         destinations=destinations,
-        selected_index=state.selected_tab,
+        selected_index=app_state.selected_tab,
         on_change=_on_tab_change,
-        bgcolor=ft.Colors.SURFACE,
-        indicator_color=ft.Colors.with_opacity(0.12, PRIMARY),
         label_behavior=ft.NavigationBarLabelBehavior.ALWAYS_SHOW,
     )
 
 
-def _onboarding_gate() -> ft.View | None:
+def _onboarding_gate(app_state: AppState | None = None) -> ft.View | None:
     """Onboarding view while terms are unaccepted.
 
-    The gate lives INSIDE the route views rather than above the Router: the
-    view list from render_views is established at boot, so a Router mounted
-    mid-session (after "Get Started") would never be adopted. Swapping view
-    CONTENT on the observable flip is the same control-swap pattern Sherlock
-    uses under single-view render.
+    The gate lives inside each route view and reads the subscribed AppStateCtx.
+    The Router is mounted once; accepting terms swaps the route content without
+    rebuilding page.views or losing its back-stack/deep-link state.
     """
-    if state.has_accepted_terms:  # observable read → re-render on flip
+    if app_state is None:
+        app_state = state
+    if app_state.has_accepted_terms:  # observable read → re-render on flip
         return None
-    return ft.View(controls=[OnboardingScreen(key=ft.ValueKey("onboarding"))])
+    return ft.View(route="/", controls=[OnboardingScreen(key=ft.ValueKey("onboarding"))])
 
 
 @ft.component
 def _dashboard_view() -> ft.View:
     """Index route: tabbed Home / Jobs (history) / Settings with the nav bar."""
-    gate = _onboarding_gate()
+    app_state = use_app_state()
+    gate = _onboarding_gate(app_state)
     if gate is not None:
         return gate
 
     ctrl = use_controller()
-    selected_tab = state.selected_tab  # observable read → re-renders on tab change
+    selected_tab = app_state.selected_tab  # observable read → re-renders on tab change
 
     if selected_tab == 0:
         content = HomeScreen(key=ft.ValueKey("home"))
@@ -153,8 +162,12 @@ def _dashboard_view() -> ft.View:
         content = SettingsScreen(key=ft.ValueKey("settings"))
 
     return ft.View(
-        controls=[_shell_body(content, bottom_inset=True)],
-        navigation_bar=_build_navigation_bar(ctrl),
+        route="/",
+        controls=[_shell_body(content, app_state, header=BrandHeader())],
+        # ft.View defaults to Padding.all(10); _shell_body owns the gutters,
+        # so the default would stack a second inset on every screen.
+        padding=ft.Padding.all(0),
+        navigation_bar=_build_navigation_bar(ctrl, app_state),
     )
 
 
@@ -167,15 +180,14 @@ def _tool_view(screen_factory, name: str):
 
     @ft.component
     def _route_view() -> ft.View:
-        gate = _onboarding_gate()
+        app_state = use_app_state()
+        gate = _onboarding_gate(app_state)
         if gate is not None:
             return gate
         return ft.View(
-            controls=[
-                _shell_body(
-                    screen_factory(key=ft.ValueKey(name)), bottom_inset=False
-                )
-            ]
+            route=f"/{name}",
+            controls=[_shell_body(screen_factory(key=ft.ValueKey(name)), app_state)],
+            padding=ft.Padding.all(0),  # gutters come from _shell_body
         )
 
     return _route_view
@@ -195,6 +207,7 @@ _ROUTES = [
     ft.Route(path="streams", component=_tool_view(StreamsScreen, "streams")),
     ft.Route(path="join", component=_tool_view(JoinScreen, "join")),
     ft.Route(path="result", component=_tool_view(ResultScreen, "result")),
+    ft.Route(path="terminal", component=_tool_view(TerminalScreen, "terminal")),
 ]
 
 

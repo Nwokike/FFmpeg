@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 import flet as ft
 
-from core.state import Job, state
+from core.state import Job, use_app_state
 from core.storage_paths import format_bytes, get_temp_dir
 from core.styles import card_container, section_header
 from core.theme import ACCENT_CYAN, TEXT_MUTED_DARK, TEXT_MUTED_LIGHT, is_dark_mode
@@ -20,15 +19,16 @@ def ExtractScreen() -> ft.Control:
     """Extraction studio: Audio rip, frame grabber, and palette-optimized GIF maker."""
     page = ft.context.page
     ctrl = use_controller()
-    is_dark = is_dark_mode(page)
+    app_state = use_app_state()
+    is_dark = is_dark_mode(page, app_state)
     muted = TEXT_MUTED_DARK if is_dark else TEXT_MUTED_LIGHT
 
-    media_path = state.current_media_path
-    info = state.current_media_info
+    media_path = app_state.current_media_path
+    info = app_state.current_media_info
     file_name = Path(media_path).name if media_path else "No file selected"
     file_size_str = (
         format_bytes(Path(media_path).stat().st_size)
-        if media_path and os.path.exists(media_path)
+        if media_path and Path(media_path).exists()
         else "0 B"
     )
     duration_s = info.duration_s if info else 10.0
@@ -63,11 +63,14 @@ def ExtractScreen() -> ft.Control:
                 output_path=out_path,
                 params={"format_name": audio_fmt, "bitrate_kbps": int(audio_kbps)},
                 original_size_bytes=Path(media_path).stat().st_size
-                if os.path.exists(media_path)
+                if Path(media_path).exists()
                 else 0,
             )
         elif mode == "subtitles":
-            chosen = sub_streams[sub_sel] if sub_sel < len(sub_streams) else sub_streams[0]
+            # Clamp for the engine, which indexes the subtitle SUBLIST
+            # (inp.streams.subtitles) — the container-wide stream index made
+            # it extract a different (or the first) track.
+            stream_pos = sub_sel if sub_sel < len(sub_streams) else 0
             ext = "vtt" if sub_fmt == "webvtt" else sub_fmt
             out_name = f"{stem}.{ext}"
             out_path = str(get_temp_dir() / out_name)
@@ -76,11 +79,11 @@ def ExtractScreen() -> ft.Control:
                 input_path=media_path,
                 output_path=out_path,
                 params={
-                    "stream_index": chosen.index,
+                    "stream_index": stream_pos,
                     "format_name": sub_fmt,
                 },
                 original_size_bytes=Path(media_path).stat().st_size
-                if os.path.exists(media_path)
+                if Path(media_path).exists()
                 else 0,
             )
         elif mode == "frames":
@@ -91,7 +94,7 @@ def ExtractScreen() -> ft.Control:
                 output_path=out_dir,
                 params={"count": int(frame_count), "format_name": "jpg"},
                 original_size_bytes=Path(media_path).stat().st_size
-                if os.path.exists(media_path)
+                if Path(media_path).exists()
                 else 0,
             )
         else:  # gif
@@ -108,7 +111,7 @@ def ExtractScreen() -> ft.Control:
                     "duration_s": float(gif_duration),
                 },
                 original_size_bytes=Path(media_path).stat().st_size
-                if os.path.exists(media_path)
+                if Path(media_path).exists()
                 else 0,
             )
 

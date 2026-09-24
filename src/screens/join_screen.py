@@ -1,4 +1,5 @@
-"""Joiner screen — merge clips end-to-end (instant lossless or uniform re-encode).
+"""Joiner screen — merge clips end-to-end: instant lossless, uniform re-encode,
+or crossfade transitions (runtime-gated on the engine's blend window).
 
 Owns its OWN local file list so the app-wide single-file `current_media`
 assumption is untouched; multi-pick appends here only. Reordering is explicit
@@ -15,18 +16,19 @@ from pathlib import Path
 import flet as ft
 
 from core.notify import ERROR, show_snack
-from core.state import Job
+from core.state import Job, use_app_state
 from core.storage_paths import format_bytes, get_temp_dir
 from core.styles import card_container, section_header
 from core.theme import TEXT_MUTED_DARK, TEXT_MUTED_LIGHT, is_dark_mode
 from core.tokens import FONT_LG, FONT_SM, FONT_XS, RADIUS_LG, SPACE_MD, SPACE_SM
-from services.engine_service import EngineService
+from services.engine_service import EngineService, available_filters
 from state.controller_ctx import use_controller
 from state.service_ctx import use_services
 
 logger = logging.getLogger(__name__)
 
 _CONTAINERS = ("mp4", "mkv")
+_FADES = (("Crossfade 0.5s", 0.5), ("Crossfade 1.0s", 1.0))
 
 
 @ft.component
@@ -35,12 +37,57 @@ def JoinScreen() -> ft.Control:
     page = ft.context.page
     ctrl = use_controller()
     services = use_services()
-    is_dark = is_dark_mode(page)
+    app_state = use_app_state()
+    is_dark = is_dark_mode(page, app_state)
     muted = TEXT_MUTED_DARK if is_dark else TEXT_MUTED_LIGHT
 
-    entries, set_entries = ft.use_state([])  # [{path,name,size_s,dur_s}]
+    entries, set_entries = ft.use_state([])  # [{path,name,size_s,dur_s,fps,w,h,...}]
     container_fmt, set_container_fmt = ft.use_state("mp4")
+    transition, set_transition = ft.use_state("cut")  # cut | crossfade
+    fade_s, set_fade_s = ft.use_state(0.5)
+    avail, set_avail = ft.use_state(frozenset())
     busy, set_busy = ft.use_state(False)
+
+    async def _load_avail() -> None:
+        try:
+            set_avail(frozenset(await asyncio.to_thread(available_filters)))
+        except Exception as exc:
+            logger.warning("Filter availability load failed: %s", exc)
+
+    ft.use_effect(lambda: page.run_task(_load_avail), [])
+
+    def _crossfade_reason() -> str | None:
+        """None when crossfade can run for the current list; else why not."""
+        if not entries:
+            return "add at least two clips first"
+        needed = {"alphamerge", "overlay"}
+        if any(e.get("has_audio") for e in entries):
+            needed.add("acrossfade")
+        if avail:
+            missing = needed - avail
+            if missing:
+                return f"not in this build: {', '.join(sorted(missing))}"
+        first_fps = entries[0].get("fps") or 30.0
+        for e in entries:
+            fps = e.get("fps") or 0.0
+            if not fps:
+                return f"{e['name']} has no video"
+            if abs(fps - first_fps) > 0.05:
+                return "frame rates differ"
+            if (e.get("w") or 0) > 1920 or (e.get("h") or 0) > 1080:
+                return "sources above 1080p"
+            if e["dur_s"] <= fade_s * 2 + 0.2:
+                return f"{e['name']} is too short for a {fade_s:g}s fade"
+            if bool(e.get("has_audio")) != bool(entries[0].get("has_audio")):
+                return "some clips have audio, others don't"
+            if e.get("has_audio") and (
+                e.get("sample_rate") != entries[0].get("sample_rate")
+                or e.get("channels") != entries[0].get("channels")
+            ):
+                return "audio layouts differ"
+        if abs(round(fade_s * first_fps) - fade_s * first_fps) > 1e-6:
+            return f"{fade_s:g}s doesn't snap to {first_fps:g} fps frames"
+        return None
 
     async def _add_files(_=None) -> None:
         set_busy(True)
@@ -56,11 +103,19 @@ def JoinScreen() -> ft.Control:
 
             def _probe_sync(p: str) -> dict:
                 info = EngineService.probe(p)
+                v = info.video_stream
+                a = info.audio_stream
                 return {
                     "path": p,
                     "name": Path(p).name,
                     "size_s": info.file_size_bytes,
                     "dur_s": info.duration_s,
+                    "fps": v.fps if v else None,
+                    "w": v.width if v else None,
+                    "h": v.height if v else None,
+                    "has_audio": a is not None,
+                    "sample_rate": a.sample_rate if a else None,
+                    "channels": a.channels if a else None,
                 }
 
             new_entries = list(entries)
@@ -68,7 +123,7 @@ def JoinScreen() -> ft.Control:
                 try:
                     e = await asyncio.to_thread(_probe_sync, p)
                     new_entries.append(e)
-                except Exception as exc:  # noqa: BLE001 — skip unreadable files
+                except Exception as exc:
                     logger.warning("Skipping %s: %s", p, exc)
             set_entries(new_entries)
             if added and len(new_entries) < 2:
@@ -91,6 +146,11 @@ def JoinScreen() -> ft.Control:
         if len(entries) < 2:
             show_snack(page, "Pick at least two files to join", bgcolor=ERROR)
             return
+        if transition == "crossfade":
+            reason = _crossfade_reason()
+            if reason is not None:
+                show_snack(page, f"Crossfade unavailable: {reason}", bgcolor=ERROR)
+                return
         ext = container_fmt
         out_path = str(get_temp_dir() / f"joined_{int(time.time())}.{ext}")
         job = Job(
@@ -100,7 +160,8 @@ def JoinScreen() -> ft.Control:
             params={
                 "paths": [e["path"] for e in entries],
                 "container": ("matroska" if ext == "mkv" else "mp4"),
-                "transition": "cut",
+                "transition": transition,
+                "fade_s": fade_s,
             },
             original_size_bytes=sum(e["size_s"] for e in entries),
         )
@@ -108,6 +169,12 @@ def JoinScreen() -> ft.Control:
 
     total_dur = sum(e["dur_s"] for e in entries)
     total_size = sum(e["size_s"] for e in entries)
+    gate_reason = _crossfade_reason()
+    expected_dur = (
+        total_dur - fade_s * (len(entries) - 1)
+        if transition == "crossfade" and len(entries) >= 2
+        else total_dur
+    )
 
     entry_rows: list[ft.Control] = []
     for i, e in enumerate(entries):
@@ -117,9 +184,7 @@ def JoinScreen() -> ft.Control:
                     controls=[
                         ft.Container(
                             width=24,
-                            content=ft.Text(
-                                f"{i + 1}.", size=FONT_SM, weight=ft.FontWeight.W_600
-                            ),
+                            content=ft.Text(f"{i + 1}.", size=FONT_SM, weight=ft.FontWeight.W_600),
                         ),
                         ft.Column(
                             controls=[
@@ -231,15 +296,35 @@ def JoinScreen() -> ft.Control:
                             controls=[
                                 ft.Chip(
                                     label=ft.Text("Instant (hard cut)"),
-                                    selected=True,
-                                    on_select=lambda _: None,
+                                    selected=transition == "cut",
+                                    on_select=lambda _: set_transition("cut"),
                                 ),
+                                *[
+                                    ft.Chip(
+                                        label=ft.Text(label),
+                                        disabled=gate_reason is not None,
+                                        selected=transition == "crossfade" and fade_s == value,
+                                        on_select=lambda _, v=value: (
+                                            set_transition("crossfade"),
+                                            set_fade_s(v),
+                                        ),
+                                    )
+                                    for label, value in _FADES
+                                ],
                             ],
+                            wrap=True,
                             spacing=SPACE_SM,
                         ),
                         ft.Text(
-                            "Crossfade lands in the next pass — instant join is "
-                            "the M2 baseline.",
+                            f"Crossfade unavailable: {gate_reason}"
+                            if gate_reason is not None and entries
+                            else (
+                                f"Output ≈ {expected_dur:.1f}s — "
+                                f"{len(entries) - 1} fade(s) of {fade_s:g}s overlap."
+                                if transition == "crossfade" and len(entries) >= 2
+                                else "Fade transitions blend each clip's end into "
+                                "the next clip's start."
+                            ),
                             size=FONT_XS,
                             color=muted,
                         ),

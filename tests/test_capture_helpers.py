@@ -10,6 +10,7 @@ from screens.capture_screen import _can_capture, _pcm_rms, _write_wav, next_perm
 
 # ── Permission status → action mapping ───────────────────────────────────
 
+
 def test_granted_statuses_are_ok():
     for status in ("granted", "limited", "provisional", "GRANTED", "Granted"):
         assert next_permission_action(status) == "ok"
@@ -38,6 +39,7 @@ def test_permanently_denied_and_restricted_go_to_settings():
 
 
 # ── WAV wrapper ──────────────────────────────────────────────────────────
+
 
 def test_write_wav_header(tmp_path: Path):
     data = struct.pack("<4h", 0, 1000, -1000, 0)
@@ -68,6 +70,7 @@ def test_write_wav_mono_voice_preset(tmp_path: Path):
 
 # ── PCM RMS meter ────────────────────────────────────────────────────────
 
+
 def test_rms_of_silence_is_zero():
     assert _pcm_rms(b"\x00\x00" * 512) == 0.0
 
@@ -83,6 +86,7 @@ def test_rms_of_empty_or_odd_chunk():
 
 
 # ── Platform gate ────────────────────────────────────────────────────────
+
 
 def test_can_capture_web_and_mobile():
     assert _can_capture(SimpleNamespace(web=True, platform=None))

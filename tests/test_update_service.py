@@ -25,6 +25,9 @@ def patch_client(monkeypatch):
                 super().__init__(**kwargs)
 
         monkeypatch.setattr("services.update_service.httpx.AsyncClient", _Mocked)
+        # The service pools ONE client per process — drop the cached one so
+        # each test (and each event loop) gets its own mock transport.
+        monkeypatch.setattr("services.update_service._CLIENT", None)
 
     return _install
 
@@ -75,3 +78,38 @@ def test_manifest_shape_when_present(patch_client):
     patch_client(lambda req: httpx.Response(200, json=payload))
     data = _check()
     assert data is not None and data["build_number"] > BUILD_NUMBER
+
+
+# ── version gate (build-only comparison missed version-only releases) ──────
+
+
+def test_version_only_bump_offers_update(patch_client):
+    payload = {"build_number": BUILD_NUMBER, "version": "9.0.0"}
+    patch_client(lambda req: httpx.Response(200, json=payload))
+    assert _check() == payload
+
+
+def test_lexicographic_trap_is_not_hit(patch_client):
+    # "1.10.0" > "1.9.0" numerically; any string compare gets this backwards.
+    payload = {"build_number": BUILD_NUMBER, "version": "1.10.0"}
+    patch_client(lambda req: httpx.Response(200, json=payload))
+    assert _check() == payload
+
+
+def test_older_version_same_build_is_silent(patch_client):
+    patch_client(
+        lambda req: httpx.Response(200, json={"build_number": BUILD_NUMBER, "version": "0.0.1"})
+    )
+    assert _check() is None
+
+
+def test_garbage_version_does_not_crash(patch_client):
+    patch_client(
+        lambda req: httpx.Response(200, json={"build_number": BUILD_NUMBER, "version": "nightly"})
+    )
+    assert _check() is None
+
+
+def test_non_dict_manifest_is_silent(patch_client):
+    patch_client(lambda req: httpx.Response(200, json=[1, 2, 3]))
+    assert _check() is None

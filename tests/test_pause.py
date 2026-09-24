@@ -17,6 +17,7 @@ def _job() -> Job:
 
 # ── Queue-level gate ─────────────────────────────────────────────────────
 
+
 def test_paused_queue_holds_pending_jobs():
     ran: list[str] = []
 
@@ -54,6 +55,7 @@ def test_toggle_pause_flips_state():
 
 
 # ── Engine hook ──────────────────────────────────────────────────────────
+
 
 def test_engine_pause_hook_blocks_until_cleared():
     evt = threading.Event()
@@ -107,7 +109,7 @@ def test_engine_op_respects_pause_e2e(synthetic_media):
             EngineService.extract_audio(
                 synthetic_media.path, out, format_name="wav", on_progress=lambda p, m: None
             )
-        except BaseException as exc:  # noqa: BLE001 — surfaced via assertion below
+        except BaseException as exc:
             errors.append(exc)
 
     try:
