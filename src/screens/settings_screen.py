@@ -396,7 +396,7 @@ def SettingsScreen() -> ft.Control:
                 border_radius=RADIUS_MD,
                 is_dark=is_dark,
             ),
-            BannerAdView(),
+            BannerAdView(slot="settings-storage"),
             # About & Updates
             section_header("About", "Application release details", is_dark=is_dark),
             about_card,

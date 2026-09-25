@@ -10,6 +10,7 @@ import hashlib
 import logging
 import os
 import shutil
+import time
 from pathlib import Path
 
 from core.constants import STORAGE_CACHE_ENV, STORAGE_DATA_ENV, STORAGE_TEMP_ENV
@@ -83,6 +84,83 @@ def clear_cache() -> int:
                         "Failed to clear cache item %s: %s", item, e
                     )
     return freed
+
+
+def prune_temp_outputs(max_age_hours: float = 24.0) -> int:
+    """Remove TEMP files older than ``max_age_hours``; return bytes freed.
+
+    Every tool writes its output to the TEMP tier and nothing deleted them, so
+    a single test session accumulated 2.2 GB on the phone. TEMP is documented
+    as throwaway, so age-based pruning is safe — but the caller keeps control
+    over which files to protect (see ``prune_temp_outputs_keep``).
+    """
+    cutoff = time.time() - max_age_hours * 3600.0
+    freed = 0
+    temp = get_temp_dir()
+    if not temp.exists():
+        return 0
+    for item in temp.iterdir():
+        try:
+            mtime = item.stat().st_mtime
+        except OSError:
+            continue
+        if mtime >= cutoff:
+            continue
+        try:
+            size = item.stat().st_size if item.is_file() else _tree_size(item)
+            if item.is_dir():
+                shutil.rmtree(item)
+            else:
+                item.unlink()
+            freed += size
+        except OSError as e:
+            logging.getLogger(__name__).warning("Failed to prune temp item %s: %s", item, e)
+    return freed
+
+
+def prune_temp_outputs_keep(keep: set[str], max_age_hours: float = 24.0) -> int:
+    """Same as :func:`prune_temp_outputs`, but never removes ``keep`` paths.
+
+    ``keep`` holds absolute path strings for the active job's output and the
+    result screen's current file, so a background prune can never delete a
+    recording the user has not saved yet.
+    """
+    keep_abs = {str(Path(k).resolve()) for k in keep if k}
+    cutoff = time.time() - max_age_hours * 3600.0
+    freed = 0
+    temp = get_temp_dir()
+    if not temp.exists():
+        return 0
+    for item in temp.iterdir():
+        try:
+            if str(item.resolve()) in keep_abs:
+                continue
+            mtime = item.stat().st_mtime
+        except OSError:
+            continue
+        if mtime >= cutoff:
+            continue
+        try:
+            size = item.stat().st_size if item.is_file() else _tree_size(item)
+            if item.is_dir():
+                shutil.rmtree(item)
+            else:
+                item.unlink()
+            freed += size
+        except OSError as e:
+            logging.getLogger(__name__).warning("Failed to prune temp item %s: %s", item, e)
+    return freed
+
+
+def _tree_size(path: Path) -> int:
+    total = 0
+    for root, _, files in os.walk(path):
+        for f in files:
+            try:
+                total += (Path(root) / f).stat().st_size
+            except OSError:
+                continue
+    return total
 
 
 def format_bytes(size: int | float) -> str:

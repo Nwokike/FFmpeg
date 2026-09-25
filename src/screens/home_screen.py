@@ -174,12 +174,46 @@ def HomeScreen() -> ft.Control:
         ]
     )
 
+    # Tool grid: chunks of three with a banner between them. The user asked
+    # for 3-4 banner slots on Home — after every three tools and one next to
+    # Recent Jobs — instead of one buried at the very bottom of the scroll.
+    grid_rows: list[ft.Control] = []
+    for chunk_idx in range(0, len(tool_controls), 3):
+        grid_rows.append(
+            ft.ResponsiveRow(
+                controls=tool_controls[chunk_idx : chunk_idx + 3],
+                spacing=SPACE_MD,
+                run_spacing=SPACE_MD,
+            )
+        )
+        # Skip the trailing grid banner: the Recent Jobs slot sits directly
+        # below it, so two banners back-to-back would look stacked.
+        if chunk_idx + 3 < len(tool_controls):
+            grid_rows.append(BannerAdView(slot=f"home-grid-{chunk_idx // 3}"))
+
+    # Recent items list
+    recent_items = app_state.history[:3] if app_state.history else []
+    recent_controls = (
+        [job_card_view(j, is_dark=is_dark) for j in recent_items]
+        if recent_items
+        else [
+            empty_state_view(
+                icon=ft.Icons.AUTO_AWESOME_MOTION_OUTLINED,
+                title="No Recent Conversions",
+                subtitle="Select any tool above to process your first media file.",
+                is_dark=is_dark,
+            )
+        ]
+    )
+
     return ft.Column(
         scroll=ft.ScrollMode.AUTO,
         controls=[
             # Tools Section
             section_header("Studio Tools", "Select an operation to pick a file", is_dark=is_dark),
-            ft.ResponsiveRow(controls=tool_controls, spacing=SPACE_MD, run_spacing=SPACE_MD),
+            *grid_rows,
+            # Banner Ad Slot immediately above Recent Jobs (house placement).
+            BannerAdView(slot="home-recent"),
             # Recent Activity
             section_header(
                 "Recent Jobs",
@@ -190,8 +224,6 @@ def HomeScreen() -> ft.Control:
                 is_dark=is_dark,
             ),
             ft.Column(controls=recent_controls, spacing=SPACE_MD),
-            # Banner Ad Slot
-            BannerAdView(),
             # Nav-bar clearance INSIDE the scroll (sibling pattern): the old
             # fixed outer inset fought the scroll view's constraints and still
             # fell short on gesture-nav phones — the last item stayed buried.

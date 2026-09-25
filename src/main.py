@@ -21,6 +21,7 @@ from core.engine_probe import probe as engine_probe
 from core.logger_handler import MemoryLogHandler
 from core.notify import ERROR, SUCCESS, show_snack
 from core.state import AppStateCtx, Job, state
+from core.storage_paths import format_bytes, prune_temp_outputs_keep
 from core.theme import AppTheme
 from services.ad_service import AdService
 from services.engine_service import (
@@ -690,7 +691,29 @@ async def main(page: ft.Page) -> None:
             current.status_message = "Paused" if paused else "Processing…"
         page.update()
 
+    # Jobs whose submission is the monetizable "big action" (matches the
+    # Sherlock/DDGS pattern of an interstitial at a heavy search/content
+    # boundary rather than on every button). A failed/no-ad call falls straight
+    # through to enqueueing, so ads never gate a job behind a cooldown.
+    HIGH_VALUE_JOB_OPS = frozenset({"join", "convert", "compress", "cut", "record"})
+
     def start_job(job: Job) -> None:
+        if job.op in HIGH_VALUE_JOB_OPS:
+
+            def _enqueue() -> None:
+                state.jobs.insert(0, job)
+                queue.enqueue(job)
+                navigate("dashboard")
+
+            async def _action_ad() -> None:
+                try:
+                    await ads.show_interstitial(on_close=_enqueue)
+                except Exception:
+                    logger.exception("Interstitial on %s submit failed", job.op)
+                    _enqueue()
+
+            page.run_task(_action_ad)
+            return
         state.jobs.insert(0, job)
         queue.enqueue(job)
         navigate("dashboard")
@@ -906,6 +929,29 @@ async def main(page: ft.Page) -> None:
             logger.warning("Engine capability probe failed: %s", exc)
 
     page.run_task(_load_engine_capabilities)
+
+    async def _startup_prune():
+        """Reclaim the TEMP tier on boot without deleting work the app still needs.
+
+        Every tool writes its output to TEMP and nothing deleted it — a single
+        test session reached 2.2 GB. TEMP is documented as throwaway, so files
+        older than 24h are removed; the active job's output and the result
+        screen's current file are protected so an in-flight or unsaved take
+        survives the prune.
+        """
+        try:
+            keep: set[str] = set()
+            if state.active_job and state.active_job.output_path:
+                keep.add(state.active_job.output_path)
+            if state.last_completed_job and state.last_completed_job.output_path:
+                keep.add(state.last_completed_job.output_path)
+            freed = await asyncio.to_thread(prune_temp_outputs_keep, keep, 24.0)
+            if freed:
+                logger.info("Startup prune reclaimed %s of stale temp media", format_bytes(freed))
+        except Exception as exc:
+            logger.warning("Startup temp prune failed: %s", exc)
+
+    page.run_task(_startup_prune)
 
     # System back MUST be captured before the Router mounts so the Router's
     # own pop handler delegates to it (flat routes otherwise close the app).

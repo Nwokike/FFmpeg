@@ -134,6 +134,10 @@ class AppState:
 
         # System & network
         self.is_online: bool = True
+        # Ad consent settled (and banner slots may render). AdService state is
+        # invisible to Flet's reactivity, so without this observable banners
+        # stayed collapsed until an unrelated page update.
+        self.ads_ready: bool = False
         self.update_available: bool = False
         self.update_data: dict[str, Any] | None = None
         self.probe_info: EngineProbe | None = None

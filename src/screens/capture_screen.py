@@ -352,9 +352,29 @@ def CaptureScreen() -> ft.Control:
             logger.exception("Camera creation failed")
             show_snack(page, f"Camera unavailable: {exc}", bgcolor=ERROR)
 
+    async def _wait_for_mount(cam, timeout_s: float = 6.0) -> bool:
+        """Wait until a freshly created Camera control is attached to the page.
+
+        ``ftc.Camera`` raises ``Control must be added to the page first`` for
+        every native call until Flet has mounted it. Creating the control in
+        ``_prepare_camera`` and immediately calling ``get_available_cameras()``
+        raced the next render, so the phone log showed the error on the first
+        open even though the preview would have worked a frame later.
+        """
+        deadline = time.monotonic() + timeout_s
+        while getattr(cam, "page", None) is None:
+            if time.monotonic() >= deadline:
+                return False
+            await asyncio.sleep(0.05)
+        return True
+
     async def _init_camera() -> None:
         cam = camera_ref.current
         if cam is None or camera_inited_ref.current:
+            return
+        if not await _wait_for_mount(cam):
+            logger.error("Camera control never mounted — init aborted")
+            show_snack(page, "Camera failed to start: control was not mounted", bgcolor=ERROR)
             return
         try:
             cameras = await cam.get_available_cameras()
@@ -405,7 +425,14 @@ def CaptureScreen() -> ft.Control:
 
     def _effect_prepare():
         desired_audio = mode == "video"
-        if mode in ("photo", "video") and not recording:
+        if mode == "mic":
+            # Leaving camera modes releases the native controller — reusing the
+            # stale ref after the Camera control left the tree produced the
+            # "Control must be added to the page first" error on return.
+            if camera_ref.current is not None:
+                page.run_task(_cleanup)
+            return None
+        if not recording:
             if (
                 camera_ref.current is not None
                 and camera_inited_ref.current
@@ -679,10 +706,16 @@ def CaptureScreen() -> ft.Control:
         cfg = AudioRecorderConfiguration(
             encoder=enc, channels=ch, sample_rate=rate, bit_rate=bit_rate
         )
-        out_path = str(get_temp_dir() / f"rec_{int(time.time())}.{ext}")
+        # The recorder's Dart side resolves output_path against its own app-local
+        # recordings directory. Feeding it our absolute sandbox path produced
+        # `<assets>/data/user/0/.../cache/rec_….wav` and an ENOENT crash. Give it
+        # a bare filename and use whatever path it returns in _finish_mic; our
+        # own WAV chunk writer keeps writing to the absolute temp path.
+        recording_name = f"rec_{int(time.time())}.{ext}"
+        out_path = str(get_temp_dir() / recording_name)
         mic_out_ref.current = out_path
         try:
-            started = await rec.start_recording(output_path=out_path, configuration=cfg)
+            started = await rec.start_recording(output_path=recording_name, configuration=cfg)
         except Exception as exc:
             logger.exception("Mic start failed")
             rec.on_stream = None  # don't stream into chunks nobody will write

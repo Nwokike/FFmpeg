@@ -15,6 +15,7 @@ from pathlib import Path
 
 import flet as ft
 
+from components.banner_ad import BannerAdView
 from core.notify import ERROR, show_snack
 from core.state import Job, use_app_state
 from core.storage_paths import format_bytes, get_temp_dir
@@ -347,6 +348,9 @@ def JoinScreen() -> ft.Control:
                 ],
                 spacing=SPACE_SM,
             ),
+            # Banner slot directly above the primary action — the natural
+            # pause between reviewing the clip list and starting the join.
+            BannerAdView(slot="join-action"),
             ft.FilledButton(
                 f"Join {len(entries) or ''} Clips".replace("  ", " "),
                 icon=ft.Icons.MERGE_TYPE_ROUNDED,

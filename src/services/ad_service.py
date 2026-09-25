@@ -46,7 +46,8 @@ class AdService:
         # Fail closed: no ad request may go out before UMP has answered.
         self._can_request_ads: bool = False
         self._interstitial_ready: bool = False
-        self._banner: ft.Control | None = None
+        self._banners: dict[str, ft.Control] = {}
+        self._failed_banner_slots: set[str] = set()
         self._last_interstitial_time: float = 0.0
 
     @property
@@ -100,6 +101,11 @@ class AdService:
             # (UMP/Play policy) — a failed check cannot grant permission.
             logger.warning("UMP consent check failed (fail closed, no ads): %s", exc)
             self._can_request_ads = False
+        finally:
+            # Publish through the observable so every mounted banner slot
+            # re-renders immediately; AdService state alone is invisible to
+            # Flet's change detection.
+            state.ads_ready = self._can_request_ads
 
     async def show_privacy_options(self) -> None:
         """Show privacy settings form if required by EU/UK regulation."""
@@ -113,17 +119,22 @@ class AdService:
         except Exception as exc:
             logger.warning("Privacy options display error: %s", exc)
 
-    def get_banner_control(self) -> ft.Control:
-        """Return the cached BannerAd widget or a transparent placeholder.
+    def get_banner_control(self, slot: str = "default") -> ft.Control:
+        """Return a cached BannerAd for ``slot`` or a transparent placeholder.
 
-        Built once per service — constructing a new BannerAd on every render
-        spams ad requests and flickers. Only the real banner is cached: the
-        placeholder must be rebuilt once consent flips the gate open.
+        Each placement needs its own control — a single Flet control cannot be
+        mounted in two parents at once, so reusing one instance across Home's
+        grid rows either stole the banner from its first parent or never
+        rendered. Slots are cached so repeated renders do not spam ad requests.
         """
         if not _HAS_ADS or not self._is_mobile() or not self._can_request_ads:
             return ft.Container(height=0, width=0)
-        if self._banner is not None:
-            return self._banner
+
+        cached = self._banners.get(slot)
+        if cached is not None:
+            return cached
+        if slot in self._failed_banner_slots:
+            return ft.Container(height=0, width=0)
 
         try:
             banner = fta.BannerAd(
@@ -131,14 +142,16 @@ class AdService:
                 width=320,
                 height=50,
             )
-            self._banner = ft.Container(
+            wrapper = ft.Container(
                 content=banner,
                 alignment=ft.Alignment.CENTER,
                 height=50,
             )
-            return self._banner
+            self._banners[slot] = wrapper
+            return wrapper
         except Exception as exc:
-            logger.warning("Failed creating banner ad: %s", exc)
+            logger.warning("Failed creating banner ad for %r: %s", slot, exc)
+            self._failed_banner_slots.add(slot)
             return ft.Container(height=0, width=0)
 
     async def preload_interstitial(self) -> None:
