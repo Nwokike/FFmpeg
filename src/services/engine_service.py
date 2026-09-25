@@ -13,6 +13,7 @@ Provides robust, thread-isolated implementations for:
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import logging
@@ -24,19 +25,21 @@ from errno import EAGAIN
 from fractions import Fraction
 from pathlib import Path
 from threading import Event
+from urllib.parse import urljoin
 
 import av
 import av.codec
 import av.codec.hwaccel
 import av.filter
 import av.stream
+import httpx
 from av.error import FFmpegError
 from av.filter.loudnorm import stats as loudnorm_stats
 from av.video.reformatter import VideoReformatter
 
 from core.engine_probe import probe
 from core.state import ChapterInfo, MediaInfo, MediaStreamInfo
-from core.storage_paths import get_cache_dir
+from core.storage_paths import get_cache_dir, get_temp_dir
 
 logger = logging.getLogger("EngineService")
 
@@ -3083,6 +3086,103 @@ class EngineService:
             inp_b.close()
 
     @staticmethod
+    def _open_https_via_httpx(url: str, cancel_event: Event | None = None):
+        """Download an HTTPS (optionally HLS) stream into a local temp file.
+
+        The Android FFmpeg build has no TLS handler, so ``av.open`` cannot open
+        HTTPS directly. Fetch the bytes with ``httpx`` instead, using the app's
+        own network stack. HLS playlists are expanded segment-by-segment so the
+        resulting file is a plain container PyAV can demux.
+
+        Returns ``(container, cleanup_path)`` — PyAV containers are Cython
+        objects without a ``__dict__``, so the caller cannot be handed the
+        backing path as an attribute.
+        """
+        from uuid import uuid4
+
+        temp_path = get_temp_dir() / f"https_dl_{uuid4().hex}.dat"
+        temp_path.parent.mkdir(parents=True, exist_ok=True)
+        total_written = 0
+        chunk_size = 256 * 1024
+
+        def _raise_if_cancelled() -> None:
+            if cancel_event and cancel_event.is_set():
+                raise InterruptedError("Stream download cancelled")
+
+        try:
+            with httpx.Client(follow_redirects=True) as client:
+                with client.stream("GET", url, timeout=(10.0, 30.0)) as first:
+                    first.raise_for_status()
+                    head = next(first.iter_bytes(chunk_size=512), b"")
+                    is_hls = ".m3u8" in url.lower() or head.lstrip().startswith(b"#EXTM3U")
+
+                with temp_path.open("wb") as fh:
+                    if is_hls:
+                        resp = client.get(url, timeout=(10.0, 30.0))
+                        resp.raise_for_status()
+                        playlist = resp.text
+                        base = urljoin(url, ".")
+                        segments = [
+                            urljoin(base, line.strip())
+                            for line in playlist.splitlines()
+                            if line.strip() and not line.strip().startswith("#")
+                        ]
+                        if not segments:
+                            # Raising inside the try is what triggers the
+                            # partial-file unlink in the except handler.
+                            raise ValueError(  # noqa: TRY301
+                                "HLS playlist contained no media segments"
+                            )
+                        logger.info("HLS playlist: %d segment(s) to download", len(segments))
+                        for seg in segments:
+                            _raise_if_cancelled()
+                            with client.stream("GET", seg, timeout=(10.0, 30.0)) as resp:
+                                resp.raise_for_status()
+                                for chunk in resp.iter_bytes(chunk_size=chunk_size):
+                                    _raise_if_cancelled()
+                                    if chunk:
+                                        fh.write(chunk)
+                                        total_written += len(chunk)
+                    else:
+                        with client.stream("GET", url, timeout=(10.0, 30.0)) as resp:
+                            resp.raise_for_status()
+                            fh.write(head)
+                            total_written += len(head)
+                            for chunk in resp.iter_bytes(chunk_size=chunk_size):
+                                _raise_if_cancelled()
+                                if chunk:
+                                    fh.write(chunk)
+                                    total_written += len(chunk)
+
+            if total_written == 0:
+                # Raising inside the try is what triggers the unlink below.
+                raise ValueError(  # noqa: TRY301
+                    "Stream produced no data — check the URL and your network"
+                )
+
+            container = av.open(str(temp_path), "r", timeout=_INPUT_TIMEOUT)
+            return container, str(temp_path)
+        except BaseException:
+            # Any failure (HTTP error, cancel, FFmpeg reject) must not leave a
+            # partial multi-GB download sitting in the temp tier.
+            with contextlib.suppress(OSError):
+                temp_path.unlink(missing_ok=True)
+            raise
+
+    @staticmethod
+    def _open_network_input(input_url: str, cancel_event: Event | None = None):
+        """Return ``(container, cleanup_path)`` for a URL.
+
+        HTTP and other protocols PyAV handles natively go straight to
+        ``av.open`` (no cleanup path). HTTPS goes through
+        :meth:`_open_https_via_httpx` because the Android FFmpeg build ships
+        without TLS, and its temp file must be removed after the mux closes.
+        """
+        if input_url.lower().startswith("https://"):
+            return EngineService._open_https_via_httpx(input_url, cancel_event)
+        return av.open(input_url, "r", timeout=(10.0, 30.0)), None
+
+    @staticmethod
     def record(
         input_url: str,
         output_path: str,
@@ -3097,17 +3197,33 @@ class EngineService:
         the recording (returns normally instead of raising InterruptedError) —
         a stopped stream is a successful partial capture. ``duration_s`` acts
         as an automatic clean stop.
+
+        Flet Mobile Forge's Android FFmpeg build has NO TLS protocol handler,
+        so ``av.open('https://…')`` raises ProtocolNotFoundError on the phone
+        even though the same call works on desktop. HTTPS is therefore fetched
+        through ``httpx`` (which uses the app's own network stack) and handed
+        to PyAV as a local file — the exact approach the Mobile Forge recipe
+        documentation recommends.
         """
         if not input_url or "://" not in input_url:
             raise ValueError("That doesn't look like a stream URL (need scheme://…)")
+        cleanup_path: str | None = None
         try:
-            inp = av.open(input_url, "r", timeout=(10.0, 30.0))
+            inp, cleanup_path = EngineService._open_network_input(input_url, cancel_event)
         except av.error.ProtocolNotFoundError as exc:
             raise ValueError(f"This build can't open that protocol: {exc}") from exc
         except av.error.TimeoutError as exc:
             raise ValueError("Connection timed out — check the URL and your network.") from exc
         except av.error.HTTPError as exc:
             raise ValueError(f"The server refused the stream: {exc}") from exc
+        except httpx.TimeoutException as exc:
+            raise ValueError("Connection timed out — check the URL and your network.") from exc
+        except httpx.HTTPStatusError as exc:
+            raise ValueError(
+                f"The server refused the stream: HTTP {exc.response.status_code}"
+            ) from exc
+        except httpx.HTTPError as exc:
+            raise ValueError(f"Couldn't download that stream: {exc}") from exc
         except av.error.FFmpegError as exc:
             raise ValueError(f"Couldn't read that stream: {exc}") from exc
         except (OSError, ValueError) as exc:
@@ -3119,6 +3235,11 @@ class EngineService:
             )
         finally:
             inp.close()
+            # https inputs are backed by a temp file this method created; the
+            # output may be large, so release it as soon as the muxer closes.
+            if cleanup_path:
+                with contextlib.suppress(OSError):
+                    Path(cleanup_path).unlink(missing_ok=True)
 
     @staticmethod
     def _record_from(

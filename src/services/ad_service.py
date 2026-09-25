@@ -5,7 +5,7 @@ Follows the canonical voicelm pattern adapted for Flet 1.0.
 
 from __future__ import annotations
 
-import asyncio
+import inspect
 import logging
 import time
 from collections.abc import Callable
@@ -193,30 +193,32 @@ class AdService:
 
     async def show_interstitial(self, on_close: Callable | None = None) -> bool:
         """Display preloaded interstitial if cooldown has elapsed. Returns True if shown."""
+
+        async def _notify() -> None:
+            """Run the optional close callback whether it is sync or async.
+
+            asyncio.iscoroutinefunction is deprecated as of Python 3.14, so
+            inspect.iscoroutinefunction is used instead (no warning in logs).
+            """
+            if on_close is None:
+                return
+            if inspect.iscoroutinefunction(on_close):
+                await on_close()
+            else:
+                on_close()
+
         if not _HAS_ADS or not self._is_mobile() or not self._can_request_ads:
-            if on_close:
-                if asyncio.iscoroutinefunction(on_close):
-                    await on_close()
-                else:
-                    on_close()
+            await _notify()
             return False
         if not state.is_online:
             logger.info("Interstitial skipped: offline")
-            if on_close:
-                if asyncio.iscoroutinefunction(on_close):
-                    await on_close()
-                else:
-                    on_close()
+            await _notify()
             return False
 
         now = time.time()
         if now - self._last_interstitial_time < self.INTERSTITIAL_COOLDOWN_SEC:
             logger.info("Interstitial skipped: cooldown active")
-            if on_close:
-                if asyncio.iscoroutinefunction(on_close):
-                    await on_close()
-                else:
-                    on_close()
+            await _notify()
             return False
 
         ad = self.interstitial
@@ -224,11 +226,7 @@ class AdService:
             # Still loading: show() would throw or silently no-op. Keep the
             # ad (it may finish) and retry on the next natural break.
             logger.info("Interstitial skipped: still loading")
-            if on_close:
-                if asyncio.iscoroutinefunction(on_close):
-                    await on_close()
-                else:
-                    on_close()
+            await _notify()
             return False
         self.interstitial = None
         self._interstitial_ready = False
@@ -238,11 +236,7 @@ class AdService:
 
             async def _handle_close(e):
                 self._remove_service(ad)
-                if on_close:
-                    if asyncio.iscoroutinefunction(on_close):
-                        await on_close()
-                    else:
-                        on_close()
+                await _notify()
                 await self.preload_interstitial()
 
             ad.on_close = _handle_close
@@ -256,10 +250,6 @@ class AdService:
                 logger.warning("Failed displaying interstitial: %s", exc)
                 self._remove_service(ad)
 
-        if on_close:
-            if asyncio.iscoroutinefunction(on_close):
-                await on_close()
-            else:
-                on_close()
+        await _notify()
         await self.preload_interstitial()
         return False

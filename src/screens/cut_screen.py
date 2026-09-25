@@ -66,11 +66,22 @@ def CutScreen() -> ft.Control:
 
     cut_duration = max(0.0, end_s - start_s)
 
+    def _is_mounted(ctrl) -> bool:
+        """True once Flet has attached the control to the page.
+
+        The scrub Video is created inside a ``use_effect`` and rendered on the
+        following pass, so seeking/pausing/stopping during that window raised
+        ``Control must be added to the page first`` on every interaction. The
+        gap is one frame, so the call is dropped rather than surfaced as an
+        error — the next interaction lands on a mounted control.
+        """
+        return ctrl is not None and getattr(ctrl, "page", None) is not None
+
     # ── Scrub preview: stable Video instance + throttled seeks ──────────────
 
     async def _seek_to(seconds: float) -> None:
         v = scrub_ref.current
-        if v is None:
+        if not _is_mounted(v):
             return
         try:
             await v.seek(ft.Duration(milliseconds=int(seconds * 1000)))
@@ -87,7 +98,7 @@ def CutScreen() -> ft.Control:
     def _stop_scrub() -> None:
         v = scrub_ref.current
         scrub_ref.current = None  # media_path change must rebuild the scrubber
-        if v is None:
+        if not _is_mounted(v):
             return
 
         async def _stop():
@@ -100,7 +111,7 @@ def CutScreen() -> ft.Control:
 
     def _pause_scrub() -> None:
         v = scrub_ref.current
-        if v is None:
+        if not _is_mounted(v):
             return
 
         async def _pause():

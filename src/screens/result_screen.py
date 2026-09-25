@@ -73,12 +73,21 @@ def ResultScreen() -> ft.Control:
     dragging_ref = ft.use_ref(False)  # slider drag in flight — ignore position events
     audio_state_ref = ft.use_ref(AudioState.STOPPED)
 
+    def _is_mounted(ctrl) -> bool:
+        """True once Flet attached the control to the page.
+
+        The preview Video is constructed during a render pass and attached on
+        the next one; calling stop/pause in that window raised
+        ``Control must be added to the page first`` in the log.
+        """
+        return ctrl is not None and getattr(ctrl, "page", None) is not None
+
     def _set_compare(target: str) -> None:
         if target == compare:
             return
         set_compare(target)
         v = video_ref.current
-        if v is None:
+        if not _is_mounted(v):
             return
         idx = 1 if target == "original" else 0
 
@@ -96,7 +105,7 @@ def ResultScreen() -> ft.Control:
         v = video_ref.current
         video_ref.current = None  # job change must rebuild — a stopped stale
         # player kept in the ref made the next job show the previous output
-        if v is None:
+        if not _is_mounted(v):
             return
 
         async def _stop():
