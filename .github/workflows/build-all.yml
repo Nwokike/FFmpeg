@@ -83,6 +83,7 @@ jobs:
             echo "TAG_NAME=build-${SHORT_SHA}" >> $GITHUB_OUTPUT
             echo "RELEASE_NAME=Automated Build (${SHORT_SHA})" >> $GITHUB_OUTPUT
             echo "IS_PRERELEASE=true" >> $GITHUB_OUTPUT
+          fi
       - name: Create GitHub Release Placeholder
         if: github.event_name != 'pull_request'
         uses: softprops/action-gh-release@v2
