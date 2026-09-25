@@ -34,6 +34,7 @@ from av.error import FFmpegError
 from av.filter.loudnorm import stats as loudnorm_stats
 from av.video.reformatter import VideoReformatter
 
+from core.engine_probe import probe
 from core.state import ChapterInfo, MediaInfo, MediaStreamInfo
 from core.storage_paths import get_cache_dir
 
@@ -108,6 +109,156 @@ def _codec_supports_mode(name: str, mode: str) -> bool:
         return False
 
 
+class EngineCapabilityError(ValueError):
+    """Requested operation is not supported by this device's FFmpeg build.
+
+    Subclasses ValueError so the existing job-error path (and every
+    ``pytest.raises(ValueError)`` contract) keeps working, while giving the UI
+    a message that names the missing capability instead of leaking
+    ``av.codec.UnknownCodecError: h264``.
+    """
+
+
+# FFmpeg exposes the same encoder under several names. Resolve the friendly
+# name a screen/job asks for onto whichever alias this build actually ships.
+_VIDEO_CODEC_ALIASES: dict[str, tuple[str, ...]] = {
+    "libx264": ("libx264", "h264"),
+    "h264": ("h264", "libx264"),
+    "libx265": ("libx265", "hevc", "x265"),
+    "hevc": ("hevc", "libx265", "x265"),
+    "x265": ("x265", "libx265", "hevc"),
+    "vp9": ("vp9", "libvpx-vp9", "libvpx"),
+    "libvpx-vp9": ("libvpx-vp9", "vp9", "libvpx"),
+    "mpeg4": ("mpeg4",),
+    "mjpeg": ("mjpeg",),
+}
+_AUDIO_CODEC_ALIASES: dict[str, tuple[str, ...]] = {
+    "aac": ("aac",),
+    "flac": ("flac",),
+    "opus": ("libopus", "opus"),
+    "libopus": ("libopus", "opus"),
+    "mp3": ("libmp3lame", "mp3"),
+    "libmp3lame": ("libmp3lame", "mp3"),
+    "wav": ("pcm_s16le",),
+    "pcm_s16le": ("pcm_s16le",),
+    "m4a": ("aac",),
+}
+_VIDEO_CODEC_LABELS = {
+    "libx264": "H.264",
+    "h264": "H.264",
+    "libx265": "HEVC",
+    "hevc": "HEVC",
+    "x265": "HEVC",
+    "vp9": "VP9",
+    "libvpx-vp9": "VP9",
+    "mpeg4": "MPEG-4",
+    "mjpeg": "MJPEG",
+}
+_AUDIO_CODEC_LABELS = {
+    "aac": "AAC",
+    "flac": "FLAC",
+    "opus": "Opus",
+    "libopus": "Opus",
+    "mp3": "MP3",
+    "libmp3lame": "MP3",
+    "wav": "WAV",
+    "pcm_s16le": "WAV",
+    "m4a": "AAC",
+}
+
+
+def _friendly_codec(requested: str, kind: str) -> str:
+    """Map a codec name onto a name users recognise ('libx264' → 'H.264')."""
+    labels = _VIDEO_CODEC_LABELS if kind == "video" else _AUDIO_CODEC_LABELS
+    return labels.get(requested) or requested
+
+
+def available_video_encoders() -> list[str]:
+    """Verified mode='w' video encoders this build ships, preference order."""
+    return list(probe().video_encoder_picks)
+
+
+def available_audio_encoders() -> list[str]:
+    """Verified mode='w' audio encoders this build ships, preference order."""
+    return list(probe().audio_encoder_picks)
+
+
+def _resolve_codec(
+    requested: str,
+    aliases: dict[str, tuple[str, ...]],
+    labels: dict[str, str],
+    kind: str,
+) -> str:
+    """Return a verified encoder name for ``requested`` or raise a clear error.
+
+    Constructing ``av.codec.Codec(name, mode='w')`` is the only honest check —
+    ``codecs_available`` also lists decoders, which is exactly how the Android
+    build reached ``add_stream('h264')`` and exploded with UnknownCodecError.
+    """
+    for candidate in aliases.get(requested, (requested,)):
+        if _codec_supports_mode(candidate, "w"):
+            if candidate != requested:
+                logger.info(
+                    "Resolved %s codec %r to available encoder %r",
+                    kind,
+                    requested,
+                    candidate,
+                )
+            return candidate
+
+    available = available_video_encoders() if kind == "video" else available_audio_encoders()
+    label = _friendly_codec(requested, kind)
+    if available:
+        options = ", ".join(available)
+        detail = f" This device can encode with: {options}."
+    else:
+        detail = f" This device's FFmpeg build ships no {kind} encoders at all."
+    raise EngineCapabilityError(
+        f"{label} encoding is not available in this device's FFmpeg build.{detail}"
+    )
+
+
+def _resolve_video_codec(requested: str) -> str:
+    return _resolve_codec(requested, _VIDEO_CODEC_ALIASES, _VIDEO_CODEC_LABELS, "video")
+
+
+def _resolve_audio_codec(requested: str) -> str:
+    return _resolve_codec(requested, _AUDIO_CODEC_ALIASES, _AUDIO_CODEC_LABELS, "audio")
+
+
+def friendly_job_error(exc: BaseException) -> str:
+    """Render a job exception as a message a person can act on.
+
+    PyAV's raw text (``av.codec.UnknownCodecError: h264``) is what the phone
+    showed before. Anything we cannot translate is returned unchanged so real
+    failures are never hidden behind a vague apology.
+    """
+    if isinstance(exc, EngineCapabilityError):
+        return str(exc)
+
+    # UnknownCodecError is a ValueError subclass, so catch it before the
+    # generic ValueError branch below would swallow it.
+    unknown_codec = getattr(av.codec, "UnknownCodecError", None)
+    if unknown_codec is not None and isinstance(exc, unknown_codec):
+        return (
+            "This device's FFmpeg build can't encode that format. "
+            "Open Engine Info to see what it supports."
+        )
+
+    protocol_errors = tuple(
+        error_type
+        for name in ("ProtocolNotFound", "ProtocolNotFoundError")
+        if isinstance(error_type := getattr(av.error, name, None), type)
+    )
+    if protocol_errors and isinstance(exc, protocol_errors):
+        return f"This device's FFmpeg build can't open that protocol: {exc}"
+
+    if isinstance(exc, OSError) and getattr(exc, "errno", None) in (28, 122):
+        return "Not enough storage space to finish this job. Free some space and retry."
+
+    return str(exc)
+
+
 def _hardware_decode(enabled: bool):
     """Return a safe PyAV hardware decoder, or None when unavailable."""
     if not enabled:
@@ -125,8 +276,12 @@ def _hardware_decode(enabled: bool):
 
 
 def _pick_video_encoder(preferred: str = "libx264", fallback: str = "h264") -> str:
-    """Return ``preferred`` if this build can encode with it, else ``fallback``."""
-    return preferred if _codec_supports_mode(preferred, "w") else fallback
+    """Return a verified encoder, or raise a clear capability error.
+
+    Both names are checked before returning; an unchecked fallback is what
+    produced ``UnknownCodecError: h264`` on the Android LGPL wheel.
+    """
+    return _resolve_video_codec(fallback if not _codec_supports_mode(preferred, "w") else preferred)
 
 
 def _supported_encoder_options(codec_name: str, requested: dict[str, str]) -> dict[str, str]:
@@ -792,11 +947,10 @@ class EngineService:
                 target_fps = fps or int(in_video.average_rate or 30)
                 out_fps = max(1, min(target_fps, 60))
 
-                # Fallback to h264 when libx264 is not an available ENCODER
-                # (membership in codecs_available also covers decoders-only names).
-                chosen_vcodec = video_codec
-                if chosen_vcodec == "libx264" and not _codec_supports_mode("libx264", "w"):
-                    chosen_vcodec = "h264"
+                # Resolve against the wheel's verified encoder set so a mobile
+                # LGPL build reports a friendly error instead of crashing at
+                # add_stream with an UnknownCodecError.
+                chosen_vcodec = _resolve_video_codec(video_codec)
 
                 # setpts changes the effective frame rate (30fps sped 1.5x arrives
                 # as 45fps); declare it so the encoder's DTS model matches reality.
@@ -841,7 +995,7 @@ class EngineService:
 
             out_audio = None
             if in_audio:
-                chosen_acodec = audio_codec
+                chosen_acodec = _resolve_audio_codec(audio_codec)
                 out_audio = out.add_stream(chosen_acodec, rate=in_audio.rate or 44100)
                 # PyAV 18: channels is read-only; layout is the writable source of truth
                 n_ch = min(2, in_audio.channels or 2)
@@ -1080,7 +1234,7 @@ class EngineService:
 
             out_audio = None
             if in_audio:
-                out_audio = out.add_stream("aac", rate=in_audio.rate or 44100)
+                out_audio = out.add_stream(_resolve_audio_codec("aac"), rate=in_audio.rate or 44100)
                 out_audio.bit_rate = audio_bitrate
                 out_audio.layout = "stereo"
 
@@ -1361,7 +1515,7 @@ class EngineService:
 
             out_audio = None
             if in_audio:
-                out_audio = out.add_stream("aac", rate=in_audio.rate or 44100)
+                out_audio = out.add_stream(_resolve_audio_codec("aac"), rate=in_audio.rate or 44100)
                 out_audio.layout = "stereo"
 
             last_video_pts = -1
@@ -1486,14 +1640,24 @@ class EngineService:
         """Extract audio with optional LUFS mastering, channel mix, and soxr resampling."""
         # Do not create a partial output while the serial queue is paused.
         _pause_hook(cancel_event)
+        # Requested format → friendly codec name. The resolver decides whether
+        # this build can encode it; the old `else "mp3"` / `else "opus"`
+        # branches pointed at encoders FFmpeg does not ship, which is exactly
+        # what raised UnknownCodecError on the Android wheel.
         codec_map = {
-            "mp3": "libmp3lame" if _codec_supports_mode("libmp3lame", "w") else "mp3",
+            "mp3": "mp3",
             "aac": "aac",
             "m4a": "aac",
             "flac": "flac",
-            "opus": "libopus" if _codec_supports_mode("libopus", "w") else "opus",
+            "opus": "opus",
             "wav": "pcm_s16le",
         }
+        requested_format = format_name.lower()
+        if requested_format not in codec_map:
+            raise EngineCapabilityError(
+                f"Unknown output format {format_name!r}. Supported: " + ", ".join(sorted(codec_map))
+            )
+        chosen_codec = _resolve_audio_codec(codec_map[requested_format])
 
         # Two-pass loudnorm needs a full measurement pass before encoding starts.
         measured = (
@@ -1514,7 +1678,8 @@ class EngineService:
             if not in_audio:
                 raise ValueError("No audio stream found in source media")
 
-            chosen_codec = codec_map.get(format_name.lower(), "libmp3lame")
+            # chosen_codec is resolved (and verified) before the output file is
+            # opened, so an unsupported format fails with no partial file.
             out_rate = int(sample_rate) if sample_rate else (in_audio.rate or 44100)
             if channels in (1, 2):
                 target_layout = "mono" if channels == 1 else "stereo"
@@ -1772,7 +1937,7 @@ class EngineService:
                 raise ValueError("No video stream found")
 
             out_fps = max(1, min(fps, 30))
-            out_video = out.add_stream("gif", rate=out_fps)
+            out_video = out.add_stream(_resolve_video_codec("gif"), rate=out_fps)
             out_w = int(width)
             out_h = max(1, int(out_w * ((in_video.height or 1) / (in_video.width or 1))))
             out_video.width = out_w
@@ -2412,7 +2577,9 @@ class EngineService:
 
             out_audio = None
             if fa is not None:
-                out_audio = out.add_stream("aac", rate=fa.sample_rate or 44100)
+                out_audio = out.add_stream(
+                    _resolve_audio_codec("aac"), rate=fa.sample_rate or 44100
+                )
                 out_audio.layout = "stereo" if (fa.channels or 2) >= 2 else "mono"
 
             for fi, path in enumerate(paths):
@@ -2527,7 +2694,7 @@ class EngineService:
 
             out_audio = None
             if first_audio is not None:
-                out_audio = out.add_stream("aac", rate=out_rate)
+                out_audio = out.add_stream(_resolve_audio_codec("aac"), rate=out_rate)
                 out_audio.layout = "stereo" if (first_audio.channels or 2) >= 2 else "mono"
 
             v_idx = 0  # output video frame index → the ONLY video timeline

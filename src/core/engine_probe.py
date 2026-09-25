@@ -67,11 +67,44 @@ REQUIRED_FILTERS = [
 OPTIONAL_FILTERS = ["drawbox", "drawtext", "subtitles", "ass", "afftfilt"]
 
 # Encoders the app wants (first available wins per quality tier).
-PREFERRED_VIDEO_ENCODERS = ["libx264", "libx265", "hevc", "libsvtav1", "libaom-av1", "vp9", "h264"]
-PREFERRED_AUDIO_ENCODERS = ["aac", "libmp3lame", "libopus", "flac", "libvorbis"]
+#
+# The LGPL list matters: Flet Mobile Forge builds `flet-libffmpeg` WITHOUT
+# --enable-gpl and with --disable-autodetect, so the Android wheel has none of
+# the GPL/external encoders. Its real set is FFmpeg's own — mpeg4/mjpeg/png/
+# gif/prores/ffv1 video and aac/opus/vorbis/flac/alac/pcm audio. Listing those
+# here is what lets the capability report, the codec pickers and every
+# friendly error tell the truth on device instead of reporting "NONE".
+PREFERRED_VIDEO_ENCODERS = [
+    "libx264",
+    "libx265",
+    "hevc",
+    "libsvtav1",
+    "libaom-av1",
+    "vp9",
+    "h264",
+    "mpeg4",
+    "mjpeg",
+    "png",
+    "gif",
+    "prores",
+    "ffv1",
+]
+PREFERRED_AUDIO_ENCODERS = [
+    "aac",
+    "libmp3lame",
+    "libopus",
+    "flac",
+    "libvorbis",
+    "opus",
+    "vorbis",
+    "alac",
+    "pcm_s16le",
+]
 
-# Protocols to probe for live-stream support.
-PROTOCOLS = ["http", "https", "hls", "dash"]
+# Network protocols to probe for live-stream support. HLS and DASH are
+# DEMUXERS (formats), not protocol handlers — probing `hls://` always reports
+# "missing" even on a full build, so they are probed via `formats` instead.
+PROTOCOLS = ["http", "https", "rtmp", "tcp", "udp"]
 
 _ALL_CODECS: set[str] = set()
 
@@ -115,6 +148,24 @@ class EngineProbe:
         return "libx264" in self.encoders or "h264" in self.encoders
 
     @property
+    def mpeg4_encode(self) -> bool:
+        """MPEG-4 Part 2 — the LGPL fallback video encoder FFmpeg always ships."""
+        return "mpeg4" in self.encoders
+
+    @property
+    def hls_ok(self) -> bool:
+        """HLS is a DEMUXER (format), never a protocol — see PROTOCOLS."""
+        return "hls" in self.formats or "hls" in self.codecs
+
+    @property
+    def dash_ok(self) -> bool:
+        return "dash" in self.formats
+
+    @property
+    def https_ok(self) -> bool:
+        return self.protocol_probe.get("https", "") == "present"
+
+    @property
     def network_ok(self) -> bool:
         return (
             self.protocol_probe.get("http") == "present"
@@ -135,6 +186,8 @@ class EngineProbe:
             f"hw configs: {len(self.hardware_configs)}",
             f"encoder option sets: {len(self.encoder_options)}",
             "protocol probe: " + ", ".join(f"{k}={v}" for k, v in self.protocol_probe.items()),
+            f"HLS (demuxer): {'present' if self.hls_ok else 'missing'}",
+            f"DASH (demuxer): {'present' if self.dash_ok else 'missing'}",
             f"GIF pipeline: {'OK' if self.gif_ok else 'MISSING'}",
         ]
         if self.missing_required_filters:
@@ -190,6 +243,35 @@ def _find_attr(root, *names) -> set[str]:
     return set()
 
 
+# Formats the Extract/Audio screens offer, and the encoder names each maps to.
+# Screens ask `can_encode_format()` so an option the wheel cannot encode is
+# never shown, instead of failing after the user has already hit Process.
+AUDIO_FORMAT_ENCODERS = {
+    "mp3": ("libmp3lame", "mp3"),
+    "aac": ("aac",),
+    "m4a": ("aac",),
+    "flac": ("flac",),
+    "opus": ("libopus", "opus"),
+    "wav": ("pcm_s16le", "pcm_s24le"),
+}
+
+
+def can_encode(name: str) -> bool:
+    """True if the installed wheel can open ``name`` in encoder mode.
+
+    Measures rather than assumes: ``_codec_mode_available`` constructs the
+    Codec, which is the only check that distinguishes an encoder from a
+    decoder-only name in ``codecs_available``.
+    """
+    probe()  # ensures _ALL_CODECS is populated for the mode check
+    return _codec_mode_available(name, "w")
+
+
+def can_encode_format(fmt: str) -> bool:
+    """True if the Extract/Audio screens can actually produce this format."""
+    return any(can_encode(enc) for enc in AUDIO_FORMAT_ENCODERS.get(fmt.lower(), ()))
+
+
 _PROBE_MEM: EngineProbe | None = None
 _SET_FIELDS = (
     "codecs",
@@ -203,7 +285,10 @@ _SET_FIELDS = (
 
 
 def _probe_cache_path() -> Path:
-    return get_cache_dir() / f"engine_probe_{av.__version__}_caps2.json"
+    # caps3: adds the LGPL encoder set + demuxer-based HLS/DASH probing, so
+    # older caps2 files (which reported "no video encoders" on Android) are
+    # deliberately ignored rather than trusted.
+    return get_cache_dir() / f"engine_probe_{av.__version__}_caps3.json"
 
 
 def _load_cached() -> EngineProbe | None:

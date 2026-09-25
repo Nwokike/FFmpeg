@@ -36,7 +36,7 @@ class AdService:
 
     # Swapped by tools/admob.py swap-ids (test ↔ prod) — a REAL branch: the
     # flag now decides which unit IDs are served, and empty PROD IDs never win.
-    USE_TEST_IDS = True
+    USE_TEST_IDS = False
     INTERSTITIAL_COOLDOWN_SEC = 90.0
 
     def __init__(self, page: ft.Page) -> None:

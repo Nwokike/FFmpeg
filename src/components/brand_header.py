@@ -99,7 +99,7 @@ def BrandHeader() -> ft.Control:
                                     size=FONT_LG,
                                     weight=ft.FontWeight.BOLD,
                                 ),
-                                ft.Text("Media Studio", size=FONT_XS, color=muted),
+                                ft.Text("Mobile Media Studio", size=FONT_XS, color=muted),
                             ],
                             spacing=0,
                         ),

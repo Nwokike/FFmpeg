@@ -35,7 +35,7 @@ package = false
 # ── #3c8038 (the launcher glyph); backgrounds are Kiri slate for contrast.
 [tool.flet]
 org = "ng.kiri"
-product = "FFmpeg"
+product = "FFmpeg Lite"
 company = "Kiri Research Labs"
 build_number = 1
 icon_background = "#0f1114"
@@ -50,7 +50,7 @@ path = "src"
 # flet-cli reads the built-in screen as { name = "flet", flet = { ... } }.
 [tool.flet.boot_screen]
 name = "flet"
-flet = { startup_message = "Initializing FFmpeg..." }
+flet = { startup_message = "Initializing FFmpeg Lite..." }
 
 [tool.flet.splash]
 color = "#ffffff"
@@ -68,8 +68,13 @@ split_per_abi = true
 # PyAV loads bundled FFmpeg shared libraries through package paths; keep its
 # native extension unpacked instead of relying on zipimport layout.
 extract_packages = ["av"]
-# arm64-v8a only: x86_64 produced an emulator-only split in every build.
-target_arch = ["arm64-v8a"]
+# All three ABIs: Flet's bundled Python manifest publishes arm64/x86_64/
+# armeabi-v7a, and the Mobile Forge `av` index ships Android 24 wheels for all
+# three. `--split-per-abi` gives Play one device APK plus an emulator/QA APK
+# instead of a fat universal package. The earlier arm64-only pin was copied
+# from a sibling app's emulator-split note, not derived from a dependency
+# failure in this project.
+target_arch = ["arm64-v8a", "x86_64", "armeabi-v7a"]
 # NOTE: `min_sdk_version` is NOT a flet-cli key (zero references in its
 # source) — av's wheels are built at ABI 24; the effective floor comes from
 # the Flutter/Gradle template, so verify the generated minSdk before tagging.
@@ -81,7 +86,7 @@ adaptive_icon_background = "#0f1114"
 [tool.flet.android.meta_data]
 # Google test App ID (matches AdService USE_TEST_IDS=True). Swap to the
 # production AdMob App ID at Play Store release.
-"com.google.android.gms.ads.APPLICATION_ID" = "ca-app-pub-3940256099942544~3347511713"
+"com.google.android.gms.ads.APPLICATION_ID" = "ca-app-pub-5679949845754640~8554716742"
 
 # Play-safe set: media INPUTS come from the SAF system picker (no permission),
 # OUTPUTS go to a user-chosen location via SAF/MediaStore (no permission). Only

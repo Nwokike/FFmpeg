@@ -17,12 +17,18 @@ import flet as ft
 from app_shell import AppShell
 from components.update_dialog import build_update_dialog
 from core.constants import APP_NAME, APP_VERSION
+from core.engine_probe import probe as engine_probe
 from core.logger_handler import MemoryLogHandler
 from core.notify import ERROR, SUCCESS, show_snack
 from core.state import AppStateCtx, Job, state
 from core.theme import AppTheme
 from services.ad_service import AdService
-from services.engine_service import EngineService, set_pause_event
+from services.engine_service import (
+    EngineCapabilityError,
+    EngineService,
+    friendly_job_error,
+    set_pause_event,
+)
 from services.job_queue import JobQueue
 from services.media_io import MediaIOService
 from services.storage_service import StorageService
@@ -380,17 +386,26 @@ async def main(page: ft.Page) -> None:
             return
         if leaving_result:
             # Natural ad break: on the way OUT of the result screen rather than
-            # between completion and its result (Play placement policy). Cooldown,
-            # mobile-only, consent and connectivity gates live in show_interstitial.
-            async def _ad_then_nav():
-                try:
-                    await ads.show_interstitial()
-                except Exception:
-                    logger.exception("Interstitial on result-exit failed")
+            # between completion and its result (Play placement policy).
+            #
+            # Native InterstitialAd.show() returns as soon as the ad is
+            # requested/displayed — dismissal arrives as a separate close
+            # event. Navigating after `await show_interstitial()` therefore
+            # swapped the route UNDER the still-open ad. Every skip path in
+            # AdService also fires on_close, so passing the navigation as the
+            # callback covers both the ad-closed and the no-ad cases.
+            def _finish_result_exit() -> None:
                 if page.route != route:
                     page.navigate(route)
                 else:
                     page.update()
+
+            async def _ad_then_nav():
+                try:
+                    await ads.show_interstitial(on_close=_finish_result_exit)
+                except Exception:
+                    logger.exception("Interstitial on result-exit failed")
+                    _finish_result_exit()
 
             page.run_task(_ad_then_nav)
         else:
@@ -619,15 +634,22 @@ async def main(page: ft.Page) -> None:
             _set_worker_field(job, "finished_at", time.time())
             logger.info("Job %s cancelled", job.id)
         except Exception as exc:
-            _set_worker_field(job, "status", "cancelled" if cancel_evt.is_set() else "failed")
-            _set_worker_field(job, "error_message", str(exc))
+            cancelled = cancel_evt.is_set()
+            message = friendly_job_error(exc)
+            _set_worker_field(job, "status", "cancelled" if cancelled else "failed")
+            _set_worker_field(job, "error_message", message)
             _set_worker_field(
                 job,
                 "status_message",
-                "Cancelled" if cancel_evt.is_set() else f"Failed: {exc}",
+                "Cancelled" if cancelled else f"Failed: {message}",
             )
             _set_worker_field(job, "finished_at", time.time())
-            logger.exception("Job %s execution failed", job.id)
+            if isinstance(exc, EngineCapabilityError):
+                # Expected on the LGPL Android wheel — a real failure, but not a
+                # crash, so it belongs in the log as context rather than a traceback.
+                logger.warning("Job %s needs a capability this build lacks: %s", job.id, message)
+            else:
+                logger.exception("Job %s execution failed", job.id)
         finally:
             _schedule_ui(_set_wakelock, False)
 
@@ -786,9 +808,35 @@ async def main(page: ft.Page) -> None:
         storage.set("theme_mode", mode_str)
         page.update()
 
+    def handle_system_back() -> None:
+        """Map Android/system back onto in-app navigation, never app teardown.
+
+        The flat route table means Flet's own Router pop handler has no parent
+        view to walk to, so the event fell through to the host and closed the
+        app from every tool screen. Mirror Sherlock/DDGS: tool → dashboard,
+        dashboard tab → Home, root → swallow.
+        """
+        if not state.has_accepted_terms:
+            return  # Onboarding is a gate; back must not exit the flow
+        if page.route != "/":
+            navigate("dashboard")
+        elif state.selected_tab != 0:
+            select_tab(0)
+        # Root/Home: nothing above us to leave — swallow the event.
+
+    def _on_system_back(_e=None) -> None:
+        try:
+            handle_system_back()
+        finally:
+            if not page.views:
+                # Flet removed the root view unexpectedly; log loudly so a
+                # framework behavior change is diagnosable from the terminal.
+                logger.error("System back removed the ROOT view — flat route stack violated")
+
     methods = ControllerMethods(
         navigate=navigate,
         select_tab=select_tab,
+        handle_system_back=handle_system_back,
         pick_media_for=lambda t: page.run_task(pick_media_for, t),
         start_job=start_job,
         cancel_job=cancel_job,
@@ -843,6 +891,25 @@ async def main(page: ft.Page) -> None:
             page.update()
 
     page.run_task(_silent_update_check)
+
+    async def _load_engine_capabilities():
+        """Measure the installed wheel off the UI loop and publish it.
+
+        Screens read state.probe_info to decide which codecs/formats to offer.
+        Until this lands they show an empty picker rather than a list of
+        encoders this build does not ship.
+        """
+        try:
+            state.probe_info = await asyncio.to_thread(engine_probe)
+            page.update()
+        except Exception as exc:  # cosmetic: tools fall back to their defaults
+            logger.warning("Engine capability probe failed: %s", exc)
+
+    page.run_task(_load_engine_capabilities)
+
+    # System back MUST be captured before the Router mounts so the Router's
+    # own pop handler delegates to it (flat routes otherwise close the app).
+    page.on_view_pop = _on_system_back
 
     # Mount UI — render_views: ft.Router(manage_views=True) emits the ft.View
     # list that becomes page.views (back-stack, swipe-back, deep-link entry).

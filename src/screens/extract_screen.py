@@ -6,6 +6,7 @@ from pathlib import Path
 
 import flet as ft
 
+from core.engine_probe import can_encode_format
 from core.state import Job, use_app_state
 from core.storage_paths import format_bytes, get_temp_dir
 from core.styles import card_container, section_header
@@ -55,13 +56,13 @@ def ExtractScreen() -> ft.Control:
 
         stem = Path(media_path).stem
         if mode == "audio":
-            out_name = f"{stem}_audio.{audio_fmt}"
+            out_name = f"{stem}_audio.{chosen_audio_fmt}"
             out_path = str(get_temp_dir() / out_name)
             job = Job(
                 op="extract_audio",
                 input_path=media_path,
                 output_path=out_path,
-                params={"format_name": audio_fmt, "bitrate_kbps": int(audio_kbps)},
+                params={"format_name": chosen_audio_fmt, "bitrate_kbps": int(audio_kbps)},
                 original_size_bytes=Path(media_path).stat().st_size
                 if Path(media_path).exists()
                 else 0,
@@ -117,8 +118,16 @@ def ExtractScreen() -> ft.Control:
 
         ctrl.start_job(job)
 
-    # Audio formats
-    audio_formats = ["mp3", "aac", "flac", "opus", "wav"]
+    # Audio formats — measured against the installed wheel, not assumed. The
+    # Android LGPL build ships no MP3 encoder, so offering "mp3" produced an
+    # UnknownCodecError after the user pressed Extract.
+    audio_formats = [f for f in ("mp3", "aac", "flac", "opus", "wav") if can_encode_format(f)]
+    # Clamp onto something encodable so the first chip and the job agree.
+    chosen_audio_fmt = (
+        audio_fmt
+        if audio_fmt in audio_formats
+        else (audio_formats[0] if audio_formats else audio_fmt)
+    )
 
     return ft.ListView(
         controls=[
@@ -202,7 +211,7 @@ def ExtractScreen() -> ft.Control:
                         controls=[
                             ft.Chip(
                                 label=ft.Text(fmt.upper()),
-                                selected=audio_fmt == fmt,
+                                selected=chosen_audio_fmt == fmt,
                                 on_select=lambda _, f=fmt: set_audio_fmt(f),
                             )
                             for fmt in audio_formats

@@ -39,6 +39,21 @@ def ConvertScreen() -> ft.Control:
         else "0 B"
     )
 
+    # Codec choices are shown only when the INSTALLED wheel verified them as a
+    # mode='w' encoder. Hardcoding libx264/libx265/vp9 is what let a tap reach
+    # add_stream() and crash on Android's LGPL build with UnknownCodecError.
+    available_video = (
+        list(app_state.probe_info.video_encoder_picks or []) if app_state.probe_info else []
+    )
+    video_choices = [
+        ("libx264", "H.264 (libx264)"),
+        ("libx265", "H.265 (HEVC)"),
+        ("vp9", "VP9"),
+        ("mpeg4", "MPEG-4"),
+        ("mjpeg", "MJPEG"),
+    ]
+    visible_video = [(key, label) for key, label in video_choices if key in available_video]
+
     # State variables
     container_fmt, set_container_fmt = ft.use_state("mp4")
     v_codec, set_v_codec = ft.use_state("libx264")
@@ -46,6 +61,14 @@ def ConvertScreen() -> ft.Control:
     crf_val, set_crf_val = ft.use_state(23)
     res_choice, set_res_choice = ft.use_state("original")
     is_processing, set_is_processing = ft.use_state(False)
+
+    # Clamp the selection onto something this build can actually encode — the
+    # default (libx264) is meaningless on a wheel that only ships LGPL codecs.
+    chosen_video = (
+        v_codec
+        if v_codec in available_video
+        else (available_video[0] if available_video else v_codec)
+    )
 
     def _start_conversion(_):
         if not media_path:
@@ -70,7 +93,7 @@ def ConvertScreen() -> ft.Control:
             output_path=out_path,
             params={
                 "container": container_fmt,
-                "video_codec": v_codec,
+                "video_codec": chosen_video,
                 "audio_codec": a_codec,
                 "crf": int(crf_val),
                 "scale_width": scale_w,
@@ -154,28 +177,37 @@ def ConvertScreen() -> ft.Control:
                 options=container_options,
                 on_select=lambda e: set_container_fmt(e.control.value),
             ),
-            # Video Codec Chips
+            # Video Codec Chips — populated from the measured encoder set.
             section_header("Video Codec", "Encoding algorithm", is_dark=is_dark),
-            ft.Row(
-                controls=[
-                    ft.Chip(
-                        label=ft.Text("H.264 (libx264)"),
-                        selected=v_codec == "libx264",
-                        on_select=lambda _: set_v_codec("libx264"),
-                    ),
-                    ft.Chip(
-                        label=ft.Text("H.265 (HEVC)"),
-                        selected=v_codec == "libx265",
-                        on_select=lambda _: set_v_codec("libx265"),
-                    ),
-                    ft.Chip(
-                        label=ft.Text("VP9"),
-                        selected=v_codec == "vp9",
-                        on_select=lambda _: set_v_codec("vp9"),
-                    ),
-                ],
-                wrap=True,
-                spacing=SPACE_SM,
+            *(
+                [
+                    ft.Row(
+                        controls=[
+                            ft.Chip(
+                                label=ft.Text(label),
+                                selected=chosen_video == key,
+                                on_select=lambda _, k=key: set_v_codec(k),
+                            )
+                            for key, label in visible_video
+                        ],
+                        wrap=True,
+                        spacing=SPACE_SM,
+                    )
+                ]
+                if visible_video
+                else [
+                    card_container(
+                        content=ft.Text(
+                            "This device's FFmpeg build has no video encoders, "
+                            "so it can copy media but cannot re-encode it.",
+                            size=FONT_SM,
+                            color=muted,
+                        ),
+                        padding=SPACE_MD,
+                        border_radius=RADIUS_LG,
+                        is_dark=is_dark,
+                    )
+                ]
             ),
             # Quality & CRF
             section_header(

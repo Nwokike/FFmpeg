@@ -6,6 +6,7 @@ from pathlib import Path
 
 import flet as ft
 
+from core.engine_probe import can_encode_format
 from core.state import Job, use_app_state
 from core.storage_paths import format_bytes, get_temp_dir
 from core.styles import card_container, section_header
@@ -37,6 +38,18 @@ def AudioScreen() -> ft.Control:
     audio_format, set_audio_format = ft.use_state("m4a")
     is_processing, set_is_processing = ft.use_state(False)
 
+    # Output formats are measured against the installed wheel. The Android
+    # LGPL build has no MP3 encoder, so "mp3" used to fail only after the user
+    # pressed Process & Master.
+    audio_formats = [
+        f for f in ("m4a", "mp3", "aac", "flac", "opus", "wav") if can_encode_format(f)
+    ]
+    chosen_audio_format = (
+        audio_format
+        if audio_format in audio_formats
+        else (audio_formats[0] if audio_formats else audio_format)
+    )
+
     lufs_presets = [
         ("youtube", "YouTube / Music (-14 LUFS)", -14.0),
         ("podcast", "Podcast / Vocal (-16 LUFS)", -16.0),
@@ -51,7 +64,7 @@ def AudioScreen() -> ft.Control:
         set_is_processing(True)
 
         stem = Path(media_path).stem
-        out_name = f"{stem}_mastered.{audio_format}"
+        out_name = f"{stem}_mastered.{chosen_audio_format}"
         out_path = str(get_temp_dir() / out_name)
 
         job = Job(
@@ -59,7 +72,7 @@ def AudioScreen() -> ft.Control:
             input_path=media_path,
             output_path=out_path,
             params={
-                "format_name": audio_format,
+                "format_name": chosen_audio_format,
                 "bitrate_kbps": 256,
                 "target_lufs": float(lufs_target),
                 "channels": 2 if channel_layout == "stereo" else 1,
@@ -166,10 +179,10 @@ def AudioScreen() -> ft.Control:
                 controls=[
                     ft.Chip(
                         label=ft.Text(fmt.upper() if fmt != "m4a" else "M4A (AAC)"),
-                        selected=audio_format == fmt,
+                        selected=chosen_audio_format == fmt,
                         on_select=lambda _, f=fmt: set_audio_format(f),
                     )
-                    for fmt in ["m4a", "mp3", "aac", "flac", "opus", "wav"]
+                    for fmt in audio_formats
                 ],
                 wrap=True,
                 spacing=SPACE_SM,

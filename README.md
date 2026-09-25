@@ -2,12 +2,12 @@
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="src/assets/icon_white.svg">
     <source media="(prefers-color-scheme: light)" srcset="src/assets/icon.svg">
-    <img src="src/assets/icon.svg" alt="FFmpeg" width="320" />
+    <img src="src/assets/icon.svg" alt="FFmpeg Lite" width="320" />
   </picture>
 </p>
 
 <p align="center">
-  On-device media studio — convert, transcode, compress, cut, extract and filter any video or audio with the full power of FFmpeg 8
+  FFmpeg Lite — on-device media studio built on FFmpeg 8. Cut, join, extract, remux and master audio on-device, with a UI that only offers what your device really supports.
 </p>
 
 <p align="center">
@@ -26,33 +26,35 @@
 | Platform | Download | Notes |
 | :---: | :---: | :--- |
 | 🤖 **Android** | [![Play Store](https://img.shields.io/badge/Google_Play-414141?style=flat-square&logo=google-play&logoColor=white)](https://play.google.com/store/apps/details?id=ng.kiri.ffmpeg) | Recommended for Android users |
-| 🪟 **Windows** | [![Windows Release](https://img.shields.io/badge/Download_Windows_Release-0078D6?style=flat-square&logo=windows&logoColor=white)](https://github.com/Nwokike/FFmpeg/releases/latest/download/FFmpeg.exe) | Automated standalone setup installer with desktop shortcut integration |
-| 🐧 **Linux (Debian/Ubuntu)** | [![Linux DEB](https://img.shields.io/badge/Download_Linux_DEB-FCC624?style=flat-square&logo=linux&logoColor=white)](https://github.com/Nwokike/FFmpeg/releases/latest/download/FFmpeg.deb) | Desktop package tailored for Ubuntu, Debian, Linux Mint & Pop!_OS |
-| 🎩 **Linux (Fedora/RHEL)** | [![Linux RPM](https://img.shields.io/badge/Download_Linux_RPM-E91E63?style=flat-square&logo=redhat&logoColor=white)](https://github.com/Nwokike/FFmpeg/releases/latest/download/FFmpeg.rpm) | Desktop package tailored for Fedora, openSUSE, RHEL & CentOS |
-| 📦 **Linux (Universal Portable)** | [![Linux TAR.GZ](https://img.shields.io/badge/Download_Linux_TAR.GZ-9C27B0?style=flat-square&logo=linux&logoColor=white)](https://github.com/Nwokike/FFmpeg/releases/latest/download/FFmpeg.tar.gz) | Universal standalone portable archive for Arch, Alpine, Steam Deck & all distros |
+| 🪟 **Windows** | [![Windows Release](https://img.shields.io/badge/Download_Windows_Release-0078D6?style=flat-square&logo=windows&logoColor=white)](https://github.com/Nwokike/FFmpeg/releases/latest/download/FFmpeg_Lite.exe) | Automated standalone setup installer with desktop shortcut integration |
+| 🐧 **Linux (Debian/Ubuntu)** | [![Linux DEB](https://img.shields.io/badge/Download_Linux_DEB-FCC624?style=flat-square&logo=linux&logoColor=white)](https://github.com/Nwokike/FFmpeg/releases/latest/download/FFmpeg_Lite.deb) | Desktop package tailored for Ubuntu, Debian, Linux Mint & Pop!_OS |
+| 🎩 **Linux (Fedora/RHEL)** | [![Linux RPM](https://img.shields.io/badge/Download_Linux_RPM-E91E63?style=flat-square&logo=redhat&logoColor=white)](https://github.com/Nwokike/FFmpeg/releases/latest/download/FFmpeg_Lite.rpm) | Desktop package tailored for Fedora, openSUSE, RHEL & CentOS |
+| 📦 **Linux (Universal Portable)** | [![Linux TAR.GZ](https://img.shields.io/badge/Download_Linux_TAR.GZ-9C27B0?style=flat-square&logo=linux&logoColor=white)](https://github.com/Nwokike/FFmpeg/releases/latest/download/FFmpeg_Lite.tar.gz) | Universal standalone portable archive for Arch, Alpine, Steam Deck & all distros |
 
 ### Android Architecture Build Splits
 
 | Variant | Download | Notes |
 | :---: | :---: | :--- |
 | 📱 **ARM64** (most phones) | [**ffmpeg-arm64-v8a.apk**](https://github.com/Nwokike/FFmpeg/releases/latest/download/ffmpeg-arm64-v8a.apk) | Modern 64-bit Android devices |
-| 💻 **x86_64** (emulator QA) | Not shipped in v1.0.0 | The release target is arm64-v8a; x86_64 can be added as a separate QA build. |
+| 💻 **x86_64** (emulators) | [**ffmpeg-x86_64.apk**](https://github.com/Nwokike/FFmpeg/releases/latest/download/ffmpeg-x86_64.apk) | Android emulators and Chromebooks |
+| 📱 **ARMv7** (32-bit phones) | [**ffmpeg-armeabi-v7a.apk**](https://github.com/Nwokike/FFmpeg/releases/latest/download/ffmpeg-armeabi-v7a.apk) | Older 32-bit Android devices |
 
 ---
 
 ## Core Capabilities
 
+Every option in the UI is gated on a **live capability probe** of the installed engine. On Android, Flet's official PyAV wheel is built LGPL-only, so the app offers FFmpeg's own LGPL encoders (MPEG-4, MJPEG, PNG, GIF, AAC, FLAC, PCM) plus lossless stream-copy — and it hides what that wheel cannot do instead of failing after you tap a button.
+
 | Capability | Description |
 | :--- | :--- |
-| **Full FFmpeg 8 Engine** | Every codec, container and filter of the bundled FFmpeg build — enumerated live at runtime and surfaced in the UI, so the app always shows exactly what this device can do. |
-| **Convert, Transcode & Compress** | Any container to any container, quality presets or target file size ("small enough for WhatsApp/Telegram"), duration presets, bitrate/CRF advanced controls. |
-| **Cut / Trim** | Instant stream-copy cuts (keyframe-accurate) or frame-accurate re-encode, scrubbed on a live thumbnail strip. |
-| **Extract** | Audio (AAC/MP3/Opus/FLAC/WAV/PCM), frame extraction, palette-optimized GIFs, and SRT/ASS/WebVTT subtitles. |
-| **Filters** | Crop, scale, rotate/flip, speed (atempo), volume, denoise, sharpen, image watermark overlay — plus color EQ and any other filter exactly as this device's FFmpeg build supports (the UI names what's missing). |
-| **Join** | Merge clips end-to-end: instant lossless when formats match, uniform re-encode when they don't, with optional crossfade transitions. |
+| **Measured FFmpeg Engine** | Every codec, container, filter and protocol is enumerated from the installed build at runtime and surfaced in Engine Info — the UI never advertises a feature this device cannot run. |
+| **Convert & Compress** | Container-to-container conversion with the encoders this build ships, target file size ("small enough for WhatsApp/Telegram"), bitrate/CRF controls. |
+| **Cut / Trim & Join** | Instant keyframe-accurate stream-copy cuts, frame-accurate re-encode when the engine provides an encoder, lossless merge, and optional crossfade. |
+| **Extract** | Audio in the formats this build can encode (AAC/M4A/FLAC/WAV), frame extraction, palette-optimized GIFs, and SRT/ASS/WebVTT subtitles. |
+| **Filters** | Crop, scale, rotate/flip, speed (atempo), volume, denoise, sharpen, image watermark overlay — gated on the build's filter set. |
 | **Audio Studio** | Loudness normalization (two-pass, use-case presets), resampling (incl. soxr), channel mixing, and playback-speed export. |
 | **Capture** | In-app camera video/still capture and microphone recording — straight into the conversion pipeline. |
-| **Live Streams** | Record HTTP/HTTPS/HLS/DASH streams on-device (feature-gated on engine support). |
+| **Live Streams** | HTTP stream recording on-device. HTTPS/HLS bytes are downloaded through the app's own network stack and handed to PyAV, because the mobile engine has no TLS protocol handler. |
 | **Batch Jobs** | Multi-file queue with per-job progress, cancel, pause and a jobs banner that survives tab switches. |
 | **Media Dossier** | Probe any file: streams, codecs, bitrates, dimensions, rotation, language, chapters — with a raw container summary and a shareable markdown report. Includes lossless track-picker copies (drop audio/subtitle tracks without re-encoding). |
 | **Share & Save** | Save to Downloads/Movies via the system picker, or push outputs to any app via the system share sheet. |
@@ -161,7 +163,7 @@ This app embeds FFmpeg libraries (LGPL/GPL components) via PyAV (BSD-3-Clause). 
 
 ## License
 
-Proprietary © 2025–2026 Kiri Research Labs. See [`LICENSE`](LICENSE).
+MIT © 2025-2026 Nwokike. See [`LICENSE`](LICENSE).
 
 ## Credits
 

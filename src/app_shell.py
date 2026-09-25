@@ -50,31 +50,37 @@ def _shell_body(
     app_state: AppState,
     *,
     header: ft.Control | None = None,
-) -> ft.Container:
+) -> ft.SafeArea:
     """Banners run full-width; screen content gets the horizontal gutter.
 
-    Nav-bar clearance lives INSIDE each dashboard screen's scroll (trailing
-    spacer, sibling pattern) — a fixed outer inset here both fought the
-    scroll view's constraints and still fell short of gesture-nav phones.
-    ``header`` (dashboard only) sits above the banners inside the same gutter.
+    The SafeArea is what keeps the brand header and the offline/job strips out
+    of the Android status bar — `page.padding = 0` and `View.padding = 0`
+    previously removed every inset, so the phone rendered the title bar under
+    the notification bar. Dashboard passes ``avoid_bottom=False`` because the
+    NavigationBar owns that inset; tool routes take the bottom inset too.
     """
     is_dark = is_dark_mode(ft.context.page, app_state)
-    return ft.Container(
-        content=ft.Column(
-            controls=[
-                *([header] if header is not None else []),
-                offline_banner_view(app_state.is_online),
-                jobs_banner_view(app_state.active_job, is_dark=is_dark),
-                ft.Container(
-                    content=content,
-                    expand=True,
-                    padding=ft.Padding.symmetric(horizontal=SPACE_MD),
-                ),
-            ],
-            spacing=0,
+    return ft.SafeArea(
+        content=ft.Container(
+            content=ft.Column(
+                controls=[
+                    *([header] if header is not None else []),
+                    offline_banner_view(app_state.is_online),
+                    jobs_banner_view(app_state.active_job, is_dark=is_dark),
+                    ft.Container(
+                        content=content,
+                        expand=True,
+                        padding=ft.Padding.symmetric(horizontal=SPACE_MD),
+                    ),
+                ],
+                spacing=0,
+                expand=True,
+            ),
             expand=True,
         ),
-        expand=True,
+        avoid_intrusions_top=True,
+        avoid_intrusions_bottom=False,
+        maintain_bottom_view_padding=True,
     )
 
 

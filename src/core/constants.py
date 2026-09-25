@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import sys
 
-APP_NAME = "FFmpeg"
+APP_NAME = "FFmpeg Lite"
 COMPANY = "Kiri Research Labs"
 ORG = "ng.kiri"
 BUNDLE_ID = "ng.kiri.ffmpeg"
@@ -64,9 +64,9 @@ ADMOB_INTERSTITIAL_UNIT_TEST = "ca-app-pub-3940256099942544/1033173712"
 
 # Production units — filled by tools/admob.py swap-ids --mode prod (empty = unset;
 # AdService falls back to the test IDs while these are blank).
-ADMOB_APP_ID_PROD = ""
-ADMOB_BANNER_UNIT_PROD = ""
-ADMOB_INTERSTITIAL_UNIT_PROD = ""
+ADMOB_APP_ID_PROD = "ca-app-pub-5679949845754640~8554716742"
+ADMOB_BANNER_UNIT_PROD = "ca-app-pub-5679949845754640/3222499013"
+ADMOB_INTERSTITIAL_UNIT_PROD = "ca-app-pub-5679949845754640/5194056233"
 
 # Storage-tier env vars set by the Flet mobile launcher (verified in 1.0 source).
 STORAGE_DATA_ENV = "FLET_APP_STORAGE_DATA"

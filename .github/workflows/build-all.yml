@@ -76,7 +76,7 @@ jobs:
         run: |
           if [[ "${{ github.ref }}" == refs/tags/* ]]; then
             echo "TAG_NAME=${{ github.ref_name }}" >> $GITHUB_OUTPUT
-            echo "RELEASE_NAME=FFmpeg ${{ github.ref_name }}" >> $GITHUB_OUTPUT
+            echo "RELEASE_NAME=FFmpeg Lite ${{ github.ref_name }}" >> $GITHUB_OUTPUT
             echo "IS_PRERELEASE=false" >> $GITHUB_OUTPUT
           else
             SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
@@ -130,7 +130,7 @@ jobs:
           FLET_ANDROID_SIGNING_KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
           FLET_ANDROID_SIGNING_KEY_STORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
           FLET_ANDROID_SIGNING_KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
-        run: uv run --frozen flet build apk --python-version 3.14 --yes --project ffmpeg --product "FFmpeg" --org ng.kiri --company "Kiri Research Labs" --build-version ${{ env.BUILD_VERSION }} --build-number ${{ env.BUILD_NUMBER }} --split-per-abi -v
+        run: uv run --frozen flet build apk --python-version 3.14 --yes --project ffmpeg --product "FFmpeg Lite" --org ng.kiri --company "Kiri Research Labs" --build-version ${{ env.BUILD_VERSION }} --build-number ${{ env.BUILD_NUMBER }} --split-per-abi -v
       - name: Verify APK artifacts and prune boundary
         if: always()
         run: |
@@ -185,7 +185,7 @@ jobs:
           FLET_ANDROID_SIGNING_KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
           FLET_ANDROID_SIGNING_KEY_STORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
           FLET_ANDROID_SIGNING_KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
-        run: uv run --frozen flet build aab --python-version 3.14 --yes --project ffmpeg --product "FFmpeg" --org ng.kiri --company "Kiri Research Labs" --build-version ${{ env.BUILD_VERSION }} --build-number ${{ env.BUILD_NUMBER }} -v
+        run: uv run --frozen flet build aab --python-version 3.14 --yes --project ffmpeg --product "FFmpeg Lite" --org ng.kiri --company "Kiri Research Labs" --build-version ${{ env.BUILD_VERSION }} --build-number ${{ env.BUILD_NUMBER }} -v
       - name: Verify AAB artifact and prune boundary
         if: always()
         run: |
@@ -221,7 +221,7 @@ jobs:
           python-version: '3.14'
 
       - name: Build Windows Portable
-        run: uv run --frozen flet build windows --python-version 3.14 --yes --project ffmpeg --product "FFmpeg" --org ng.kiri --company "Kiri Research Labs" --build-version ${{ env.BUILD_VERSION }} --build-number ${{ env.BUILD_NUMBER }} -v
+        run: uv run --frozen flet build windows --python-version 3.14 --yes --project ffmpeg --product "FFmpeg Lite" --org ng.kiri --company "Kiri Research Labs" --build-version ${{ env.BUILD_VERSION }} --build-number ${{ env.BUILD_NUMBER }} -v
 
       - name: Generate Icon for Installer
         run: |
@@ -233,17 +233,17 @@ jobs:
           $IssContent = @"
           [Setup]
           AppId={{9A4F2C1B-7E63-4D08-B2A5-6C1E8F0D4A71}}
-          AppName=FFmpeg
+          AppName=FFmpeg Lite
           AppVersion=${{ env.BUILD_VERSION }}
           AppPublisher=Kiri Research Labs
           AppPublisherURL=https://kiri.ng
           AppSupportURL=https://kiri.ng/support
           AppUpdatesURL=https://kiri.ng/updates
           AppCopyright=Copyright (C) 2026 Kiri Research Labs
-          DefaultDirName={autopf}\FFmpeg
-          DefaultGroupName=FFmpeg
+          DefaultDirName={autopf}\FFmpeg Lite
+          DefaultGroupName=FFmpeg Lite
           OutputDir=.\build\installer
-          OutputBaseFilename=FFmpeg
+          OutputBaseFilename=FFmpeg_Lite
           Compression=lzma2
           SolidCompression=yes
           WizardStyle=modern
@@ -259,8 +259,8 @@ jobs:
           Source: "build\windows\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
           [Icons]
-          Name: "{group}\FFmpeg"; Filename: "{app}\ffmpeg.exe"
-          Name: "{autodesktop}\FFmpeg"; Filename: "{app}\ffmpeg.exe"; Tasks: desktopicon
+          Name: "{group}\FFmpeg Lite"; Filename: "{app}\ffmpeg.exe"
+          Name: "{autodesktop}\FFmpeg Lite"; Filename: "{app}\ffmpeg.exe"; Tasks: desktopicon
 
           [Tasks]
           Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription: "Additional icons:"; Flags: unchecked
@@ -273,7 +273,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ needs.prepare-release.outputs.TAG_NAME }}
-          files: build/installer/FFmpeg.exe
+          files: build/installer/FFmpeg_Lite.exe
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -293,13 +293,13 @@ jobs:
           sudo apt-get install -y libgtk-3-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libmpv-dev libmpv2 rpm ruby ruby-dev
           sudo gem install --no-document fpm
       - name: Build Linux Bundle
-        run: uv run --frozen flet build linux --python-version 3.14 --yes --project ffmpeg --product "FFmpeg" --org ng.kiri --company "Kiri Research Labs" --build-version ${{ env.BUILD_VERSION }} --build-number ${{ env.BUILD_NUMBER }} -v
+        run: uv run --frozen flet build linux --python-version 3.14 --yes --project ffmpeg --product "FFmpeg Lite" --org ng.kiri --company "Kiri Research Labs" --build-version ${{ env.BUILD_VERSION }} --build-number ${{ env.BUILD_NUMBER }} -v
       - name: Create Linux Packages (.deb, .rpm, .tar.gz)
         run: |
           mkdir -p build/dist
 
           # 1. Universal Portable .tar.gz
-          tar -czf build/dist/FFmpeg.tar.gz -C build/linux .
+          tar -czf build/dist/FFmpeg_Lite.tar.gz -C build/linux .
 
           # 2. Stage filesystem tree for rich .deb and .rpm packages
           mkdir -p pkg_root/usr/lib/ffmpeg pkg_root/usr/bin pkg_root/usr/share/applications pkg_root/usr/share/icons/hicolor/256x256/apps pkg_root/usr/share/pixmaps pkg_root/usr/share/metainfo
@@ -315,7 +315,7 @@ jobs:
           cat <<EOF > pkg_root/usr/share/applications/ffmpeg.desktop
           [Desktop Entry]
           Version=1.0
-          Name=FFmpeg
+          Name=FFmpeg Lite
           GenericName=On-Device Media Toolkit
           Comment=Transcode, compress, cut, extract and filter any media on-device — powered by FFmpeg 8 via PyAV
           Exec=/usr/bin/ffmpeg
@@ -333,12 +333,12 @@ jobs:
           <?xml version="1.0" encoding="UTF-8"?>
           <component type="desktop-application">
             <id>ng.kiri.ffmpeg</id>
-            <metadata_license>LicenseRef-Proprietary</metadata_license>
-            <project_license>LicenseRef-Proprietary</project_license>
-            <name>FFmpeg</name>
+            <metadata_license>MIT</metadata_license>
+            <project_license>MIT</project_license>
+            <name>FFmpeg Lite</name>
             <summary>On-device media toolkit — transcode, compress, cut and extract any media with FFmpeg 8</summary>
             <description>
-              <p>FFmpeg is an on-device media studio powered by FFmpeg 8 via PyAV:</p>
+              <p>FFmpeg Lite is an on-device media studio powered by FFmpeg 8 via PyAV:</p>
               <ul>
                 <li>Transcode and compress video/audio with quality presets and target-size control</li>
                 <li>Cut/trim with stream-copy (instant) or frame-accurate re-encode</li>
@@ -359,7 +359,7 @@ jobs:
               --maintainer "Kiri Research Labs <support@kiri.ng>" \
               --url "https://kiri.ng" \
               --category "video" \
-              -p build/dist/FFmpeg.deb \
+              -p build/dist/FFmpeg_Lite.deb \
               -C pkg_root .
 
           # Build rich .rpm using fpm
@@ -369,7 +369,7 @@ jobs:
               --maintainer "Kiri Research Labs <support@kiri.ng>" \
               --url "https://kiri.ng" \
               --category "Utility" \
-              -p build/dist/FFmpeg.rpm \
+              -p build/dist/FFmpeg_Lite.rpm \
               -C pkg_root .
 
       - name: Upload directly to GitHub Release

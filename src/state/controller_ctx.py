@@ -17,6 +17,7 @@ class ControllerMethods:
 
     navigate: Callable[[str], None] = lambda view: None
     select_tab: Callable[[int], None] = lambda tab: None
+    handle_system_back: Callable[[], None] = lambda: None
     pick_media_for: Callable[[str], Any] = lambda target: None
     start_job: Callable[[Job], Any] = lambda job: None
     cancel_job: Callable[[str], Any] = lambda job_id: None
