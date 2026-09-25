@@ -20,6 +20,35 @@ from core.tokens import (
 )
 from state.controller_ctx import use_controller
 
+_VIDEO_CONTAINERS = ("mp4", "mkv", "mov", "webm", "avi")
+_AUDIO_CONTAINERS = ("mp3", "m4a", "flac", "wav")
+_IMAGE_CONTAINERS = ("jpg", "png", "webp")
+
+
+def _containers_for(kind: str) -> tuple[str, ...]:
+    """Output containers that make sense for the kind of file being converted."""
+    return {
+        "image": _IMAGE_CONTAINERS,
+        "audio": _AUDIO_CONTAINERS,
+        "video": _VIDEO_CONTAINERS,
+    }.get(kind, _VIDEO_CONTAINERS)
+
+
+_CONTAINER_LABELS = {
+    "mp4": "MP4 (Universal standard)",
+    "mkv": "MKV (Matroska container)",
+    "mov": "MOV (QuickTime / Apple)",
+    "webm": "WebM (Open web video)",
+    "avi": "AVI (Legacy container)",
+    "mp3": "MP3 (Audio only)",
+    "m4a": "M4A (AAC Audio)",
+    "flac": "FLAC (Lossless audio)",
+    "wav": "WAV (PCM audio)",
+    "jpg": "JPEG (Lossy image)",
+    "png": "PNG (Lossless image)",
+    "webp": "WebP (Modern image)",
+}
+
 
 @ft.component
 def ConvertScreen() -> ft.Control:
@@ -54,6 +83,11 @@ def ConvertScreen() -> ft.Control:
     ]
     visible_video = [(key, label) for key, label in video_choices if key in available_video]
 
+    # What kind of file the user picked. Selecting a still image and seeing
+    # "playback speed / H.264 / 4K resolution" was the reported bug — the
+    # controls are now per media kind, not hardwired to video.
+    media_kind = info.kind if info is not None else "video"
+
     # State variables
     container_fmt, set_container_fmt = ft.use_state("mp4")
     v_codec, set_v_codec = ft.use_state("libx264")
@@ -69,6 +103,9 @@ def ConvertScreen() -> ft.Control:
         if v_codec in available_video
         else (available_video[0] if available_video else v_codec)
     )
+    default_container = {"image": "png", "audio": "m4a", "video": "mp4"}.get(media_kind, "mp4")
+    allowed_containers = _containers_for(media_kind)
+    chosen_container = container_fmt if container_fmt in allowed_containers else default_container
 
     def _start_conversion(_):
         if not media_path:
@@ -84,7 +121,7 @@ def ConvertScreen() -> ft.Control:
         elif res_choice == "480p":
             scale_w = 854
 
-        out_name = f"{Path(media_path).stem}_converted.{container_fmt}"
+        out_name = f"{Path(media_path).stem}_converted.{chosen_container}"
         out_path = str(get_temp_dir() / out_name)
 
         job = Job(
@@ -92,7 +129,7 @@ def ConvertScreen() -> ft.Control:
             input_path=media_path,
             output_path=out_path,
             params={
-                "container": container_fmt,
+                "container": chosen_container,
                 "video_codec": chosen_video,
                 "audio_codec": a_codec,
                 "crf": int(crf_val),
@@ -112,13 +149,8 @@ def ConvertScreen() -> ft.Control:
     ]
 
     container_options = [
-        ft.DropdownOption(key="mp4", text="MP4 (Universal standard)"),
-        ft.DropdownOption(key="mkv", text="MKV (Matroska container)"),
-        ft.DropdownOption(key="mov", text="MOV (QuickTime / Apple)"),
-        ft.DropdownOption(key="webm", text="WebM (Open web video)"),
-        ft.DropdownOption(key="avi", text="AVI (Legacy container)"),
-        ft.DropdownOption(key="mp3", text="MP3 (Audio only)"),
-        ft.DropdownOption(key="m4a", text="M4A (AAC Audio)"),
+        ft.DropdownOption(key=key, text=_CONTAINER_LABELS.get(key, key.upper()))
+        for key in allowed_containers
     ]
 
     return ft.ListView(
@@ -173,61 +205,71 @@ def ConvertScreen() -> ft.Control:
             # Target Format Section
             section_header("Output Format", "Select destination container", is_dark=is_dark),
             ft.Dropdown(
-                value=container_fmt,
+                value=chosen_container,
                 options=container_options,
                 on_select=lambda e: set_container_fmt(e.control.value),
             ),
-            # Video Codec Chips — populated from the measured encoder set.
-            section_header("Video Codec", "Encoding algorithm", is_dark=is_dark),
+            # Video-only sections — never shown for a still image or a pure
+            # audio file (reported bug: an image showed H.264/4K controls).
             *(
                 [
-                    ft.Row(
-                        controls=[
-                            ft.Chip(
-                                label=ft.Text(label),
-                                selected=chosen_video == key,
-                                on_select=lambda _, k=key: set_v_codec(k),
+                    # Video Codec Chips — populated from the measured encoder set.
+                    section_header("Video Codec", "Encoding algorithm", is_dark=is_dark),
+                    *(
+                        [
+                            ft.Row(
+                                controls=[
+                                    ft.Chip(
+                                        label=ft.Text(label),
+                                        selected=chosen_video == key,
+                                        on_select=lambda _, k=key: set_v_codec(k),
+                                    )
+                                    for key, label in visible_video
+                                ],
+                                wrap=True,
+                                spacing=SPACE_SM,
                             )
-                            for key, label in visible_video
-                        ],
-                        wrap=True,
-                        spacing=SPACE_SM,
-                    )
-                ]
-                if visible_video
-                else [
-                    card_container(
-                        content=ft.Text(
-                            "This device's FFmpeg build has no video encoders, "
-                            "so it can copy media but cannot re-encode it.",
-                            size=FONT_SM,
-                            color=muted,
-                        ),
-                        padding=SPACE_MD,
-                        border_radius=RADIUS_LG,
+                        ]
+                        if visible_video
+                        else [
+                            card_container(
+                                content=ft.Text(
+                                    "This device's FFmpeg build has no video encoders, "
+                                    "so it can copy media but cannot re-encode it.",
+                                    size=FONT_SM,
+                                    color=muted,
+                                ),
+                                padding=SPACE_MD,
+                                border_radius=RADIUS_LG,
+                                is_dark=is_dark,
+                            )
+                        ]
+                    ),
+                    # Quality & CRF
+                    section_header(
+                        "Compression Quality",
+                        f"Constant Rate Factor: {crf_val} (Lower is higher quality)",
                         is_dark=is_dark,
-                    )
+                    ),
+                    ft.Slider(
+                        value=float(crf_val),
+                        min=15,
+                        max=35,
+                        divisions=20,
+                        on_change=lambda e: set_crf_val(int(e.control.value)),
+                    ),
+                    # Resolution
+                    section_header(
+                        "Output Resolution", "Optionally downscale video", is_dark=is_dark
+                    ),
+                    ft.Dropdown(
+                        value=res_choice,
+                        options=res_options,
+                        on_select=lambda e: set_res_choice(e.control.value),
+                    ),
                 ]
-            ),
-            # Quality & CRF
-            section_header(
-                "Compression Quality",
-                f"Constant Rate Factor: {crf_val} (Lower is higher quality)",
-                is_dark=is_dark,
-            ),
-            ft.Slider(
-                value=float(crf_val),
-                min=15,
-                max=35,
-                divisions=20,
-                on_change=lambda e: set_crf_val(int(e.control.value)),
-            ),
-            # Resolution
-            section_header("Output Resolution", "Optionally downscale video", is_dark=is_dark),
-            ft.Dropdown(
-                value=res_choice,
-                options=res_options,
-                on_select=lambda e: set_res_choice(e.control.value),
+                if media_kind == "video"
+                else []
             ),
             # Action Button
             ft.FilledButton(

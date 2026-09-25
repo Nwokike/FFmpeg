@@ -53,6 +53,27 @@ class MediaStreamInfo:
         return self.stream_type in ("subtitle", "text")
 
 
+# Container names PyAV reports for still images, plus the video codecs that in
+# practice only ever carry a single frame. Used by MediaInfo.kind.
+_IMAGE_FORMATS = frozenset(
+    {
+        "image2",
+        "image2pipe",
+        "png_pipe",
+        "jpeg_pipe",
+        "mjpeg_pipe",
+        "webp_pipe",
+        "bmp_pipe",
+        "gif",
+        "webp",
+        "png",
+        "jpeg",
+        "jpg",
+    }
+)
+_IMAGE_CODECS = frozenset({"png", "mjpeg", "bmp", "webp", "gif"})
+
+
 @dataclass
 class MediaInfo:
     """Full container overview and probed streams for a media file."""
@@ -82,6 +103,33 @@ class MediaInfo:
             if s.stream_type == "audio":
                 return s
         return None
+
+    @property
+    def kind(self) -> str:
+        """What the file actually is: ``"image" | "video" | "audio" | "unknown"``.
+
+        Screens use this to stop offering video controls for a still image and
+        audio controls for a picture-only file. Cover art is deliberately
+        ignored — an MP3 carries an ``attached_pic`` video stream, but that
+        does not make it a video.
+        """
+        video = self.video_stream
+        audio = self.audio_stream
+        has_picture = video is not None and not bool((video.disposition or {}).get("attached_pic"))
+
+        if has_picture:
+            # A still is a single frame: no duration, or an image container.
+            if audio is None and (
+                self.duration_s <= 0.05
+                or self.format_name in _IMAGE_FORMATS
+                or (video.codec_name or "").lower() in _IMAGE_CODECS
+            ):
+                return "image"
+            return "video"
+
+        if audio is not None:
+            return "audio"
+        return "unknown"
 
 
 @ft.observable

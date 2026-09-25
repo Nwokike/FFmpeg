@@ -164,49 +164,93 @@ def FiltersScreen() -> ft.Control:
         )
         ctrl.start_job(job)
 
+    media_kind = info.kind if info is not None else "video"
+    header = ft.Row(
+        controls=[
+            ft.IconButton(
+                icon=ft.Icons.ARROW_BACK_ROUNDED,
+                on_click=lambda _: ctrl.navigate("dashboard"),
+                tooltip="Back to Dashboard",
+            ),
+            ft.Text("Media Filter Stack", size=FONT_LG, weight=ft.FontWeight.BOLD),
+        ],
+        spacing=SPACE_SM,
+    )
+    file_card = card_container(
+        content=ft.Row(
+            controls=[
+                ft.Icon(ft.Icons.TUNE_ROUNDED, size=32, color=ACCENT_PURPLE),
+                ft.Column(
+                    controls=[
+                        ft.Text(
+                            file_name,
+                            size=FONT_MD,
+                            weight=ft.FontWeight.BOLD,
+                            max_lines=1,
+                            overflow=ft.TextOverflow.ELLIPSIS,
+                        ),
+                        ft.Text(f"Size: {file_size_str}", size=FONT_SM, color=muted),
+                    ],
+                    spacing=2,
+                    expand=True,
+                ),
+                ft.OutlinedButton("Change", on_click=lambda _: ctrl.pick_media_for("filters")),
+            ],
+            alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+        ),
+        padding=SPACE_MD,
+        border_radius=RADIUS_LG,
+        is_dark=is_dark,
+    )
+
+    if media_kind != "video":
+        # Every control below is video-only (speed/rotation/scale/overlay).
+        # Offering them for a still image or an audio file was the reported
+        # bug — say so instead of rendering controls that do nothing.
+        kind_label = {"image": "an image", "audio": "an audio file"}.get(media_kind, "this file")
+        return ft.ListView(
+            controls=[
+                header,
+                file_card,
+                card_container(
+                    content=ft.Column(
+                        controls=[
+                            ft.Icon(ft.Icons.INFO_OUTLINE_ROUNDED, size=28, color=muted),
+                            ft.Text(
+                                "Video filters aren't available here",
+                                size=FONT_MD,
+                                weight=ft.FontWeight.W_600,
+                            ),
+                            ft.Text(
+                                f"{kind_label.capitalize()} has no playback speed, "
+                                "rotation, crop or video denoise to change. "
+                                "Use Audio Studio for audio, or Extract for still frames.",
+                                size=FONT_SM,
+                                color=muted,
+                            ),
+                        ],
+                        horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                        spacing=SPACE_SM,
+                    ),
+                    padding=SPACE_MD,
+                    border_radius=RADIUS_LG,
+                    is_dark=is_dark,
+                ),
+                ft.FilledButton(
+                    "Pick a video instead",
+                    icon=ft.Icons.VIDEO_LIBRARY_OUTLINED,
+                    height=48,
+                    on_click=lambda _: ctrl.pick_media_for("filters"),
+                ),
+            ],
+            spacing=SPACE_MD,
+            expand=True,
+        )
+
     return ft.ListView(
         controls=[
-            # Header
-            ft.Row(
-                controls=[
-                    ft.IconButton(
-                        icon=ft.Icons.ARROW_BACK_ROUNDED,
-                        on_click=lambda _: ctrl.navigate("dashboard"),
-                        tooltip="Back to Dashboard",
-                    ),
-                    ft.Text("Media Filter Stack", size=FONT_LG, weight=ft.FontWeight.BOLD),
-                ],
-                spacing=SPACE_SM,
-            ),
-            # Input file card
-            card_container(
-                content=ft.Row(
-                    controls=[
-                        ft.Icon(ft.Icons.TUNE_ROUNDED, size=32, color=ACCENT_PURPLE),
-                        ft.Column(
-                            controls=[
-                                ft.Text(
-                                    file_name,
-                                    size=FONT_MD,
-                                    weight=ft.FontWeight.BOLD,
-                                    max_lines=1,
-                                    overflow=ft.TextOverflow.ELLIPSIS,
-                                ),
-                                ft.Text(f"Size: {file_size_str}", size=FONT_SM, color=muted),
-                            ],
-                            spacing=2,
-                            expand=True,
-                        ),
-                        ft.OutlinedButton(
-                            "Change", on_click=lambda _: ctrl.pick_media_for("filters")
-                        ),
-                    ],
-                    alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
-                ),
-                padding=SPACE_MD,
-                border_radius=RADIUS_LG,
-                is_dark=is_dark,
-            ),
+            header,
+            file_card,
             # Speed / Tempo
             section_header("Playback Speed", f"{speed_val}x playback multiplier", is_dark=is_dark),
             ft.Row(
