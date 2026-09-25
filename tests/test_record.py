@@ -106,8 +106,15 @@ def test_record_rejects_non_urls(synthetic_media):
         EngineService.record("not-a-url", str(synthetic_media.dir / "x.mp4"))
 
 
-def test_record_unknown_protocol_is_friendly():
-    with pytest.raises(ValueError, match=r"protocol|Couldn't|read"):
+def test_record_unknown_protocol_is_friendly(monkeypatch):
+    def raise_unknown_protocol(*_args, **_kwargs):
+        raise av.error.ProtocolNotFoundError("gopher", "unknown protocol")
+
+    # Do not let this unit test depend on a real network route; CI can turn an
+    # unknown gopher URL into a slow TCP timeout instead of a protocol error.
+    monkeypatch.setattr(av, "open", raise_unknown_protocol)
+
+    with pytest.raises(ValueError, match=r"protocol"):
         EngineService.record(
             "gopher://example.com/feed",
             "unused_out.mp4",
