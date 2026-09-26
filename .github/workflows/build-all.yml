@@ -85,20 +85,16 @@ jobs:
               print("\n".join(f"  - {e}" for e in errs), file=sys.stderr)
               sys.exit(1)
           PY
-      - name: AdMob closed-testing/production ID guard
+      - name: AdMob production ID guard
         run: |
           set -euo pipefail
           if [[ "$GITHUB_REF" == refs/tags/* ]]; then
             if grep -q "3940256099942544" pyproject.toml; then
-              if [[ "$GITHUB_REF_NAME" == "v1.0.0" ]]; then
-                echo "::warning::v1.0.0 is a closed-testing build and intentionally uses Google test AdMob units. Swap production IDs before the Play production release."
-              else
-                echo "::error::Google test AdMob IDs are forbidden for production tags. Run: uv run python tools/admob.py swap-ids --mode prod --app-id ... --banner ... --interstitial ..."
-                exit 1
-              fi
+              echo "::error::Google test AdMob IDs are forbidden on release tags. Put the production App ID in pyproject.toml (com.google.android.gms.ads.APPLICATION_ID) and keep the production unit IDs in src/core/constants.py."
+              exit 1
             fi
           elif grep -q "3940256099942544" pyproject.toml; then
-            echo "::warning::Test AdMob IDs in use (expected for PR/closed-test builds)"
+            echo "::warning::Test AdMob IDs in use (expected for PR builds)"
           fi
 
   # ─── 0. Create Release Tag & Placeholder ───────────────

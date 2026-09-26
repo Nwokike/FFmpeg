@@ -53,17 +53,16 @@ UPDATE_CONFIG_URL = "https://raw.githubusercontent.com/Nwokike/FFmpeg/main/versi
 GITHUB_RELEASE_URL = "https://github.com/Nwokike/FFmpeg/releases/latest"
 PLAYSTORE_URL = "https://play.google.com/store/apps/details?id=ng.kiri.ffmpeg"
 
-# AdMob — Google test App ID (matches AdService USE_TEST_IDS=True). The
-# [tool.flet.android.meta_data] block in pyproject.toml carries the matching
-# APPLICATION_ID; swap all three files at release with:
-#   uv run python tools/admob.py swap-ids --mode prod --app-id … --banner … --interstitial …
-# (the CI AdMob guard fails tag builds while the test App ID is still present.)
+# AdMob — Google test units (fallback only: AdService.USE_TEST_IDS is False
+# and the PROD IDs below are filled, so test units are never served). The
+# [tool.flet.android.meta_data] block in pyproject.toml must carry the
+# matching production APPLICATION_ID — the CI AdMob guard fails tag builds
+# while a test App ID is present there.
 ADMOB_APP_ID_TEST = "ca-app-pub-3940256099942544~3347511713"
 ADMOB_BANNER_UNIT_TEST = "ca-app-pub-3940256099942544/9214589741"
 ADMOB_INTERSTITIAL_UNIT_TEST = "ca-app-pub-3940256099942544/1033173712"
 
-# Production units — filled by tools/admob.py swap-ids --mode prod (empty = unset;
-# AdService falls back to the test IDs while these are blank).
+# Production units (blank = AdService falls back to the test IDs above).
 ADMOB_APP_ID_PROD = "ca-app-pub-5679949845754640~8554716742"
 ADMOB_BANNER_UNIT_PROD = "ca-app-pub-5679949845754640/3222499013"
 ADMOB_INTERSTITIAL_UNIT_PROD = "ca-app-pub-5679949845754640/5194056233"

@@ -60,10 +60,25 @@ def _shell_body(
     View's column so Flutter scroll views receive valid flex constraints.
     """
     is_dark = is_dark_mode(ft.context.page, app_state)
+    # SafeArea has no bottom/left/right fields — those names silently bind to
+    # LayoutControl's absolute-position offsets (Optional[Number]), so passing
+    # False there ships bools into Dart double? fields ("type 'bool' is not a
+    # subtype of type 'double?'" storm). The avoid_intrusions_* flags are the
+    # real API: top inset only, banners stay full-width.
     top_bar = (
-        ft.SafeArea(content=header, bottom=False, left=False, right=False)
+        ft.SafeArea(
+            content=header,
+            avoid_intrusions_bottom=False,
+            avoid_intrusions_left=False,
+            avoid_intrusions_right=False,
+        )
         if header is not None
-        else ft.SafeArea(content=ft.Container(height=0), bottom=False, left=False, right=False)
+        else ft.SafeArea(
+            content=ft.Container(height=0),
+            avoid_intrusions_bottom=False,
+            avoid_intrusions_left=False,
+            avoid_intrusions_right=False,
+        )
     )
     return ft.Container(
         content=ft.Column(

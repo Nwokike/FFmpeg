@@ -155,7 +155,7 @@ def job_card_view(job: Job, is_dark: bool = True) -> ft.Control:
         content_rows.extend(
             [
                 ft.ProgressBar(
-                    value=max(0.0, min(job.progress or 0.0, 1.0)),
+                    value=max(0.0, min(float(job.progress or 0.0), 1.0)),
                     color=PRIMARY,
                     bgcolor=bg_status,
                 ),

@@ -34,8 +34,8 @@ except ImportError:
 class AdService:
     """Coordinates Banner and Interstitial ads with Google UMP consent."""
 
-    # Swapped by tools/admob.py swap-ids (test ↔ prod) — a REAL branch: the
-    # flag now decides which unit IDs are served, and empty PROD IDs never win.
+    # test ↔ prod switch — a REAL branch: the flag decides which unit IDs are
+    # served, and empty PROD IDs never win. Production is the shipped default.
     USE_TEST_IDS = False
     INTERSTITIAL_COOLDOWN_SEC = 90.0
 

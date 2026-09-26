@@ -123,6 +123,23 @@ def _can_capture(page: ft.Page) -> bool:
         return False
 
 
+def _is_mounted(ctrl) -> bool:
+    """True once Flet has attached the control to the page.
+
+    Control has no ``_page`` attribute in Flet 1.0.1 — ``getattr(ctrl, "_page")``
+    is always None, which made every guard silently false (camera never starts,
+    teardown never runs). The ``page`` property walks the parent chain and is
+    the canonical probe: it raises RuntimeError while unmounted.
+    """
+    if ctrl is None:
+        return False
+    try:
+        _ = ctrl.page  # property walk is the probe; raises until attached
+        return True
+    except (RuntimeError, AttributeError):
+        return False
+
+
 @ft.component
 def CaptureScreen() -> ft.Control:
     """Photo / Video / Mic capture with just-in-time permissions and an after-capture hand-off."""
@@ -197,6 +214,20 @@ def CaptureScreen() -> ft.Control:
         page.run_task(_teardown)
 
     ft.use_effect(lambda: _cleanup, [])
+
+    def _apply_requested_mode():
+        """Apply the pending_capture_mode a tool requested before routing here.
+
+        Registered before the platform early-return so hook order is identical
+        on every render path, and keyed on the observable field so a second
+        tool request re-applies the mode (the value clears once consumed).
+        """
+        requested = app_state.pending_capture_mode
+        if requested in ("photo", "video", "mic") and requested != mode:
+            set_mode(requested)
+        return None
+
+    ft.use_effect(_apply_requested_mode, [app_state.pending_capture_mode])
 
     # ── Desktop / unsupported platform fallback ────────────────────────────
 
@@ -352,20 +383,11 @@ def CaptureScreen() -> ft.Control:
             logger.exception("Camera creation failed")
             show_snack(page, f"Camera unavailable: {exc}", bgcolor=ERROR)
 
-    def _is_mounted(ctrl) -> bool:
-        """True once Flet has attached the control to the page."""
-        if ctrl is None:
-            return False
-        try:
-            return getattr(ctrl, "_page", None) is not None
-        except Exception:
-            return False
-
     async def _wait_for_mount(cam, timeout_s: float = 6.0) -> bool:
         """Wait until a freshly created Camera control is attached to the page.
 
-        Checking ``cam._page`` is safe; accessing the ``cam.page`` property
-        directly raises RuntimeError when unmounted.
+        ``_is_mounted`` probes the canonical ``Control.page`` property, which
+        raises RuntimeError until the control is in the page tree.
         """
         deadline = time.monotonic() + timeout_s
         while not _is_mounted(cam):
@@ -514,15 +536,6 @@ def CaptureScreen() -> ft.Control:
             ctrl.navigate(target)
             return
         show_snack(page, "Capture ready — pick a tool or save it", bgcolor=SUCCESS)
-
-    def _apply_requested_mode():
-        """Apply the pending_capture_mode a tool requested before routing here."""
-        requested = app_state.pending_capture_mode
-        if requested in ("photo", "video", "mic") and requested != mode:
-            set_mode(requested)
-        return None
-
-    ft.use_effect(_apply_requested_mode, [])
 
     # ── Photo ───────────────────────────────────────────────────────────────
 
@@ -917,7 +930,7 @@ def CaptureScreen() -> ft.Control:
                         spacing=SPACE_SM,
                     ),
                     ft.ProgressBar(
-                        value=level if recording else 0.0,
+                        value=float(level or 0.0) if recording else 0.0,
                         height=8,
                         color=ACCENT_RED if level > 0.7 else PRIMARY,
                     ),

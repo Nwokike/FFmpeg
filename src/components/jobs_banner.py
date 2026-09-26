@@ -78,7 +78,9 @@ def jobs_banner_view(active_job: Job | None, is_dark: bool = True) -> ft.Control
                     alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
                 ),
                 ft.ProgressBar(
-                    value=None if is_live else max(0.0, min(active_job.progress, 1.0)),
+                    value=None
+                    if is_live
+                    else max(0.0, min(float(active_job.progress or 0.0), 1.0)),
                     color=PRIMARY,
                     bgcolor="#242930" if is_dark else "#E5E7EB",
                 ),

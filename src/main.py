@@ -16,6 +16,7 @@ import flet as ft
 
 from app_shell import AppShell
 from components.update_dialog import build_update_dialog
+from core.back_stack import background_app, ensure_back_underlay, restore_top_view
 from core.constants import APP_NAME, APP_VERSION
 from core.engine_probe import probe as engine_probe
 from core.logger_handler import MemoryLogHandler
@@ -183,8 +184,19 @@ async def main(page: ft.Page) -> None:
 
     # Global error handler — logs every Flet framework exception and tells the
     # user where to find it (previously log-only: frozen UI with no feedback).
+    # Throttled: each snack triggers a page update, and a page update
+    # re-serializes the control that errored — without a cooldown one bad
+    # property turns into a self-sustaining error storm (the SafeArea
+    # bool→double incident: ~50 errors/second).
+    _last_error_snack = 0.0
+
     def _on_global_error(e):
+        nonlocal _last_error_snack
         logger.error("Unhandled Flet error: %s", e)
+        now = time.monotonic()
+        if now - _last_error_snack < 10.0:
+            return
+        _last_error_snack = now
         show_snack(
             page,
             "Something went wrong — see Settings → Activity Terminal.",
@@ -886,25 +898,41 @@ async def main(page: ft.Page) -> None:
         storage.set("theme_mode", mode_str)
         page.update()
 
-    def handle_system_back() -> None:
+    def handle_system_back(pop_pending: bool = False) -> None:
         """Map Android/system back onto in-app navigation, never app teardown.
 
-        The flat route table means Flet's own Router pop handler has no parent
-        view to walk to, so the event fell through to the host and closed the
-        app from every tool screen. Mirror Sherlock/DDGS: tool → dashboard,
-        dashboard tab → Home, root → swallow.
+        page.dart's ``_handleSystemPopRoute`` only emits ``view_pop`` when the
+        stack is >= 2 — the /blank underlay (core.back_stack, re-pinned before
+        every flush below) guarantees the event arrives. Dart has already
+        marked the top view popped by the time we run, so every branch that
+        does not navigate must re-key the view back in (restore_top_view) when
+        pop_pending is set. Root back backgrounds the task so running jobs
+        finish — it never finishes the activity.
         """
         if not state.has_accepted_terms:
-            return  # Onboarding is a gate; back must not exit the flow
+            if pop_pending:
+                restore_top_view(page)  # Onboarding is a gate; back must not exit it
+            return
         if page.route != "/":
+            if pop_pending:
+                # Keeps the screen visible while the result-exit interstitial
+                # loads; the route change below clears the filter regardless.
+                restore_top_view(page)
             navigate("dashboard")
         elif state.selected_tab != 0:
             select_tab(0)
-        # Root/Home: nothing above us to leave — swallow the event.
+            if pop_pending:
+                restore_top_view(page)
+        elif pop_pending:
+            # Home root — background the task (jobs keep processing).
+            restore_top_view(page)
+            background_app(page)
 
-    def _on_system_back(_e=None) -> None:
+    def _on_system_back(e=None) -> None:
         try:
-            handle_system_back()
+            # A real system/swipe pop arrives with an event (Dart already
+            # marked the top view popped); ControllerMethods callers pass none.
+            handle_system_back(pop_pending=e is not None)
         finally:
             if not page.views:
                 # Flet removed the root view unexpectedly; log loudly so a
@@ -1012,6 +1040,23 @@ async def main(page: ft.Page) -> None:
     # own pop handler delegates to it (flat routes otherwise close the app).
     page.on_view_pop = _on_system_back
 
+    # Keep the /blank back-underlay pinned: the Router replaces page.views
+    # wholesale on every route change, so re-assert it in every outgoing
+    # flush — boot, navigation, deep links and component re-renders all go
+    # through page.update (component updates drain via control.update() →
+    # page.update; single-view stacks would let page.dart finish the activity
+    # without ever emitting view_pop).
+    _raw_page_update = page.update
+
+    def _update_with_underlay(*args, **kwargs):
+        try:
+            ensure_back_underlay(page)
+        except Exception:
+            logger.exception("Back underlay insert failed")
+        return _raw_page_update(*args, **kwargs)
+
+    page.update = _update_with_underlay
+
     # Mount UI — render_views: ft.Router(manage_views=True) emits the ft.View
     # list that becomes page.views (back-stack, swipe-back, deep-link entry).
     def _mount_ui() -> None:
@@ -1030,6 +1075,10 @@ async def main(page: ft.Page) -> None:
         )
 
     _mount_ui()
+    # Belt-and-braces: render_views' internal flush already ran through the
+    # wrapper, but pin the underlay explicitly so the very first back press
+    # cannot race an unwrapped boot path.
+    ensure_back_underlay(page)
 
 
 if __name__ == "__main__":
