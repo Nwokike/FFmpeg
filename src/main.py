@@ -422,27 +422,70 @@ async def main(page: ft.Page) -> None:
         # replaces the gate without rebuilding page.views (and without losing
         # the Router's back-stack/deep-link state).
 
-    async def pick_media_for(target_view: str) -> None:
-        path = await media_io.pick_media_file()
+    async def _load_path_into(target_view: str, path: str | None) -> None:
         if path is None:
             logger.info("Media pick cancelled or returned nothing")
             return
-        if path:
-            try:
-                # Sync PyAV probe off the UI loop — large files janked the UI here
-                info = await asyncio.to_thread(engine.probe, path)
-                state.current_media_path = path
-                state.current_media_info = info
-                navigate(target_view)
-            except Exception as exc:
-                logger.exception("Media probe failed")
-                page.show_dialog(
-                    ft.AlertDialog(
-                        title=ft.Text("Media Error"),
-                        content=ft.Text(f"Could not inspect media file: {exc}"),
-                        actions=[ft.TextButton("OK", on_click=lambda _: page.pop_dialog())],
-                    )
+        try:
+            # Sync PyAV probe off the UI loop — large files janked the UI here
+            info = await asyncio.to_thread(engine.probe, path)
+            state.current_media_path = path
+            state.current_media_info = info
+            navigate(target_view)
+        except Exception as exc:
+            logger.exception("Media probe failed")
+            page.show_dialog(
+                ft.AlertDialog(
+                    title=ft.Text("Media Error"),
+                    content=ft.Text(f"Could not inspect media file: {exc}"),
+                    actions=[ft.TextButton("OK", on_click=lambda _: page.pop_dialog())],
                 )
+            )
+
+    async def _pick_file_for(target_view: str) -> None:
+        await _load_path_into(target_view, await media_io.pick_media_file())
+
+    async def pick_media_for(target_view: str) -> None:
+        """Offer Files / Camera / Mic instead of only the system picker.
+
+        Capture used to be a dead-end screen; every tool now starts a source
+        choice, and a Camera/Mic take returns to this same tool via
+        ``state.pending_media_target`` once it has been probed.
+        """
+
+        def _close_and(action) -> None:
+            with contextlib.suppress(Exception):
+                page.pop_dialog()
+            action()
+
+        def _files(_e=None):
+            def go():
+                page.run_task(_pick_file_for, target_view)
+
+            _close_and(go)
+
+        def _capture(mode: str):
+            def go():
+                state.pending_media_target = target_view
+                state.pending_capture_mode = mode
+                navigate("capture")
+
+            _close_and(go)
+
+        page.show_dialog(
+            ft.AlertDialog(
+                modal=True,
+                title=ft.Text("Choose a source"),
+                content=ft.Text("Where should this input come from?"),
+                actions=[
+                    ft.TextButton("Files", on_click=_files),
+                    ft.FilledButton("Camera", on_click=lambda _: _capture("photo")),
+                    ft.TextButton("Microphone", on_click=lambda _: _capture("mic")),
+                    ft.TextButton("Cancel", on_click=lambda _: page.pop_dialog()),
+                ],
+                actions_alignment=ft.MainAxisAlignment.END,
+            )
+        )
 
     # ── Serial job queue (one encode at a time; ordering + cancel ownership) ──
 

@@ -498,7 +498,25 @@ def CaptureScreen() -> ft.Control:
         app_state.current_media_info = info
         set_captured_path(path)
         set_captured_info(info)
+        # If a tool sent us here, return the take to that tool rather than
+        # dead-ending on the after-capture card.
+        target = app_state.pending_media_target
+        if target:
+            app_state.pending_media_target = None
+            app_state.pending_capture_mode = None
+            show_snack(page, "Capture loaded", bgcolor=SUCCESS)
+            ctrl.navigate(target)
+            return
         show_snack(page, "Capture ready — pick a tool or save it", bgcolor=SUCCESS)
+
+    def _apply_requested_mode():
+        """Apply the pending_capture_mode a tool requested before routing here."""
+        requested = app_state.pending_capture_mode
+        if requested in ("photo", "video", "mic") and requested != mode:
+            set_mode(requested)
+        return None
+
+    ft.use_effect(_apply_requested_mode, [])
 
     # ── Photo ───────────────────────────────────────────────────────────────
 

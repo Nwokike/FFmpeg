@@ -186,6 +186,11 @@ class AppState:
         # invisible to Flet's reactivity, so without this observable banners
         # stayed collapsed until an unrelated page update.
         self.ads_ready: bool = False
+        # Which tool opened the source picker. When set, a camera/mic take
+        # returns straight to that tool instead of dead-ending in Capture.
+        self.pending_media_target: str | None = None
+        # Requested Capture tab ("photo" | "mic") for that same flow.
+        self.pending_capture_mode: str | None = None
         self.update_available: bool = False
         self.update_data: dict[str, Any] | None = None
         self.probe_info: EngineProbe | None = None
