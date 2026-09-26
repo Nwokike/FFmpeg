@@ -118,6 +118,7 @@ adaptive_icon_background = "#0f1114"
 [tool.flet.cleanup]
 app_files = [
     "tests",
+    "docs",
     "screenshots",
     "README.md",
     "ui-spike",

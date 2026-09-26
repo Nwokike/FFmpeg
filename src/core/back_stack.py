@@ -48,15 +48,29 @@ def _unwrap(control):
         return control
 
 
+def _views(page) -> list:
+    """Normalize ``page.views`` to a plain list.
+
+    ``render_views`` assigns the lazy root Component (``_b`` is None until
+    the first flush executes the body), and Flet itself reads views through
+    ``unwrap_component`` — indexing the raw value raises ``'Component' object
+    is not subscriptable``. Before the body runs, or if the value is anything
+    else, return [] so callers skip; the next flush pins the underlay.
+    """
+    views = _unwrap(page.views)
+    return views if isinstance(views, list) else []
+
+
 def ensure_back_underlay(page) -> None:
     """Pin an empty ``/blank`` view at ``views[0]`` (idempotent).
 
     The Router rebuilds ``page.views`` wholesale on every route change, so
     ``main.py`` re-runs this inside a ``page.update`` wrapper before every
     outgoing flush — boot, navigation, deep links and component re-renders
-    all pass through it. Skipped while ``views`` is empty (pre-render).
+    all pass through it. Skips while views are empty or still the lazy boot
+    Component (see ``_views``).
     """
-    views = page.views
+    views = _views(page)
     if not views:
         return
     if getattr(_unwrap(views[0]), "route", None) == UNDERLAY_ROUTE:
@@ -66,7 +80,7 @@ def ensure_back_underlay(page) -> None:
 
 def top_content_view(page):
     """Top view excluding the /blank underlay, or None."""
-    for view in reversed([_unwrap(v) for v in page.views]):
+    for view in reversed([_unwrap(v) for v in _views(page)]):
         if getattr(view, "route", None) != UNDERLAY_ROUTE:
             return view
     return None

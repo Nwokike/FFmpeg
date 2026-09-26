@@ -17,6 +17,7 @@ Verified facts these tests guard:
 from __future__ import annotations
 
 import flet as ft
+from flet.components.component import Renderer
 
 from core.back_stack import (
     UNDERLAY_ROUTE,
@@ -82,6 +83,34 @@ def test_underlay_reasserted_after_router_replaces_views():
     page.views = [ft.View(route="/convert", controls=[])]  # Router wipe
     ensure_back_underlay(page)
     assert [v.route for v in page.views] == [UNDERLAY_ROUTE, "/convert"]
+
+
+def test_underlay_boot_phase_lazy_component_never_indexed():
+    """render_views assigns the lazy root Component — indexing it raw raised
+    'Component' object is not subscriptable and killed main() at boot."""
+
+    @ft.component
+    def _root():
+        return ft.View(route="/", controls=[])
+
+    page = _Page()
+    page.views = Renderer().render(_root)  # _b is None until the first flush
+    ensure_back_underlay(page)  # must not raise
+    assert top_content_view(page) is None
+    assert restore_top_view(page) is False
+
+
+def test_underlay_pins_into_component_body_once_executed():
+    @ft.component
+    def _root():
+        return [ft.View(route="/", controls=[])]
+
+    page = _Page()
+    comp = Renderer().render(_root)
+    page.views = comp
+    comp._b = [ft.View(route="/", controls=[])]  # first flush executed the body
+    ensure_back_underlay(page)
+    assert [v.route for v in comp._b] == [UNDERLAY_ROUTE, "/"]
 
 
 # ── restore_top_view ─────────────────────────────────────────────────────
