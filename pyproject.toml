@@ -118,14 +118,8 @@ adaptive_icon_background = "#0f1114"
 [tool.flet.cleanup]
 app_files = [
     "tests",
-    "tools",
-    "docs",
     "screenshots",
     "README.md",
-    "LICENSE",
-    "spike.py",
-    "deps-tree.txt",
-    "pinned-deps.txt",
     "ui-spike",
     "src/ui-spike",
 ]

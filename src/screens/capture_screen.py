@@ -180,7 +180,7 @@ def CaptureScreen() -> ft.Control:
                     logger.debug("Recorder cancel on unmount failed: %s", exc)
                 rec.on_stream = None
                 set_rec_paused(False)
-            if cam is not None:
+            if cam is not None and _is_mounted(cam):
                 if recording_ref.current:
                     try:
                         await cam.stop_video_recording()
@@ -352,17 +352,23 @@ def CaptureScreen() -> ft.Control:
             logger.exception("Camera creation failed")
             show_snack(page, f"Camera unavailable: {exc}", bgcolor=ERROR)
 
+    def _is_mounted(ctrl) -> bool:
+        """True once Flet has attached the control to the page."""
+        if ctrl is None:
+            return False
+        try:
+            return getattr(ctrl, "_page", None) is not None
+        except Exception:
+            return False
+
     async def _wait_for_mount(cam, timeout_s: float = 6.0) -> bool:
         """Wait until a freshly created Camera control is attached to the page.
 
-        ``ftc.Camera`` raises ``Control must be added to the page first`` for
-        every native call until Flet has mounted it. Creating the control in
-        ``_prepare_camera`` and immediately calling ``get_available_cameras()``
-        raced the next render, so the phone log showed the error on the first
-        open even though the preview would have worked a frame later.
+        Checking ``cam._page`` is safe; accessing the ``cam.page`` property
+        directly raises RuntimeError when unmounted.
         """
         deadline = time.monotonic() + timeout_s
-        while getattr(cam, "page", None) is None:
+        while not _is_mounted(cam):
             if time.monotonic() >= deadline:
                 return False
             await asyncio.sleep(0.05)
@@ -430,7 +436,7 @@ def CaptureScreen() -> ft.Control:
             # stale ref after the Camera control left the tree produced the
             # "Control must be added to the page first" error on return.
             if camera_ref.current is not None:
-                page.run_task(_cleanup)
+                _cleanup()
             return None
         if not recording:
             if (
@@ -526,7 +532,7 @@ def CaptureScreen() -> ft.Control:
             if cam is None:
                 page.run_task(_prepare_camera)
             return
-        if not camera_inited_ref.current:
+        if not camera_inited_ref.current or not _is_mounted(cam):
             show_snack(page, "Camera is still starting…")
             return
         if taking_ref.current:  # native shutter busy — ignore double taps
@@ -577,7 +583,7 @@ def CaptureScreen() -> ft.Control:
         if recording:
             await _finish_video()
             return
-        if not camera_inited_ref.current:
+        if not camera_inited_ref.current or not _is_mounted(cam):
             show_snack(page, "Camera is still starting…")
             return
         # Video mode initializes the camera WITH audio — gate on the mic grant
@@ -601,7 +607,7 @@ def CaptureScreen() -> ft.Control:
 
     async def _pause_video() -> None:
         cam = camera_ref.current
-        if cam is None:
+        if cam is None or not _is_mounted(cam):
             return
         try:
             if rec_paused:
@@ -630,10 +636,10 @@ def CaptureScreen() -> ft.Control:
 
     def _codec_for(mic_codec_name: str):
         return {
-            "pcm16": AudioEncoder.PCM16BITS,
+            "pcm16": AudioEncoder.WAV,
             "opus": AudioEncoder.OPUS,
             "aac": AudioEncoder.AACLC,
-        }.get(mic_codec_name, AudioEncoder.PCM16BITS)
+        }.get(mic_codec_name, AudioEncoder.WAV)
 
     async def _finish_mic() -> None:
         rec = services.audio_recorder
@@ -642,23 +648,14 @@ def CaptureScreen() -> ft.Control:
         _stop_ticker()
         set_busy(True)
         try:
-            codec_name = mic_codec_ref.current
             out_path = mic_out_ref.current
             returned = await rec.stop_recording()
-            if codec_name == "pcm16":
-                if not chunks_ref.current and returned:
-                    final = returned  # no streamed PCM — use the file mode take
-                else:
-                    rate, ch = _PCM_RATE_CHANNELS[mic_preset_ref.current]
-                    _write_wav(out_path, b"".join(chunks_ref.current), rate, ch)
-                    final = out_path
-            else:
-                final = returned or out_path
+            final = returned or out_path
             set_level(0.0)
-            if final and Path(final).exists():  # noqa: ASYNC240 — trivial stat/exists check
+            if final and Path(final).exists() and Path(final).stat().st_size > 100:  # noqa: ASYNC240
                 await _finalize_capture(final)
             else:
-                show_snack(page, "Recording produced no file", bgcolor=ERROR)
+                show_snack(page, "No audio recorded — hold and speak into the mic", bgcolor=ERROR)
         except Exception as exc:
             logger.exception("Mic stop failed")
             show_snack(page, f"Recording failed: {exc}", bgcolor=ERROR)
@@ -709,15 +706,16 @@ def CaptureScreen() -> ft.Control:
         if codec_name == "pcm16":
             rate, ch = _PCM_RATE_CHANNELS[mic_preset_ref.current]
             ext, bit_rate = "wav", 128000
-            rec.on_stream = _on_mic_stream
-            chunks_ref.current = []
-            chunk_bytes_ref.current = 0
         elif codec_name == "opus":
             rate, ch, ext, bit_rate = 48000, 2, "opus", 96000
-            rec.on_stream = None  # streaming forces PCM16 — file mode instead
         else:
             rate, ch, ext, bit_rate = 44100, 2, "m4a", 128000
-            rec.on_stream = None
+
+        # Direct file mode: native plugin writes the complete audio file
+        # directly without streaming interference.
+        rec.on_stream = None
+        chunks_ref.current = []
+        chunk_bytes_ref.current = 0
 
         mic_codec_ref.current = codec_name
         mic_preset_ref.current = pcm_preset
@@ -727,8 +725,7 @@ def CaptureScreen() -> ft.Control:
         # The recorder's Dart side resolves output_path against its own app-local
         # recordings directory. Feeding it our absolute sandbox path produced
         # `<assets>/data/user/0/.../cache/rec_….wav` and an ENOENT crash. Give it
-        # a bare filename and use whatever path it returns in _finish_mic; our
-        # own WAV chunk writer keeps writing to the absolute temp path.
+        # a bare filename and use whatever path it returns in _finish_mic.
         recording_name = f"rec_{int(time.time())}.{ext}"
         out_path = str(get_temp_dir() / recording_name)
         mic_out_ref.current = out_path

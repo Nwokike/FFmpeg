@@ -15,24 +15,24 @@ def BannerAdView(slot: str = "default") -> ft.Control:
     Each placement needs its own control — a Flet control cannot be mounted in
     two parents at once — so callers pass a slot key. Reads the observable
     ``ads_ready`` flag so slots appear the moment UMP consent settles instead
-    of waiting for an unrelated page update (Sherlock/DGS house pattern).
+    of waiting for an unrelated page update (Sherlock/DDGS house pattern).
     """
     app_state = use_app_state()
     services = use_services()
     _ = app_state.ads_ready  # observable read → re-render on consent flip
     if not services.ads:
-        return ft.Container(height=0, width=0)
+        return ft.Container(height=0, width=0, visible=False)
 
     banner_ctrl = services.ads.get_banner_control(slot)
     if getattr(banner_ctrl, "height", 0) == 0:
-        return ft.Container(height=0, width=0)
+        return ft.Container(height=0, width=0, visible=False)
 
-    # No SPONSORED caption — matches the Sherlock/DGS banner placement, which
-    # keeps the native ad clean inside a full-width centered wrapper.
-    return ft.Container(
-        content=banner_ctrl,
-        alignment=ft.Alignment.CENTER,
-        padding=ft.Padding.only(top=4, bottom=4),
+    # Centered Row matching Sherlock's banner_ad.py — never set alignment on a
+    # wide Container inside a scroll view as it can expand vertically to fill
+    # the parent and break Flutter's scroll layout.
+    return ft.Row(
+        controls=[banner_ctrl],
+        alignment=ft.MainAxisAlignment.CENTER,
     )
 
 

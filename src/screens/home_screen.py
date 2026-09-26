@@ -159,21 +159,6 @@ def HomeScreen() -> ft.Control:
         for k, n, d, ic, col in tools
     ]
 
-    # Recent items list
-    recent_items = app_state.history[:3] if app_state.history else []
-    recent_controls = (
-        [job_card_view(j, is_dark=is_dark) for j in recent_items]
-        if recent_items
-        else [
-            empty_state_view(
-                icon=ft.Icons.AUTO_AWESOME_MOTION_OUTLINED,
-                title="No Recent Conversions",
-                subtitle="Select any tool above to process your first media file.",
-                is_dark=is_dark,
-            )
-        ]
-    )
-
     # Tool grid: chunks of three with a banner between them. The user asked
     # for 3-4 banner slots on Home — after every three tools and one next to
     # Recent Jobs — instead of one buried at the very bottom of the scroll.
@@ -186,8 +171,6 @@ def HomeScreen() -> ft.Control:
                 run_spacing=SPACE_MD,
             )
         )
-        # Skip the trailing grid banner: the Recent Jobs slot sits directly
-        # below it, so two banners back-to-back would look stacked.
         if chunk_idx + 3 < len(tool_controls):
             grid_rows.append(BannerAdView(slot=f"home-grid-{chunk_idx // 3}"))
 

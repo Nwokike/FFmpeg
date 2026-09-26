@@ -50,37 +50,37 @@ def _shell_body(
     app_state: AppState,
     *,
     header: ft.Control | None = None,
-) -> ft.SafeArea:
+) -> ft.Container:
     """Banners run full-width; screen content gets the horizontal gutter.
 
-    The SafeArea is what keeps the brand header and the offline/job strips out
-    of the Android status bar — `page.padding = 0` and `View.padding = 0`
-    previously removed every inset, so the phone rendered the title bar under
-    the notification bar. Dashboard passes ``avoid_bottom=False`` because the
-    NavigationBar owns that inset; tool routes take the bottom inset too.
+    Nav-bar clearance lives INSIDE each dashboard screen's scroll (trailing
+    spacer, sibling pattern). The top status-bar inset is handled by a top-only
+    SafeArea wrapping the header on the dashboard, or a zero-height spacer on
+    tool screens, ensuring the body container remains an Expanded child of
+    View's column so Flutter scroll views receive valid flex constraints.
     """
     is_dark = is_dark_mode(ft.context.page, app_state)
-    return ft.SafeArea(
-        content=ft.Container(
-            content=ft.Column(
-                controls=[
-                    *([header] if header is not None else []),
-                    offline_banner_view(app_state.is_online),
-                    jobs_banner_view(app_state.active_job, is_dark=is_dark),
-                    ft.Container(
-                        content=content,
-                        expand=True,
-                        padding=ft.Padding.symmetric(horizontal=SPACE_MD),
-                    ),
-                ],
-                spacing=0,
-                expand=True,
-            ),
+    top_bar = (
+        ft.SafeArea(content=header, bottom=False, left=False, right=False)
+        if header is not None
+        else ft.SafeArea(content=ft.Container(height=0), bottom=False, left=False, right=False)
+    )
+    return ft.Container(
+        content=ft.Column(
+            controls=[
+                top_bar,
+                offline_banner_view(app_state.is_online),
+                jobs_banner_view(app_state.active_job, is_dark=is_dark),
+                ft.Container(
+                    content=content,
+                    expand=True,
+                    padding=ft.Padding.symmetric(horizontal=SPACE_MD),
+                ),
+            ],
+            spacing=0,
             expand=True,
         ),
-        avoid_intrusions_top=True,
-        avoid_intrusions_bottom=False,
-        maintain_bottom_view_padding=True,
+        expand=True,
     )
 
 

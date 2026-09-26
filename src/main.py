@@ -478,9 +478,21 @@ async def main(page: ft.Page) -> None:
                 title=ft.Text("Choose a source"),
                 content=ft.Text("Where should this input come from?"),
                 actions=[
-                    ft.TextButton("Files", on_click=_files),
-                    ft.FilledButton("Camera", on_click=lambda _: _capture("photo")),
-                    ft.TextButton("Microphone", on_click=lambda _: _capture("mic")),
+                    ft.FilledButton(
+                        "Upload",
+                        icon=ft.Icons.UPLOAD_FILE_ROUNDED,
+                        on_click=_files,
+                    ),
+                    ft.OutlinedButton(
+                        "Camera",
+                        icon=ft.Icons.CAMERA_ALT_ROUNDED,
+                        on_click=lambda _: _capture("photo"),
+                    ),
+                    ft.OutlinedButton(
+                        "Microphone",
+                        icon=ft.Icons.MIC_ROUNDED,
+                        on_click=lambda _: _capture("mic"),
+                    ),
                     ft.TextButton("Cancel", on_click=lambda _: page.pop_dialog()),
                 ],
                 actions_alignment=ft.MainAxisAlignment.END,

@@ -44,7 +44,47 @@ jobs:
       - name: Tests (offline only)
         run: uv run --frozen pytest -m "not live" -q
       - name: Release identity consistency
-        run: uv run --frozen python tools/check_release_consistency.py
+        run: |
+          uv run --frozen python - <<'PY'
+          import json, os, sys, tomllib
+          py = tomllib.load(open("pyproject.toml", "rb"))["project"]["version"]
+          felb = str(tomllib.load(open("pyproject.toml", "rb"))["tool"]["flet"]["build_number"])
+          sys.path.insert(0, "src")
+          from core.constants import BUILD_NUMBER, APP_VERSION
+
+          vj = json.load(open("version.json"))
+          env_v = os.environ.get("BUILD_VERSION", py)
+          env_b = str(os.environ.get("BUILD_NUMBER", felb))
+          errs = []
+
+          if env_v != py:
+              errs.append(f"BUILD_VERSION {env_v!r} != pyproject {py!r}")
+          if APP_VERSION != py:
+              errs.append(f"core.constants.APP_VERSION {APP_VERSION!r} != pyproject {py!r}")
+          if str(BUILD_NUMBER) != env_b:
+              errs.append(f"core.constants.BUILD_NUMBER {BUILD_NUMBER} != BUILD_NUMBER {env_b}")
+          if felb != env_b:
+              errs.append(f"tool.flet.build_number {felb} != BUILD_NUMBER {env_b}")
+
+          def vt(s):
+              return tuple(int(x) for x in s.split("."))
+
+          vj_v = vj["version"]
+          if vj_v == py:
+              if str(vj["build_number"]) != env_b:
+                  errs.append(f"version.json synced to {vj_v} but build_number != {env_b}")
+              else:
+                  print(f"versions synced: {py} (build {env_b})")
+          elif vt(vj_v) < vt(py):
+              print(f"NOTICE: version.json held back at {vj_v}")
+          else:
+              errs.append(f"version.json {vj_v} is ahead of pyproject {py}")
+
+          if errs:
+              print("Version drift:", file=sys.stderr)
+              print("\n".join(f"  - {e}" for e in errs), file=sys.stderr)
+              sys.exit(1)
+          PY
       - name: AdMob closed-testing/production ID guard
         run: |
           set -euo pipefail
