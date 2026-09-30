@@ -130,10 +130,18 @@ _VIDEO_CODEC_ALIASES: dict[str, tuple[str, ...]] = {
     "libx265": ("libx265", "hevc", "x265"),
     "hevc": ("hevc", "libx265", "x265"),
     "x265": ("x265", "libx265", "hevc"),
+    "libsvtav1": ("libsvtav1", "av1"),
+    "av1": ("av1", "libsvtav1"),
     "vp9": ("vp9", "libvpx-vp9", "libvpx"),
     "libvpx-vp9": ("libvpx-vp9", "vp9", "libvpx"),
+    "libvpx": ("libvpx", "vp9", "libvpx-vp9"),
     "mpeg4": ("mpeg4",),
     "mjpeg": ("mjpeg",),
+    "prores": ("prores",),
+    "ffv1": ("ffv1",),
+    "libwebp": ("libwebp",),
+    "png": ("png",),
+    "gif": ("gif",),
 }
 _AUDIO_CODEC_ALIASES: dict[str, tuple[str, ...]] = {
     "aac": ("aac",),
@@ -144,6 +152,11 @@ _AUDIO_CODEC_ALIASES: dict[str, tuple[str, ...]] = {
     "libmp3lame": ("libmp3lame", "mp3"),
     "wav": ("pcm_s16le",),
     "pcm_s16le": ("pcm_s16le",),
+    "pcm_s24le": ("pcm_s24le", "pcm_s16le"),
+    "vorbis": ("vorbis", "libvorbis"),
+    "libvorbis": ("libvorbis", "vorbis"),
+    "ogg": ("vorbis", "libvorbis"),
+    "alac": ("alac",),
     "m4a": ("aac",),
 }
 _VIDEO_CODEC_LABELS = {
@@ -154,8 +167,16 @@ _VIDEO_CODEC_LABELS = {
     "x265": "HEVC",
     "vp9": "VP9",
     "libvpx-vp9": "VP9",
+    "libvpx": "VP9",
+    "libsvtav1": "AV1",
+    "av1": "AV1",
     "mpeg4": "MPEG-4",
     "mjpeg": "MJPEG",
+    "prores": "ProRes",
+    "ffv1": "FFV1",
+    "libwebp": "WebP",
+    "png": "PNG",
+    "gif": "GIF",
 }
 _AUDIO_CODEC_LABELS = {
     "aac": "AAC",
@@ -166,6 +187,11 @@ _AUDIO_CODEC_LABELS = {
     "libmp3lame": "MP3",
     "wav": "WAV",
     "pcm_s16le": "WAV",
+    "pcm_s24le": "WAV 24-bit",
+    "vorbis": "Vorbis",
+    "libvorbis": "Vorbis",
+    "ogg": "Vorbis",
+    "alac": "ALAC",
     "m4a": "AAC",
 }
 
@@ -1632,7 +1658,7 @@ class EngineService:
     def extract_audio(
         input_path: str,
         output_path: str,
-        format_name: str = "mp3",  # mp3, aac, m4a, flac, opus, wav
+        format_name: str = "mp3",  # mp3, aac, m4a, flac, opus, ogg, wav
         bitrate_kbps: int = 192,
         target_lufs: float | None = None,
         channels: int | None = None,
@@ -1653,6 +1679,7 @@ class EngineService:
             "m4a": "aac",
             "flac": "flac",
             "opus": "opus",
+            "ogg": "vorbis",
             "wav": "pcm_s16le",
         }
         requested_format = format_name.lower()

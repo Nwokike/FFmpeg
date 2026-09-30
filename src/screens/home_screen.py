@@ -150,29 +150,28 @@ def HomeScreen() -> ft.Control:
             is_dark=is_dark,
         )
 
-    # Tool grid responsive row
+    # Tool grid — single adaptive ResponsiveRow, not chunked fixed rows.
+    # col={"xs":12,"sm":6,"md":4,"lg":3,"xl":2} lets the framework flow
+    # 1-2-3-4-6 columns as the window widens (wide desktop shows 5-6,
+    # phone shows 1-2).
+    # This is the correct responsive pattern; the prior 3-per-row chunking
+    # forced "3" on every width and inserted banners as row separators.
     tool_controls = [
         ft.Container(
             content=_build_tool_tile(k, n, d, ic, col),
-            col={"sm": 6, "md": 4, "lg": 3},
+            col={"xs": 12, "sm": 6, "md": 4, "lg": 3, "xl": 2},
         )
         for k, n, d, ic, col in tools
     ]
-
-    # Tool grid: chunks of three with a banner between them. The user asked
-    # for 3-4 banner slots on Home — after every three tools and one next to
-    # Recent Jobs — instead of one buried at the very bottom of the scroll.
-    grid_rows: list[ft.Control] = []
-    for chunk_idx in range(0, len(tool_controls), 3):
-        grid_rows.append(
-            ft.ResponsiveRow(
-                controls=tool_controls[chunk_idx : chunk_idx + 3],
-                spacing=SPACE_MD,
-                run_spacing=SPACE_MD,
-            )
+    # Home banners: one between tools and recent jobs, plus one below — the
+    # former "grid-row separator" banners are removed (they broke the grid).
+    grid_rows: list[ft.Control] = [
+        ft.ResponsiveRow(
+            controls=tool_controls,
+            spacing=SPACE_MD,
+            run_spacing=SPACE_MD,
         )
-        if chunk_idx + 3 < len(tool_controls):
-            grid_rows.append(BannerAdView(slot=f"home-grid-{chunk_idx // 3}"))
+    ]
 
     # Recent items list
     recent_items = app_state.history[:3] if app_state.history else []

@@ -77,9 +77,12 @@ def ConvertScreen() -> ft.Control:
     video_choices = [
         ("libx264", "H.264 (libx264)"),
         ("libx265", "H.265 (HEVC)"),
+        ("libsvtav1", "AV1 (SVT)"),
         ("vp9", "VP9"),
         ("mpeg4", "MPEG-4"),
         ("mjpeg", "MJPEG"),
+        ("prores", "ProRes"),
+        ("ffv1", "FFV1 (lossless)"),
     ]
     visible_video = [(key, label) for key, label in video_choices if key in available_video]
 

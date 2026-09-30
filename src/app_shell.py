@@ -1,10 +1,10 @@
-"""AppShell — Router-based top-level shell.
+"""AppShell — single-view top-level shell (Sherlock pattern).
 
-Flet 1.0 ft.Router (manage_views=True) owns the view stack: each route
-component returns a ft.View, so Android back/swipe-back walk the real
-navigation history instead of dumping to the dashboard. The dashboard route
-carries the NavigationBar; tool routes are full-screen with their own back
-rows. Onboarding sits above the Router as a single-view tree until accepted.
+One Flet ``View`` for the whole session; navigation is ``use_state``
+branching (``active_view`` + ``active_tab``), never a Router view stack.
+``page.views`` stays length 1 forever, so the Dart Navigator has nothing
+to underflow and Android back maps to in-app navigation instead of pops.
+Onboarding gates the single branch until terms are accepted.
 """
 
 from __future__ import annotations
@@ -43,6 +43,27 @@ logger = logging.getLogger("AppShell")
 _TAB_NAMES = ("Home", "Jobs", "Settings")
 _TAB_ICONS = (ft.Icons.HOME_OUTLINED, ft.Icons.HISTORY_ROUNDED, ft.Icons.SETTINGS_OUTLINED)
 _TAB_SELECTED_ICONS = (ft.Icons.HOME_ROUNDED, ft.Icons.HISTORY_ROUNDED, ft.Icons.SETTINGS_ROUNDED)
+
+# Every active_view the shell can branch to. Unknown names never render —
+# main.navigate() rejects them before they reach here.
+ACTIVE_VIEWS = frozenset(
+    {
+        "dashboard",
+        "convert",
+        "compress",
+        "cut",
+        "extract",
+        "filters",
+        "audio",
+        "probe",
+        "engine_info",
+        "result",
+        "capture",
+        "streams",
+        "join",
+        "terminal",
+    }
+)
 
 
 def _shell_body(
@@ -112,35 +133,38 @@ def _build_navigation_bar(ctrl, app_state: AppState | None = None) -> ft.Navigat
 
     job_count = len(app_state.jobs)  # observable read → badge re-renders on queue change
 
-    def _icon_with_badge(base: ft.IconData):
-        if job_count <= 0:
-            return base
-        # Flet 1.0 has NO ft.Positioned (M2 regression that froze every tab) —
-        # the counter rides the icon via negative/offset margins inside a Stack.
-        return ft.Stack(
-            controls=[
-                ft.Icon(base),
-                ft.Container(
-                    width=16,
-                    height=16,
-                    border_radius=8,
-                    bgcolor=ACCENT_RED,
-                    alignment=ft.Alignment.CENTER,
-                    margin=ft.Margin(left=16, top=-4, right=0, bottom=0),
-                    content=ft.Text(
-                        str(min(job_count, 99)),
-                        size=9,
-                        weight=ft.FontWeight.BOLD,
-                        color=ft.Colors.WHITE,
-                    ),
-                ),
-            ],
-        )
-
     destinations = []
-    for i, (icon, label) in enumerate(zip(_TAB_ICONS, _TAB_NAMES, strict=True)):
-        icon_control = _icon_with_badge(icon) if i == 1 else icon
-        destinations.append(ft.NavigationBarDestination(icon=icon_control, label=label))
+    for i, (icon, selected_icon, label) in enumerate(
+        zip(_TAB_ICONS, _TAB_SELECTED_ICONS, _TAB_NAMES, strict=True)
+    ):
+        if i == 1 and job_count > 0:
+            # ft.Badge is the framework's badge API — the destination keeps a
+            # stable control identity whether or not jobs are queued.
+            icon_control = ft.Badge(
+                label=ft.Text(
+                    str(min(job_count, 99)),
+                    size=9,
+                    weight=ft.FontWeight.BOLD,
+                    color=ft.Colors.WHITE,
+                ),
+                bgcolor=ACCENT_RED,
+            )
+            destinations.append(
+                ft.NavigationBarDestination(
+                    icon=ft.Icon(icon),
+                    selected_icon=ft.Icon(selected_icon),
+                    label=label,
+                    badge=icon_control,
+                )
+            )
+        else:
+            destinations.append(
+                ft.NavigationBarDestination(
+                    icon=icon,
+                    selected_icon=selected_icon,
+                    label=label,
+                )
+            )
 
     return ft.NavigationBar(
         destinations=destinations,
@@ -150,95 +174,118 @@ def _build_navigation_bar(ctrl, app_state: AppState | None = None) -> ft.Navigat
     )
 
 
-def _onboarding_gate(app_state: AppState | None = None) -> ft.View | None:
-    """Onboarding view while terms are unaccepted.
-
-    The gate lives inside each route view and reads the subscribed AppStateCtx.
-    The Router is mounted once; accepting terms swaps the route content without
-    rebuilding page.views or losing its back-stack/deep-link state.
-    """
-    if app_state is None:
-        app_state = state
-    if app_state.has_accepted_terms:  # observable read → re-render on flip
-        return None
-    return ft.View(route="/", controls=[OnboardingScreen(key=ft.ValueKey("onboarding"))])
-
-
-@ft.component
-def _dashboard_view() -> ft.View:
-    """Index route: tabbed Home / Jobs (history) / Settings with the nav bar."""
-    app_state = use_app_state()
-    gate = _onboarding_gate(app_state)
-    if gate is not None:
-        return gate
-
-    ctrl = use_controller()
-    selected_tab = app_state.selected_tab  # observable read → re-renders on tab change
-
-    if selected_tab == 0:
-        content = HomeScreen(key=ft.ValueKey("home"))
-    elif selected_tab == 1:
-        content = HistoryScreen(key=ft.ValueKey("history"))
-    else:
-        content = SettingsScreen(key=ft.ValueKey("settings"))
-
-    return ft.View(
-        route="/",
-        controls=[_shell_body(content, app_state, header=BrandHeader())],
-        # ft.View defaults to Padding.all(10); _shell_body owns the gutters,
-        # so the default would stack a second inset on every screen.
-        padding=ft.Padding.all(0),
-        navigation_bar=_build_navigation_bar(ctrl, app_state),
-    )
-
-
-def _tool_view(screen_factory, name: str):
-    """Wrap a full-screen tool route: banners + gutters, no nav bar.
-
-    Returning ft.View lets ft.Router manage the stack (system back, swipe-back,
-    AppBar semantics) — pop navigates structurally to the parent route.
-    """
-
-    @ft.component
-    def _route_view() -> ft.View:
-        app_state = use_app_state()
-        gate = _onboarding_gate(app_state)
-        if gate is not None:
-            return gate
-        return ft.View(
-            route=f"/{name}",
-            controls=[_shell_body(screen_factory(key=ft.ValueKey(name)), app_state)],
-            padding=ft.Padding.all(0),  # gutters come from _shell_body
-        )
-
-    return _route_view
-
-
-_ROUTES = [
-    ft.Route(index=True, component=_dashboard_view),
-    ft.Route(path="convert", component=_tool_view(ConvertScreen, "convert")),
-    ft.Route(path="compress", component=_tool_view(CompressScreen, "compress")),
-    ft.Route(path="cut", component=_tool_view(CutScreen, "cut")),
-    ft.Route(path="extract", component=_tool_view(ExtractScreen, "extract")),
-    ft.Route(path="filters", component=_tool_view(FiltersScreen, "filters")),
-    ft.Route(path="audio", component=_tool_view(AudioScreen, "audio")),
-    ft.Route(path="probe", component=_tool_view(ProbeScreen, "probe")),
-    ft.Route(path="engine-info", component=_tool_view(EngineInfoScreen, "engine-info")),
-    ft.Route(path="capture", component=_tool_view(CaptureScreen, "capture")),
-    ft.Route(path="streams", component=_tool_view(StreamsScreen, "streams")),
-    ft.Route(path="join", component=_tool_view(JoinScreen, "join")),
-    ft.Route(path="result", component=_tool_view(ResultScreen, "result")),
-    ft.Route(path="terminal", component=_tool_view(TerminalScreen, "terminal")),
-]
+def _should_show_onboarding(app_state: AppState) -> bool:
+    return not app_state.has_accepted_terms
 
 
 @ft.component
 def AppShell() -> ft.Control:
-    """Master shell — always the Router; onboarding gates INSIDE route views.
+    """Top-level shell. Branches: onboarding, dashboard tabs, or a tool view.
 
-    manage_views=True → Router emits ft.View per route level, consumed by
-    page.render_views (see main.py). Mounting the Router unconditionally at
-    boot keeps the view-list structure stable for the whole session; deep
-    links (ffmpeg://app/...) land in page.route and match these templates.
+    Single-view shell (Sherlock pattern): the one root view's content swaps
+    by ``active_view``/``active_tab`` state. Tool views render full-screen
+    (no nav bar); the dashboard renders the tabbed Home / Jobs / Settings
+    with the nav bar synced onto the root view.
     """
-    return ft.Router(_ROUTES, not_found=HomeScreen, manage_views=True)
+    active_view, set_active_view = ft.use_state("dashboard")
+
+    controller = use_controller()
+    app_state = use_app_state()
+
+    # Single source of truth: global selected_tab (shared with main._select_tab
+    # and handle_system_back).  A local active_tab drifted from global and
+    # silently froze History/Settings (Sherlock never has a second tab state).
+    active_tab = app_state.selected_tab
+
+    def set_active_tab(idx: int) -> None:
+        app_state.selected_tab = idx
+        state.selected_tab = idx  # keep both aliases in sync
+
+    # Inject view-local closures into the controller methods instance
+    # (Sherlock pattern — main.navigate() drives these).
+    controller.show_view = set_active_view
+    controller.go_home = lambda: set_active_view("dashboard")
+    controller.back = lambda: set_active_view("dashboard")
+
+    def _system_back():
+        # System/back button must never kill the single-view app.
+        # Map it onto in-app navigation: tool views → dashboard,
+        # settings/history tabs → home tab, home root → swallowed.
+        if _should_show_onboarding(app_state):
+            return
+        if active_view != "dashboard":
+            controller.back()
+        elif active_tab != 0:
+            set_active_tab(0)
+
+    controller.handle_system_back = _system_back
+
+    def _sync_chrome():
+        """Sync the root view's navigation bar to the current branch."""
+        page = ft.context.page
+        if not page or not page.views:
+            return
+        try:
+            if _should_show_onboarding(app_state) or active_view != "dashboard":
+                page.views[0].navigation_bar = None
+            else:
+                current_nav = page.views[0].navigation_bar
+                if isinstance(current_nav, ft.NavigationBar):
+                    current_nav.selected_index = active_tab
+                else:
+                    page.views[0].navigation_bar = _build_navigation_bar(controller, app_state)
+            page.update()
+        except Exception as exc:
+            import logging as _lg
+
+            _lg.getLogger(__name__).warning("Nav chrome sync failed: %s", exc, exc_info=True)
+
+    ft.use_effect(
+        _sync_chrome,
+        [active_tab, active_view, app_state.has_accepted_terms],
+    )
+
+    # --- Branching (lazy: only the active screen is constructed) ---
+    if _should_show_onboarding(app_state):
+        screen = OnboardingScreen(key=ft.ValueKey("onboarding"))
+        return ft.SafeArea(content=screen, expand=True)
+
+    if active_view == "dashboard":
+        if active_tab == 0:
+            content = HomeScreen(key=ft.ValueKey("home"))
+        elif active_tab == 1:
+            content = HistoryScreen(key=ft.ValueKey("history"))
+        else:
+            content = SettingsScreen(key=ft.ValueKey("settings"))
+        body = _shell_body(content, app_state, header=BrandHeader())
+    elif active_view == "convert":
+        body = _shell_body(ConvertScreen(key=ft.ValueKey("convert")), app_state)
+    elif active_view == "compress":
+        body = _shell_body(CompressScreen(key=ft.ValueKey("compress")), app_state)
+    elif active_view == "cut":
+        body = _shell_body(CutScreen(key=ft.ValueKey("cut")), app_state)
+    elif active_view == "extract":
+        body = _shell_body(ExtractScreen(key=ft.ValueKey("extract")), app_state)
+    elif active_view == "filters":
+        body = _shell_body(FiltersScreen(key=ft.ValueKey("filters")), app_state)
+    elif active_view == "audio":
+        body = _shell_body(AudioScreen(key=ft.ValueKey("audio")), app_state)
+    elif active_view == "probe":
+        body = _shell_body(ProbeScreen(key=ft.ValueKey("probe")), app_state)
+    elif active_view == "engine_info":
+        body = _shell_body(EngineInfoScreen(key=ft.ValueKey("engine-info")), app_state)
+    elif active_view == "capture":
+        body = _shell_body(CaptureScreen(key=ft.ValueKey("capture")), app_state)
+    elif active_view == "streams":
+        body = _shell_body(StreamsScreen(key=ft.ValueKey("streams")), app_state)
+    elif active_view == "join":
+        body = _shell_body(JoinScreen(key=ft.ValueKey("join")), app_state)
+    elif active_view == "result":
+        body = _shell_body(ResultScreen(key=ft.ValueKey("result")), app_state)
+    elif active_view == "terminal":
+        body = _shell_body(TerminalScreen(key=ft.ValueKey("terminal")), app_state)
+    else:
+        logger.error("Unknown active_view %r — falling back to dashboard", active_view)
+        body = _shell_body(HomeScreen(key=ft.ValueKey("home")), app_state)
+
+    return ft.SafeArea(content=body, expand=True)

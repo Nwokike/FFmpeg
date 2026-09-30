@@ -1,4 +1,4 @@
-"""Never-raising SnackBar helper (house pattern from Sherlock core/notify.py).
+"""Never-raising SnackBar helper (Sherlock pattern).
 
 All transient user feedback funnels through :func:`show_snack` so a failed
 toast can never take down the interaction it is reporting on.
@@ -25,28 +25,29 @@ def show_snack(
     duration_ms: int = 3000,
     action: ft.SnackBarAction | None = None,
 ) -> None:
-    """Show a floating SnackBar; never raises, logs instead."""
-    snack = ft.SnackBar(
-        content=ft.Text(message, color=ft.Colors.WHITE),
-        behavior=ft.SnackBarBehavior.FLOATING,
-        duration=duration_ms,
-    )
-    if bgcolor:
-        snack.bgcolor = bgcolor
-    if action is not None:
-        snack.action = action
+    """Show a floating SnackBar; never raises, never pops a real dialog."""
     try:
-        page.show_dialog(snack)
-    except RuntimeError:
-        # A dialog is already open — pop it only if it is a SnackBar, then retry.
+        snack = ft.SnackBar(
+            content=ft.Text(message, color=ft.Colors.WHITE),
+            bgcolor=bgcolor or ft.Colors.BLACK,
+            duration=duration_ms,
+        )
+        if action is not None:
+            snack.action = action
         try:
+            page.show_dialog(snack)
+        except RuntimeError:
             popped = page.pop_dialog()
-            if isinstance(popped, ft.SnackBar):
+            # Only re-show if we popped nothing (None) or a prior SnackBar.
+            # Popping a real AlertDialog here would close the user's dialog —
+            # never do that (Sherlock guard).
+            if popped is None or isinstance(popped, ft.SnackBar):
                 page.show_dialog(snack)
             else:
-                logger.info("Snack suppressed: %r dialog was open", type(popped).__name__)
-        except Exception as exc:
-            logger.warning("Snack suppressed after pop failure: %s", exc)
+                logger.info(
+                    "Snack suppressed: %r dialog was open",
+                    type(popped).__name__,
+                )
     except Exception as exc:
         logger.warning("Snack failed: %s", exc)
 

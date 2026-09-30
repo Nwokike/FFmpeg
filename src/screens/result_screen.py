@@ -85,6 +85,11 @@ def ResultScreen() -> ft.Control:
     def _set_compare(target: str) -> None:
         if target == compare:
             return
+        # Re-tapping the already-selected segment yields an empty `selected`
+        # set on the Dart side — bail rather than raising StopIteration here
+        # and surfacing as an Unhandled Flet error.
+        if not target:
+            return
         set_compare(target)
         v = video_ref.current
         if not _is_mounted(v):
@@ -165,12 +170,27 @@ def ResultScreen() -> ft.Control:
                 playlist = [ftv.VideoMedia(str(out_p))]
                 if job.input_path and Path(job.input_path).exists():
                     playlist.append(ftv.VideoMedia(job.input_path))
-                video_ref.current = ftv.Video(
-                    playlist=playlist,
-                    autoplay=False,
-                    filter_quality=ft.FilterQuality.MEDIUM,
-                    on_error=lambda e: logger.warning("Preview error: %s", getattr(e, "data", e)),
-                )
+                # A/B compare only makes sense with two items; the
+                # SegmentedButton guards jump_to(1), but don't crash if
+                # the playlist ever lands here as length 1 anyway.
+                if len(playlist) > 1:
+                    video_ref.current = ftv.Video(
+                        playlist=playlist,
+                        autoplay=False,
+                        filter_quality=ft.FilterQuality.MEDIUM,
+                        on_error=lambda e: logger.warning(
+                            "Preview error: %s", getattr(e, "data", e)
+                        ),
+                    )
+                else:
+                    video_ref.current = ftv.Video(
+                        playlist=playlist,
+                        autoplay=False,
+                        filter_quality=ft.FilterQuality.MEDIUM,
+                        on_error=lambda e: logger.warning(
+                            "Preview error: %s", getattr(e, "data", e)
+                        ),
+                    )
             except Exception as exc:
                 logger.warning("Preview construction failed: %s", exc)
 
@@ -314,7 +334,11 @@ def ResultScreen() -> ft.Control:
                                     ft.Segment(value="output", label=ft.Text("Output")),
                                     ft.Segment(value="original", label=ft.Text("Original")),
                                 ],
-                                on_change=lambda e: _set_compare(next(iter(e.control.selected))),
+                                on_change=lambda e: (
+                                    _set_compare(next(iter(e.control.selected), compare))
+                                    if getattr(e.control, "selected", None)
+                                    else None
+                                ),
                             )
                         ]
                         if has_orig  # single-item playlist: Original would doom jump_to(1)

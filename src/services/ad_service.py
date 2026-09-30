@@ -86,7 +86,7 @@ class AdService:
         try:
             if self._consent_manager is None:
                 self._consent_manager = fta.ConsentManager()
-            if self._consent_manager not in self.page.services:
+            if not any(s is self._consent_manager for s in self.page.services):
                 self.page.services.append(self._consent_manager)
                 # A bare list append does not run Service.init(); sync the
                 # page before invoking the native consent method.
@@ -182,7 +182,7 @@ class AdService:
                 on_error=_on_error,
             )
             self.interstitial = ad
-            if ad not in self.page.services:
+            if not any(s is ad for s in self.page.services):
                 self.page.services.append(ad)
                 # Service registration happens during the page update cycle.
                 self.page.update()

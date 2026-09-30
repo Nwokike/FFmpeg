@@ -168,15 +168,23 @@ class JobQueue:
             for job in self._pending:
                 if job.id == job_id:
                     self._pending.remove(job)
-                    job.status = "cancelled"
-                    job.status_message = "Cancelled"
-                    self._notify_finished(job)
+                    break
+            else:
+                for_evt = None
+                evt = self._cancel_events.get(job_id)
+                if evt is not None:
+                    evt.set()
                     return True
-            evt = self._cancel_events.get(job_id)
-        if evt is not None:
-            evt.set()
-            return True
-        return False
+                return False
+            # Matched entry removed while we had the lock — now finish the
+            # bookkeeping without holding it (finisher may re-enter the queue).
+            for_evt = job
+        # Lock is free here; no deadlock on queued_jobs/active_jobs nor on
+        # widget-state reads the app controller does in _notify_finished.
+        _set_worker_field(for_evt, "status", "cancelled")
+        _set_worker_field(for_evt, "status_message", "Cancelled")
+        self._notify_finished(for_evt)
+        return True
 
     # ── Worker ───────────────────────────────────────────────────────────
 

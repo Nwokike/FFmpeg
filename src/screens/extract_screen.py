@@ -32,7 +32,7 @@ def ExtractScreen() -> ft.Control:
         if media_path and Path(media_path).exists()
         else "0 B"
     )
-    duration_s = info.duration_s if info else 10.0
+    duration_s = max(0.5, info.duration_s if info and info.duration_s else 10.0)
 
     mode, set_mode = ft.use_state("audio")  # "audio", "frames", "gif", "subtitles"
     audio_fmt, set_audio_fmt = ft.use_state("mp3")
@@ -44,6 +44,17 @@ def ExtractScreen() -> ft.Control:
     sub_fmt, set_sub_fmt = ft.use_state("srt")
     sub_sel, set_sub_sel = ft.use_state(0)  # index into sub_streams
     is_processing, set_is_processing = ft.use_state(False)
+
+    # Keep the GIF duration inside the valid window when the underlying media
+    # shrinks (or was a still image: duration_s was 10.0 there, now smaller).
+    # Without this, Slider invariants fail: `max < min` or `value > max` on the
+    # very next build when the user switches to GIF mode.
+    def _clamp_gif_duration() -> None:
+        cur_max = min(15.0, duration_s)
+        if gif_duration > cur_max:
+            set_gif_duration(cur_max)
+
+    ft.use_effect(_clamp_gif_duration, [duration_s])
 
     sub_streams = [s for s in (info.streams if info else []) if s.stream_type == "subtitle"]
 
@@ -121,7 +132,9 @@ def ExtractScreen() -> ft.Control:
     # Audio formats — measured against the installed wheel, not assumed. The
     # Android LGPL build ships no MP3 encoder, so offering "mp3" produced an
     # UnknownCodecError after the user pressed Extract.
-    audio_formats = [f for f in ("mp3", "aac", "flac", "opus", "wav") if can_encode_format(f)]
+    audio_formats = [
+        f for f in ("mp3", "aac", "m4a", "flac", "opus", "ogg", "wav") if can_encode_format(f)
+    ]
     # Clamp onto something encodable so the first chip and the job agree.
     chosen_audio_fmt = (
         audio_fmt

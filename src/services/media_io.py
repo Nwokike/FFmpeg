@@ -65,9 +65,12 @@ class MediaIOService:
         self.share = ft.Share()
 
         # Retain strong refs and register in page.services for Flet 1.0 GC
-        if self.file_picker not in self.page.services:
+        # Identity (``is``) is the right check — dataclass equality can
+        # claim a fresh picker is "already in" services when a value-equal
+        # twin is there, while the real instance is still unmounted.
+        if not any(s is self.file_picker for s in self.page.services):
             self.page.services.append(self.file_picker)
-        if self.share not in self.page.services:
+        if not any(s is self.share for s in self.page.services):
             self.page.services.append(self.share)
 
     async def pick_media_file(self) -> str | None:

@@ -51,10 +51,23 @@ def CutScreen() -> ft.Control:
         if media_path and Path(media_path).exists()
         else "0 B"
     )
-    total_dur = max(1.0, info.duration_s if info else 60.0)
+    total_dur = max(1.0, info.duration_s if info and info.duration_s else 60.0)
 
     start_s, set_start_s = ft.use_state(0.0)
     end_s, set_end_s = ft.use_state(total_dur)
+
+    # Keep the window clamped when the underlying media shrinks (file swap /
+    # re-pick).  The observable write that feeds `info` rebuilds the whole
+    # screen, so a stale `end_s > total_dur` would otherwise feed a
+    # RangeSlider with `end_value > max` — a deterministic Dart range throw.
+    def _clamp_window() -> None:
+        cur = total_dur
+        if start_s > cur:
+            set_start_s(cur)
+        if end_s > cur:
+            set_end_s(cur)
+
+    ft.use_effect(_clamp_window, [total_dur])
     stream_copy, set_stream_copy = ft.use_state(True)
     is_processing, set_is_processing = ft.use_state(False)
     thumbs, set_thumbs = ft.use_state([])

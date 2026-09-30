@@ -14,9 +14,8 @@ from queue import Empty, Full, Queue
 
 import flet as ft
 
-from app_shell import AppShell
+from app_shell import ACTIVE_VIEWS, AppShell
 from components.update_dialog import build_update_dialog
-from core.back_stack import background_app, ensure_back_underlay, restore_top_view
 from core.constants import APP_NAME, APP_VERSION
 from core.engine_probe import probe as engine_probe
 from core.logger_handler import MemoryLogHandler
@@ -57,15 +56,21 @@ logger = logging.getLogger(__name__)
 # Bump when the terms text changes — every user is re-prompted on next boot.
 TERMS_VERSION = "1"
 
+# The mounted ControllerMethods instance (set once AppShell mounts). Lets
+# main-level helpers drive the single-view branch swap even before/around the
+# shell (Sherlock pattern: navigate-then-work, controller-owned closures).
+_show_view_box: list = [None]
+
 
 def _select_tab(page: ft.Page, tab_idx: int) -> None:
-    """Select a dashboard tab and return a tool route to the Router index."""
+    """Select a dashboard tab inside the single-view shell."""
     state.selected_tab = tab_idx
     state.active_view = "dashboard"
-    if page.route != "/":
-        page.navigate("/")
-    else:
-        page.update()
+    # If AppShell's show_view setter is already mounted, drive it directly.
+    setter = _show_view_box[0]
+    if setter is not None:
+        setter("dashboard")
+    page.update()
 
 
 def _bootstrap_logging() -> MemoryLogHandler:
@@ -368,33 +373,32 @@ async def main(page: ft.Page) -> None:
         storage.set("history_jobs", serializable)
 
     # Controller Methods implementation
-    # view-name → route map: screens keep calling ctrl.navigate(name) while
-    # ft.Router owns the actual view stack (system back, swipe-back, deep links).
-    _VIEW_ROUTES = {
-        "dashboard": "/",
-        "convert": "/convert",
-        "compress": "/compress",
-        "cut": "/cut",
-        "extract": "/extract",
-        "filters": "/filters",
-        "audio": "/audio",
-        "probe": "/probe",
-        "engine_info": "/engine-info",
-        "result": "/result",
-        "capture": "/capture",
-        "streams": "/streams",
-        "join": "/join",
-    }
+    # Single-view shell: screens keep calling ctrl.navigate(name); the shell
+    # branch swaps in place — no Router, no page.views surgery (Sherlock).
+
+    def _swap_view(view: str) -> None:
+        state.active_view = view
+        live = _show_view_box[0]
+        if live is not None:
+            live(view)
+            return
+        show = methods.show_view
+        if show is not None:
+            show(view)
+        else:
+            # Shell not mounted yet (early boot): state flip is enough —
+            # the first render reads state.active_view.
+            page.update()
 
     def navigate(view: str) -> None:
         leaving_result = state.active_view == "result" and view == "dashboard"
-        state.active_view = view
-        route = _VIEW_ROUTES.get(view)
-        if route is None:
+        if view not in ACTIVE_VIEWS:
             logger.error("Navigation target is not registered: %r", view)
             show_snack(page, f"Unknown screen: {view}", bgcolor=ERROR)
             return
-        if page.route == route:
+        if state.active_view == view:
+            # Same branch: the observable write below would be a no-op for the
+            # scheduler, so flush explicitly (tab re-tap, re-entry).
             page.update()
             return
         if leaving_result:
@@ -403,15 +407,12 @@ async def main(page: ft.Page) -> None:
             #
             # Native InterstitialAd.show() returns as soon as the ad is
             # requested/displayed — dismissal arrives as a separate close
-            # event. Navigating after `await show_interstitial()` therefore
-            # swapped the route UNDER the still-open ad. Every skip path in
-            # AdService also fires on_close, so passing the navigation as the
+            # event. Swapping after `await show_interstitial()` therefore
+            # swapped the branch UNDER the still-open ad. Every skip path in
+            # AdService also fires on_close, so passing the swap as the
             # callback covers both the ad-closed and the no-ad cases.
             def _finish_result_exit() -> None:
-                if page.route != route:
-                    page.navigate(route)
-                else:
-                    page.update()
+                _swap_view(view)
 
             async def _ad_then_nav():
                 try:
@@ -422,7 +423,7 @@ async def main(page: ft.Page) -> None:
 
             page.run_task(_ad_then_nav)
         else:
-            page.navigate(route)
+            _swap_view(view)
 
     def select_tab(tab_idx: int) -> None:
         _select_tab(page, tab_idx)
@@ -842,7 +843,15 @@ async def main(page: ft.Page) -> None:
         try:
             return await operation(on_progress)
         finally:
-            page.pop_dialog()
+            popped = page.pop_dialog()
+            # If a different dialog (e.g. a concurrent update prompt) is
+            # now on top and we just popped it, put it back — the transfer's
+            # finally must not steal someone else's dialog.  Identity
+            # (``is``) is the right check — two AlertDialogs are never
+            # value-equal twins for this purpose.
+            if popped is not None and popped is not dialog:
+                with contextlib.suppress(Exception):
+                    page.show_dialog(popped)
 
     async def share_result(job: Job) -> None:
         if job.output_path:
@@ -898,51 +907,61 @@ async def main(page: ft.Page) -> None:
         storage.set("theme_mode", mode_str)
         page.update()
 
-    def handle_system_back(pop_pending: bool = False) -> None:
-        """Map Android/system back onto in-app navigation, never app teardown.
-
-        page.dart's ``_handleSystemPopRoute`` only emits ``view_pop`` when the
-        stack is >= 2 — the /blank underlay (core.back_stack, re-pinned before
-        every flush below) guarantees the event arrives. Dart has already
-        marked the top view popped by the time we run, so every branch that
-        does not navigate must re-key the view back in (restore_top_view) when
-        pop_pending is set. Root back backgrounds the task so running jobs
-        finish — it never finishes the activity.
-        """
+    def _system_back_fallback() -> None:
+        """Fallback when called before AppShell's live handler is mounted."""
         if not state.has_accepted_terms:
-            if pop_pending:
-                restore_top_view(page)  # Onboarding is a gate; back must not exit it
             return
-        if page.route != "/":
-            if pop_pending:
-                # Keeps the screen visible while the result-exit interstitial
-                # loads; the route change below clears the filter regardless.
-                restore_top_view(page)
+        if state.active_view != "dashboard":
             navigate("dashboard")
         elif state.selected_tab != 0:
             select_tab(0)
-            if pop_pending:
-                restore_top_view(page)
-        elif pop_pending:
-            # Home root — background the task (jobs keep processing).
-            restore_top_view(page)
-            background_app(page)
 
-    def _on_system_back(e=None) -> None:
+    def handle_system_back() -> None:
+        """Map Android/system back onto in-app navigation, never app teardown.
+
+        Single-view shell (Sherlock): page.views stays length 1 for the whole
+        session, so Dart's own pop handler has nothing to pop — this callback
+        (via ``page.on_view_pop``) just swaps the branch. Nothing is ever
+        popped, re-keyed, or restored.
+        """
+        # ``methods.handle_system_back`` is the shell's live, view-local
+        # handler once AppShell mounts. If this *is* that handler it was
+        # already replaced, so the identity check gates falling through to
+        # the early-boot fallback.
+        delegate = methods.handle_system_back
+        if delegate is not handle_system_back:
+            try:
+                delegate()
+                return
+            except Exception:
+                logger.exception("Shell system-back handler failed")
+        _system_back_fallback()
+
+    def _on_system_back(_e=None) -> None:
         try:
-            # A real system/swipe pop arrives with an event (Dart already
-            # marked the top view popped); ControllerMethods callers pass none.
-            handle_system_back(pop_pending=e is not None)
-        finally:
-            if not page.views:
-                # Flet removed the root view unexpectedly; log loudly so a
-                # framework behavior change is diagnosable from the terminal.
-                logger.error("System back removed the ROOT view — flat route stack violated")
+            # Owner: Android/system back must never tear down the single-view
+            # shell — it maps to in-app navigation instead.
+            try:
+                views_left = len(page.views)
+            except Exception:
+                views_left = -1
+            logger.info("System back pressed (root views=%d) → in-app navigation", views_left)
+            handle_system_back()
+            try:
+                if not page.views:
+                    logger.error(
+                        "System back removed the ROOT view — single-view shell "
+                        "violated (flet behavior change?)"
+                    )
+            except Exception:
+                pass
+        except Exception:
+            logger.exception("System back handling failed")
 
     methods = ControllerMethods(
         navigate=navigate,
         select_tab=select_tab,
-        handle_system_back=handle_system_back,
+        handle_system_back=lambda: handle_system_back(),
         pick_media_for=lambda t: page.run_task(pick_media_for, t),
         start_job=start_job,
         cancel_job=cancel_job,
@@ -1036,32 +1055,15 @@ async def main(page: ft.Page) -> None:
 
     page.run_task(_startup_prune)
 
-    # System back MUST be captured before the Router mounts so the Router's
-    # own pop handler delegates to it (flat routes otherwise close the app).
+    # Single-view shell: on_view_pop maps to in-app navigation; the Dart
+    # stack is never popped (Sherlock pattern — page.views stays length 1).
     page.on_view_pop = _on_system_back
 
-    # Keep the /blank back-underlay pinned: the Router replaces page.views
-    # wholesale on every route change, so re-assert it in every outgoing
-    # flush — boot, navigation, deep links and component re-renders all go
-    # through page.update (component updates drain via control.update() →
-    # page.update; single-view stacks would let page.dart finish the activity
-    # without ever emitting view_pop).
-    _raw_page_update = page.update
-
-    def _update_with_underlay(*args, **kwargs):
-        try:
-            ensure_back_underlay(page)
-        except Exception:
-            logger.exception("Back underlay insert failed")
-        return _raw_page_update(*args, **kwargs)
-
-    page.update = _update_with_underlay
-
-    # Mount UI — render_views: ft.Router(manage_views=True) emits the ft.View
-    # list that becomes page.views (back-stack, swipe-back, deep-link entry).
+    # Mount UI — page.render puts the AppShell tree into the single root
+    # view's controls (Sherlock: page.render once, branch via state).
     def _mount_ui() -> None:
-        """Render the Router view list once at session boot."""
-        page.render_views(
+        """Render the single-view shell once at session boot."""
+        page.render(
             lambda: AppStateCtx(
                 state,
                 lambda: ServiceCtx(
@@ -1075,10 +1077,6 @@ async def main(page: ft.Page) -> None:
         )
 
     _mount_ui()
-    # Belt-and-braces: render_views' internal flush already ran through the
-    # wrapper, but pin the underlay explicitly so the very first back press
-    # cannot race an unwrapped boot path.
-    ensure_back_underlay(page)
 
 
 if __name__ == "__main__":

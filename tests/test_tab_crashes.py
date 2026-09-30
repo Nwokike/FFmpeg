@@ -18,7 +18,7 @@ from __future__ import annotations
 import pytest
 from flet.components.component import Renderer
 
-from app_shell import _build_navigation_bar, _dashboard_view
+from app_shell import AppShell, _build_navigation_bar
 from core.state import Job, state
 from state.controller_ctx import ControllerMethods, ControllerMethodsCtx
 from state.service_ctx import ServiceCtx, Services
@@ -55,13 +55,13 @@ def test_nav_bar_renders_with_nonempty_queue():
 
 
 def test_dashboard_view_renders_with_jobs_and_badge():
-    """Full dashboard path: banner + badge Stack/Margin construction."""
+    """Full single-view shell mount with jobs and a badge."""
     state.has_accepted_terms = True
     state.jobs = [
         Job(op="convert", input_path="a.mp4", output_path="b.mp4", status="running"),
         Job(op="cut", input_path="c.mp4", output_path="d.mp4", status="pending"),
     ]
-    comp = _render(_dashboard_view)
+    comp = _render(AppShell)
     assert comp is not None
 
 

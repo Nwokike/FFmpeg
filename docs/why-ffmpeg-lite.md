@@ -31,8 +31,12 @@ probe — on the codecs the device engine provides.
 
 No app rewrite is needed:
 
-1. The screens already read the runtime capability probe — no hardcoded
-   codec lists anywhere in the UI.
+1. The screens read the runtime capability probe and intersect it with
+   curated display tables (`video_choices` in Convert, `audio_formats` in
+   Extract/Audio). A codec the probe verifies but no display table lists
+   stays hidden — when widening exposure, add the name to the probe's
+   `PREFERRED_*` lists, the engine's alias/label tables, and the screen's
+   display table together.
 2. The missing piece is upstream: a richer `flet-libffmpeg` wheel (GPL
    encoders + TLS) in Flet's Mobile Forge index. When Flet ships it, bump the
    dependency pin, drop the "Lite" name, and the extra options appear by
@@ -41,4 +45,5 @@ No app rewrite is needed:
    [flet-dev/flet issues](https://github.com/flet-dev/flet/issues).
 
 **The rule when editing gates:** never show a control the probe says will
-fail on the target device.
+fail on the target device — and never leave a probe-verified encoder out of
+every screen's display table.

@@ -116,13 +116,17 @@ class AppTheme:
         )
 
 
-def is_dark_mode(page: ft.Page, app_state=None) -> bool:
+def is_dark_mode(page: ft.Page | None, app_state=None) -> bool:
     """True when the active presentation mode is dark.
 
     ``app_state`` is normally supplied by ``use_app_state()`` in a Flet
     component.  Keeping the optional fallback makes this helper usable from
     small non-rendered tests without pretending that a raw singleton read
     creates a subscription.
+
+    Mirrors Sherlock: if the page is unavailable (test stub, early lifecycle),
+    fall back through ``ft.context.page`` rather than crashing the whole
+    screen build — a None page must never poison history/settings.
     """
     if app_state is None:
         app_state = state
@@ -132,4 +136,15 @@ def is_dark_mode(page: ft.Page, app_state=None) -> bool:
     if app_state.theme_mode == ft.ThemeMode.LIGHT:
         return False
     # When SYSTEM, inspect host platform brightness
-    return page.platform_brightness == ft.Brightness.DARK
+    resolved = page
+    if resolved is None:
+        try:
+            resolved = ft.context.page  # type: ignore[attr-defined]
+        except Exception:
+            resolved = None
+    if resolved is None:
+        return True
+    try:
+        return resolved.platform_brightness == ft.Brightness.DARK
+    except Exception:
+        return True

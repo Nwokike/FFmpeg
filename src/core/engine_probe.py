@@ -79,8 +79,10 @@ PREFERRED_VIDEO_ENCODERS = [
     "libx265",
     "hevc",
     "libsvtav1",
-    "libaom-av1",
+    "libvpx-vp9",
     "vp9",
+    "libvpx",
+    "av1",
     "h264",
     "mpeg4",
     "mjpeg",
@@ -88,17 +90,19 @@ PREFERRED_VIDEO_ENCODERS = [
     "gif",
     "prores",
     "ffv1",
+    "libwebp",
 ]
 PREFERRED_AUDIO_ENCODERS = [
     "aac",
     "libmp3lame",
+    "mp3",
     "libopus",
     "flac",
-    "libvorbis",
     "opus",
     "vorbis",
     "alac",
     "pcm_s16le",
+    "pcm_s24le",
 ]
 
 # Network protocols to probe for live-stream support. HLS and DASH are
@@ -246,12 +250,14 @@ def _find_attr(root, *names) -> set[str]:
 # Formats the Extract/Audio screens offer, and the encoder names each maps to.
 # Screens ask `can_encode_format()` so an option the wheel cannot encode is
 # never shown, instead of failing after the user has already hit Process.
+# ogg/vorbis, m4a and 24-bit wav ride the installed wheel (verified mode="w").
 AUDIO_FORMAT_ENCODERS = {
     "mp3": ("libmp3lame", "mp3"),
     "aac": ("aac",),
     "m4a": ("aac",),
     "flac": ("flac",),
     "opus": ("libopus", "opus"),
+    "ogg": ("vorbis", "libvorbis"),
     "wav": ("pcm_s16le", "pcm_s24le"),
 }
 

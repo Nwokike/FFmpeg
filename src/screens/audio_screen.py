@@ -42,7 +42,7 @@ def AudioScreen() -> ft.Control:
     # LGPL build has no MP3 encoder, so "mp3" used to fail only after the user
     # pressed Process & Master.
     audio_formats = [
-        f for f in ("m4a", "mp3", "aac", "flac", "opus", "wav") if can_encode_format(f)
+        f for f in ("m4a", "mp3", "aac", "flac", "opus", "ogg", "wav") if can_encode_format(f)
     ]
     chosen_audio_format = (
         audio_format

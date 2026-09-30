@@ -48,7 +48,10 @@ def job_card_view(job: Job, is_dark: bool = True) -> ft.Control:
         "filters": "Filter Stack",
         "audio_studio": "Audio Studio",
     }
-    op_title = op_labels.get(job.op, job.op.title())
+    norm_op = (job.op or "").strip() or "convert"
+    op_title = op_labels.get(norm_op, norm_op.replace("_", " ").title())
+    # Old history can carry None paths — guard before Path() or .title().
+    card_icon_hint = "audio" in norm_op
 
     in_name = Path(job.input_path).name if job.input_path else "Unknown"
     out_name = Path(job.output_path).name if job.output_path else ""
@@ -110,8 +113,8 @@ def job_card_view(job: Job, is_dark: bool = True) -> ft.Control:
         "concat": ft.Icons.MERGE_TYPE_ROUNDED,
     }
     card_icon = op_icons.get(
-        job.op,
-        ft.Icons.AUDIOTRACK_OUTLINED if "audio" in job.op else ft.Icons.MOVIE_OUTLINED,
+        norm_op,
+        ft.Icons.AUDIOTRACK_OUTLINED if card_icon_hint else ft.Icons.MOVIE_OUTLINED,
     )
 
     content_rows = [

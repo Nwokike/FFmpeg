@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import flet as ft
 import pytest
 from flet.components.component import Renderer
 
@@ -123,17 +122,21 @@ def test_render_app_shell_router_when_accepted(mock_ctx):
 
 
 def test_onboarding_gate_toggles_on_terms_flag(mock_ctx):
-    from app_shell import _onboarding_gate
-
-    r = Renderer()
+    """Single-view shell gates onboarding inside AppShell — render it."""
+    services, methods = mock_ctx
 
     state.has_accepted_terms = False
-    gated = r.render(lambda: _onboarding_gate() or ft.Container())
+    gated = Renderer().render(
+        lambda: ServiceCtx(services, lambda: ControllerMethodsCtx(methods, lambda: AppShell())),
+    )
     assert gated is not None
 
     state.has_accepted_terms = True
-    passed = r.render(lambda: _onboarding_gate() or ft.Container())
+    passed = Renderer().render(
+        lambda: ServiceCtx(services, lambda: ControllerMethodsCtx(methods, lambda: AppShell())),
+    )
     assert passed is not None
+    assert type(gated) is type(passed), "single-view shell must not flip type on terms"
 
 
 def test_render_engine_info_screen(mock_ctx):
