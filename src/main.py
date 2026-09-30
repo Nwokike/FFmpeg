@@ -1088,10 +1088,6 @@ async def main(page: ft.Page) -> None:
 
     page.run_task(_startup_prune)
 
-    # Single-view shell: on_view_pop maps to in-app navigation; the Dart
-    # stack is never popped (Sherlock pattern — page.views stays length 1).
-    page.on_view_pop = _on_system_back
-
     # Mount UI — page.render puts the AppShell tree into the single root
     # view's controls (Sherlock: page.render once, branch via state).
     def _mount_ui() -> None:
@@ -1110,6 +1106,20 @@ async def main(page: ft.Page) -> None:
         )
 
     _mount_ui()
+
+    # Back-button ownership (KTV lesson, single-view edition): the root view
+    # is declared non-poppable, so Android back can never finish the activity
+    # through the Dart stack — every press arrives here as view_pop and maps
+    # to in-app navigation (tool → dashboard, tab → Home, Home → swallowed).
+    # Verified in installed flet 1.0.1: View(can_pop=False) is honored by
+    # _handleSystemPopRoute (returns early, emits view_pop via _markViewAsPopped).
+    try:
+        if page.views:
+            page.views[0].can_pop = False
+            page.update()
+    except Exception as exc:
+        logger.warning("Root view can_pop guard failed: %s", exc)
+    page.on_view_pop = _on_system_back
 
 
 if __name__ == "__main__":
