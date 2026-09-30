@@ -1,49 +1,33 @@
 # Why this project is called FFmpeg Lite
 
-The name is a capability promise: everything FFmpeg can do on *your* device,
-and nothing that would fail after you press the button.
+The name describes the product's supported capability surface: the FFmpeg workflows we can reliably expose on the target device, using the FFmpeg build that is actually shipped with the app.
 
 ## The reason
 
-The app runs on Flet's official mobile FFmpeg wheels (`av` + `flet-libffmpeg`
-from [pypi.flet.dev](https://pypi.flet.dev), built by Flet's Mobile Forge).
-That wheel uses FFmpeg's **LGPL recipe** — no GPL codec libraries, no bundled
-TLS. On Android it therefore ships **without**:
+The app uses Flet's prebuilt mobile binary wheels (`av` + `flet-libffmpeg`) from [pypi.flet.dev](https://pypi.flet.dev).
 
-- **H.264 / HEVC / VP9 / AV1 encoding** (decoding and lossless stream copy
-  work — only *encoding* is missing)
-- **MP3 encoding**
-- **An HTTPS handler inside FFmpeg** — the app fetches HTTPS/HLS bytes itself
-  with `httpx` and hands them to PyAV, so network streams still work
+The mobile FFmpeg build we currently depend on has a more limited codec/feature set than the FFmpeg installations commonly available on desktop. In particular, the Android build does not provide the encoders we need for some common video codecs, including H.264, HEVC, VP9, and AV1, and it does not provide MP3 encoding.
 
-Desktop wheels are richer, but the product decision is **mobile-first: desktop
-exposes the same surface as mobile** (ads fund the app, and phones are where
-it ships). Every screen is driven by a live probe of the installed engine
-(`src/core/engine_probe.py`): what the wheel cannot do is hidden — never
-offered and broken.
+The app also does not rely on FFmpeg for HTTPS transport on mobile. It fetches HTTPS/HLS data itself with `httpx` and passes the resulting stream data to PyAV.
 
-Shipping as plain "FFmpeg" would promise the full codec suite the mobile
-build cannot deliver. **FFmpeg Lite** says what users actually get: the full
-FFmpeg *workflow* — convert, cut, join, extract, filters, audio, streams,
-probe — on the codecs the device engine provides.
+Desktop installations may provide a richer FFmpeg feature set, but the product intentionally uses **mobile as the capability floor**. Desktop exposes the same user-facing surface so that a project created on one platform behaves consistently on another.
 
-## Path to the full suite (v2)
+Every feature surface is driven by a live probe of the installed engine (`src/core/engine_probe.py`). Capabilities that the installed engine cannot provide are hidden rather than exposed as controls that are expected to fail at runtime.
 
-No app rewrite is needed:
+That is the reason for the **FFmpeg Lite** name. The app still provides the FFmpeg workflow — conversion, cutting, joining, extraction, filtering, audio processing, stream handling, and probing — but only for capabilities supported by the engine actually installed on the target platform.
 
-1. The screens read the runtime capability probe and intersect it with
-   curated display tables (`video_choices` in Convert, `audio_formats` in
-   Extract/Audio). A codec the probe verifies but no display table lists
-   stays hidden — when widening exposure, add the name to the probe's
-   `PREFERRED_*` lists, the engine's alias/label tables, and the screen's
-   display table together.
-2. The missing piece is upstream: a richer `flet-libffmpeg` wheel (GPL
-   encoders + TLS) in Flet's Mobile Forge index. When Flet ships it, bump the
-   dependency pin, drop the "Lite" name, and the extra options appear by
-   themselves.
-3. Until then, capability requests belong upstream at
-   [flet-dev/flet issues](https://github.com/flet-dev/flet/issues).
+## Path to a fuller suite
 
-**The rule when editing gates:** never show a control the probe says will
-fail on the target device — and never leave a probe-verified encoder out of
-every screen's display table.
+No application rewrite is intended to be necessary.
+
+1. The screens read the runtime capability probe and intersect it with curated display tables (`video_choices` in Convert, `audio_formats` in Extract/Audio). A capability that the probe verifies but that is not present in a display table remains hidden. When widening exposure, update the probe's `PREFERRED_*` lists, the engine alias/label tables, and the relevant screen display table together.
+
+2. The remaining limitations are primarily upstream packaging/build limitations. If a future Flet mobile FFmpeg build provides the missing encoders/features, updating the dependency can make those capabilities available to the app without changing the overall architecture.
+
+3. Until then, requests for additional mobile FFmpeg capabilities belong upstream in the [Flet issue tracker](https://github.com/flet-dev/flet/issues).
+
+## The rule when editing capability gates
+
+Never show a control when the runtime probe says the target engine cannot support it.
+
+And never assume that a probe-verified capability is automatically user-visible: every exposed capability must also be intentionally included in the corresponding screen's display table.
