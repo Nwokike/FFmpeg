@@ -464,7 +464,26 @@ async def main(page: ft.Page) -> None:
         Capture used to be a dead-end screen; every tool now starts a source
         choice, and a Camera/Mic take returns to this same tool via
         ``state.pending_media_target`` once it has been probed.
+
+        The picker dialog is capability-filtered so a tool that only handles
+        video (e.g. Compress) does not offer Microphone — and Compress/Cut
+        camera offers Video, not Photo.  Every tile still works, but the
+        dialog only shows sources that produce a usable file for the caller.
         """
+
+        # Home tiles route through here; every tool accepts video, so the
+        # superset is: audio, convert, compress, cut, extract, filters, probe.
+        # Probe/capture/streams/etc. don't use this dialog — they navigate.
+        _TOOL_CAPABILITIES: dict[str, dict[str, bool]] = {
+            "audio": {"has_video": False, "has_audio": True},
+            "extract": {"has_video": True, "has_audio": True},
+            "convert": {"has_video": True, "has_audio": True},
+            "compress": {"has_video": True, "has_audio": False},
+            "cut": {"has_video": True, "has_audio": False},
+            "filters": {"has_video": True, "has_audio": False},
+            "probe": {"has_video": True, "has_audio": True},
+        }
+        caps = _TOOL_CAPABILITIES.get(target_view, {"has_video": True, "has_audio": True})
 
         def _close_and(action) -> None:
             with contextlib.suppress(Exception):
@@ -485,29 +504,43 @@ async def main(page: ft.Page) -> None:
 
             _close_and(go)
 
+        # Build only the source options this tool can actually use.
+        # compress/cut/filters → video: Camera in video mode (not photo), no mic.
+        # audio → audio only: mic, no camera.
+        # everything else → all three.
+        actions: list[ft.Control] = [
+            ft.FilledButton(
+                "Upload",
+                icon=ft.Icons.UPLOAD_FILE_ROUNDED,
+                on_click=_files,
+            )
+        ]
+        if caps.get("has_video"):
+            # Compress/Cut/Filters want a video from the camera, not a still photo.
+            cam_mode = "video" if target_view in ("compress", "cut", "filters") else "photo"
+            actions.append(
+                ft.OutlinedButton(
+                    "Camera",
+                    icon=ft.Icons.CAMERA_ALT_ROUNDED,
+                    on_click=lambda _, m=cam_mode: _capture(m),
+                )
+            )
+        if caps.get("has_audio"):
+            actions.append(
+                ft.OutlinedButton(
+                    "Microphone",
+                    icon=ft.Icons.MIC_ROUNDED,
+                    on_click=lambda _: _capture("mic"),
+                )
+            )
+        actions.append(ft.TextButton("Cancel", on_click=lambda _: page.pop_dialog()))
+
         page.show_dialog(
             ft.AlertDialog(
                 modal=True,
                 title=ft.Text("Choose a source"),
                 content=ft.Text("Where should this input come from?"),
-                actions=[
-                    ft.FilledButton(
-                        "Upload",
-                        icon=ft.Icons.UPLOAD_FILE_ROUNDED,
-                        on_click=_files,
-                    ),
-                    ft.OutlinedButton(
-                        "Camera",
-                        icon=ft.Icons.CAMERA_ALT_ROUNDED,
-                        on_click=lambda _: _capture("photo"),
-                    ),
-                    ft.OutlinedButton(
-                        "Microphone",
-                        icon=ft.Icons.MIC_ROUNDED,
-                        on_click=lambda _: _capture("mic"),
-                    ),
-                    ft.TextButton("Cancel", on_click=lambda _: page.pop_dialog()),
-                ],
+                actions=actions,
                 actions_alignment=ft.MainAxisAlignment.END,
             )
         )

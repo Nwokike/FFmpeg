@@ -833,6 +833,10 @@ class EngineService:
                         s_info.width = v_ctx.width
                         s_info.height = v_ctx.height
                         s_info.pix_fmt = getattr(v_ctx.pix_fmt, "name", str(v_ctx.pix_fmt))
+                        # average_rate can jitter ±0.06 between takes from the
+                        # same phone; keep it as the probe fps (crossfade gate
+                        # now tolerates 2 fps), but do not average r_frame_rate
+                        # in — it is noisier and would widen the jitter further.
                         if stream.average_rate:
                             s_info.fps = float(stream.average_rate)
                 elif stype == "audio":
@@ -2420,7 +2424,13 @@ class EngineService:
             ov = other.video_stream
             if ov is None:
                 return "a file has no video stream"
-            if abs((ov.fps or 0) - (fv.fps or 0)) > 0.05:
+            # average_rate can jitter 0.01-0.06 between takes from the same
+            # phone (encoder quantizes the rational differently per file), so a
+            # strict 0.05 gate refuses identical-camera clips.  The concat paths
+            # re-encode anyway (crossfade always does), so a frame-rate gate here
+            # is a quality hint, not a hard muxer constraint — keep copyable
+            # strict (0.05) but relax crossfade to 2 fps (~7% at 30p).
+            if abs((ov.fps or 0) - (fv.fps or 0)) > 2.0:
                 return "frame rates differ"
             if (ov.width or 0) > 1920 or (ov.height or 0) > 1080:
                 return "sources above 1080p"
@@ -2435,10 +2445,9 @@ class EngineService:
                 and (oa.sample_rate != fa.sample_rate or oa.channels != fa.channels)
             ):
                 return "audio layouts differ"
-        # fade must land on a frame boundary for every clip's timeline
-        fps = fv.fps or 30.0
-        if abs(round(fade_s * fps) - fade_s * fps) > 1e-6:
-            return f"{fade_s}s doesn't snap to {fps:g} fps frames"
+        # fade grid: _concat_crossfade snaps it to round(fade*fps)/fps anyway,
+        # so a pre-gate refusal for non-snapping fades is unnecessary — warn
+        # at debug and let the re-encode path handle the rounding.
         return None
 
     @staticmethod
@@ -2961,7 +2970,7 @@ class EngineService:
 
             n = min(len(a_win), len(b_win))
             if n == 0:
-                logger.debug("Crossfade window empty — skipping boundary")
+                logger.warning("Crossfade window empty — boundary becomes a hard cut")
                 return
 
             g = av.filter.Graph()
@@ -3072,7 +3081,7 @@ class EngineService:
 
             n = min(len(a_tail), len(b_head))
             if n == 0:
-                logger.debug("Audio crossfade window empty — skipping boundary")
+                logger.warning("Audio crossfade window empty — boundary becomes a hard cut")
                 return
 
             g = av.filter.Graph()

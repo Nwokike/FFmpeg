@@ -87,8 +87,18 @@ def CutScreen() -> ft.Control:
         ``Control must be added to the page first`` on every interaction. The
         gap is one frame, so the call is dropped rather than surfaced as an
         error — the next interaction lands on a mounted control.
+
+        ``flet.controls.base_control.Control.page`` walks parents and **raises**
+        RuntimeError instead of returning None, so ``getattr(ctrl, "page")``
+        without an except RuntimeError still crashes the guard itself.
         """
-        return ctrl is not None and getattr(ctrl, "page", None) is not None
+        if ctrl is None:
+            return False
+        try:
+            _ = ctrl.page  # type: ignore[attr-defined]
+            return True
+        except (RuntimeError, AttributeError):
+            return False
 
     # ── Scrub preview: stable Video instance + throttled seeks ──────────────
 
@@ -99,7 +109,7 @@ def CutScreen() -> ft.Control:
         try:
             await v.seek(ft.Duration(milliseconds=int(seconds * 1000)))
         except Exception as exc:
-            logger.debug("Scrub seek failed: %s", exc)
+            logger.warning("Scrub seek failed: %s", exc)
 
     def _scrub_to(seconds: float) -> None:
         now = time.monotonic()
@@ -118,7 +128,7 @@ def CutScreen() -> ft.Control:
             try:
                 await v.stop()
             except Exception as exc:
-                logger.debug("Scrub stop failed: %s", exc)
+                logger.warning("Scrub stop failed: %s", exc)
 
         page.run_task(_stop)
 
@@ -131,7 +141,7 @@ def CutScreen() -> ft.Control:
             try:
                 await v.pause()
             except Exception as exc:
-                logger.debug("Scrub pause failed: %s", exc)
+                logger.warning("Scrub pause failed: %s", exc)
 
         page.run_task(_pause)
 

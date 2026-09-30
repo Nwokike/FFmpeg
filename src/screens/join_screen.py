@@ -73,7 +73,7 @@ def JoinScreen() -> ft.Control:
             fps = e.get("fps") or 0.0
             if not fps:
                 return f"{e['name']} has no video"
-            if abs(fps - first_fps) > 0.05:
+            if abs(fps - first_fps) > 2.0:
                 return "frame rates differ"
             if (e.get("w") or 0) > 1920 or (e.get("h") or 0) > 1080:
                 return "sources above 1080p"
@@ -86,8 +86,6 @@ def JoinScreen() -> ft.Control:
                 or e.get("channels") != entries[0].get("channels")
             ):
                 return "audio layouts differ"
-        if abs(round(fade_s * first_fps) - fade_s * first_fps) > 1e-6:
-            return f"{fade_s:g}s doesn't snap to {first_fps:g} fps frames"
         return None
 
     async def _add_files(_=None) -> None:

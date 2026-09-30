@@ -79,8 +79,18 @@ def ResultScreen() -> ft.Control:
         The preview Video is constructed during a render pass and attached on
         the next one; calling stop/pause in that window raised
         ``Control must be added to the page first`` in the log.
+
+        ``Control.page`` raises RuntimeError (not AttributeError) when
+        unmounted, so a bare ``getattr(ctrl, "page")`` check crashes the
+        guard itself — catch both.
         """
-        return ctrl is not None and getattr(ctrl, "page", None) is not None
+        if ctrl is None:
+            return False
+        try:
+            _ = ctrl.page  # type: ignore[attr-defined]
+            return True
+        except (RuntimeError, AttributeError):
+            return False
 
     def _set_compare(target: str) -> None:
         if target == compare:
@@ -117,7 +127,7 @@ def ResultScreen() -> ft.Control:
             try:
                 await v.stop()
             except Exception as exc:
-                logger.debug("Preview stop failed: %s", exc)
+                logger.warning("Preview stop failed: %s", exc)
 
         page.run_task(_stop)
 

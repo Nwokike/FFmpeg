@@ -701,7 +701,7 @@ def CaptureScreen() -> ft.Control:
                 )
                 return
         except Exception as exc:
-            logger.debug("Recorder has_permission check failed: %s", exc)
+            logger.warning("Recorder has_permission check failed: %s", exc)
         # The chip value is the current render state; the ref is only a
         # snapshot for asynchronous teardown.  Reading the ref here made Opus
         # and AAC selections silently fall back to the initial PCM16 take.
@@ -767,7 +767,7 @@ def CaptureScreen() -> ft.Control:
                 show_snack(page, "Recorder didn't start — mic may be in use", bgcolor=ERROR)
                 return
         except Exception as exc:
-            logger.debug("is_recording check failed: %s", exc)
+            logger.warning("is_recording check failed: %s", exc)
         set_recording(True)
         set_rec_paused(False)
         _start_ticker()
@@ -781,8 +781,11 @@ def CaptureScreen() -> ft.Control:
                 await rec.resume_recording()
             else:
                 await rec.pause_recording()
-            # Read the recorder's truth — a local flip desyncs on native failure.
-            set_rec_paused(bool(await rec.is_paused()))
+            paused_now = bool(await rec.is_paused())
+            set_rec_paused(paused_now)
+            # The 1s ticker keeps going while the button says Resume — gate it
+            # on the recorder's actual paused state so the MM:SS freezes too.
+            ticking_ref.current = not paused_now
         except Exception as exc:
             logger.warning("Pause toggle failed: %s", exc)
             show_snack(page, f"Pause failed: {exc}", bgcolor=ERROR)
