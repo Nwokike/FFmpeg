@@ -201,6 +201,17 @@ def CutScreen() -> ft.Control:
     def _start_cut(_):
         if not media_path or cut_duration <= 0.05:
             return
+        # Frame-accurate re-encode needs a verified encoder; stream-copy
+        # needs none.  Gate only the re-encode path on the probe.
+        if not stream_copy and app_state.probe_info is None:
+            from core.notify import ERROR, show_snack
+
+            show_snack(
+                page,
+                "Still probing engine capabilities — try again in a moment.",
+                bgcolor=ERROR,
+            )
+            return
         set_is_processing(True)
         _pause_scrub()  # the encode needs the CPU the preview would otherwise burn
 
@@ -448,7 +459,10 @@ def CutScreen() -> ft.Control:
                 f"Cut Segment ({_format_time_s(cut_duration)})",
                 icon=ft.Icons.CONTENT_CUT_ROUNDED,
                 height=48,
-                disabled=not media_path or is_processing or cut_duration <= 0.05,
+                disabled=not media_path
+                or is_processing
+                or cut_duration <= 0.05
+                or (not stream_copy and app_state.probe_info is None),
                 on_click=_start_cut,
             ),
         ],

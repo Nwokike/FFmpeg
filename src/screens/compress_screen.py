@@ -33,6 +33,10 @@ def CompressScreen() -> ft.Control:
     target_mb, set_target_mb = ft.use_state(16.0)  # Default 16MB (WhatsApp)
     is_processing, set_is_processing = ft.use_state(False)
 
+    # The engine falls back to the first verified encoder, but starting
+    # before the probe lands still guesses — gate Start like Convert does.
+    probing = app_state.probe_info is None
+
     # Preset sizes (MB)
     presets = [
         ("whatsapp", "WhatsApp (16 MB)", 16.0),
@@ -47,6 +51,15 @@ def CompressScreen() -> ft.Control:
 
     def _start_compression(_):
         if not media_path:
+            return
+        if probing:
+            from core.notify import ERROR, show_snack
+
+            show_snack(
+                page,
+                "Still probing engine capabilities — try again in a moment.",
+                bgcolor=ERROR,
+            )
             return
         set_is_processing(True)
 
@@ -161,12 +174,30 @@ def CompressScreen() -> ft.Control:
                 padding=SPACE_MD,
                 is_dark=is_dark,
             ),
-            # Action button
+            # Action button — gated on the probe like Convert.
+            *(
+                [
+                    ft.Row(
+                        controls=[
+                            ft.ProgressRing(width=22, height=22),
+                            ft.Text(
+                                "Probing engine capabilities…",
+                                size=FONT_XS,
+                                color=muted,
+                            ),
+                        ],
+                        alignment=ft.MainAxisAlignment.CENTER,
+                        spacing=SPACE_SM,
+                    )
+                ]
+                if probing
+                else []
+            ),
             ft.FilledButton(
                 f"Compress to ≤ {target_mb:.1f} MB",
                 icon=ft.Icons.CHECK_ROUNDED,
                 height=48,
-                disabled=not media_path or is_processing,
+                disabled=not media_path or is_processing or probing,
                 on_click=_start_compression,
             ),
         ],

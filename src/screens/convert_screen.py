@@ -6,6 +6,7 @@ from pathlib import Path
 
 import flet as ft
 
+from core.notify import ERROR, show_snack
 from core.state import Job, use_app_state
 from core.storage_paths import format_bytes, get_temp_dir
 from core.styles import card_container, section_header
@@ -110,8 +111,23 @@ def ConvertScreen() -> ft.Control:
     allowed_containers = _containers_for(media_kind)
     chosen_container = container_fmt if container_fmt in allowed_containers else default_container
 
+    # Probe state: None until the boot capability probe lands.  Starting a
+    # job before that means guessing the encoder — the phone log showed
+    # H.264-encode jobs failing on the LGPL wheel for exactly this reason.
+    probing = app_state.probe_info is None
+
+    def show_snack_needs_probe() -> None:
+        show_snack(
+            page,
+            "Still probing engine capabilities — try again in a moment.",
+            bgcolor=ERROR,
+        )
+
     def _start_conversion(_):
         if not media_path:
+            return
+        if probing or not available_video:
+            show_snack_needs_probe()
             return
         set_is_processing(True)
 
@@ -274,12 +290,31 @@ def ConvertScreen() -> ft.Control:
                 if media_kind == "video"
                 else []
             ),
-            # Action Button
+            # Action Button — gated on the probe so Start can never fire with
+            # a guessed (possibly unencodable) default codec.
+            *(
+                [
+                    ft.Row(
+                        controls=[
+                            ft.ProgressRing(width=22, height=22),
+                            ft.Text(
+                                "Probing engine capabilities…",
+                                size=FONT_SM,
+                                color=muted,
+                            ),
+                        ],
+                        alignment=ft.MainAxisAlignment.CENTER,
+                        spacing=SPACE_SM,
+                    )
+                ]
+                if probing
+                else []
+            ),
             ft.FilledButton(
                 "Start Conversion",
                 icon=ft.Icons.PLAY_ARROW_ROUNDED,
                 height=48,
-                disabled=not media_path or is_processing,
+                disabled=not media_path or is_processing or probing or not available_video,
                 on_click=_start_conversion,
             ),
         ],

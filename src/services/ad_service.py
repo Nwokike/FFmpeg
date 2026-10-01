@@ -99,7 +99,19 @@ class AdService:
         except Exception as exc:
             # Fail closed: without a consent decision we must not request ads
             # (UMP/Play policy) — a failed check cannot grant permission.
-            logger.warning("UMP consent check failed (fail closed, no ads): %s", exc)
+            # Code 3 / "Publisher misconfiguration" means the AdMob dashboard
+            # has no UMP consent form for this app ID — a dashboard task, not
+            # an app bug. Log it at error with the fix so it stops looking
+            # like a crash in the terminal.
+            msg = str(exc)
+            if "failed (3)" in msg or "misconfigur" in msg.lower() or "no form" in msg.lower():
+                logger.exception(
+                    "UMP consent misconfigured: no consent form for this app ID "
+                    "(AdMob → Privacy & messaging → create a UMP form, then "
+                    "republish). Ads stay off until then"
+                )
+            else:
+                logger.warning("UMP consent check failed (fail closed, no ads): %s", exc)
             self._can_request_ads = False
         finally:
             # Publish through the observable so every mounted banner slot

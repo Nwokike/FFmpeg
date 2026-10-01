@@ -441,10 +441,16 @@ def CaptureScreen() -> ft.Control:
         cam = camera_ref.current
         if cam is None:
             return
+        if not _is_mounted(cam):
+            logger.warning("Camera preview pause skipped: control not mounted")
+            camera_ref.current = None
+            camera_inited_ref.current = False
+            camera_audio_mode_ref.current = None
+            return
         try:
             await cam.pause_preview()
         except Exception as exc:
-            logger.debug("Camera preview pause during mode switch failed: %s", exc)
+            logger.warning("Camera preview pause during mode switch failed: %s", exc)
         camera_ref.current = None
         camera_inited_ref.current = False
         camera_audio_mode_ref.current = None
@@ -570,6 +576,10 @@ def CaptureScreen() -> ft.Control:
         cam = camera_ref.current
         if cam is None:
             return
+        if not camera_inited_ref.current or not _is_mounted(cam):
+            logger.warning("Video stop skipped: camera not mounted")
+            show_snack(page, "Camera is still starting…")
+            return
         _stop_ticker()
         set_busy(True)
         try:
@@ -597,6 +607,7 @@ def CaptureScreen() -> ft.Control:
             await _finish_video()
             return
         if not camera_inited_ref.current or not _is_mounted(cam):
+            logger.warning("Video record blocked: camera not mounted")
             show_snack(page, "Camera is still starting…")
             return
         # Video mode initializes the camera WITH audio — gate on the mic grant
@@ -621,6 +632,7 @@ def CaptureScreen() -> ft.Control:
     async def _pause_video() -> None:
         cam = camera_ref.current
         if cam is None or not _is_mounted(cam):
+            logger.warning("Video pause skipped: camera not mounted")
             return
         try:
             if rec_paused:
@@ -973,6 +985,10 @@ def CaptureScreen() -> ft.Control:
     )
 
     # Capture controls
+    # Photo/Video buttons stay disabled until the camera is both created AND
+    # initialized — tapping mid-mount used to crash with "Control must be
+    # added to the page first" on the phone (19:02:14 device log).
+    cam_live = camera_ready and camera_inited_ref.current
     controls: list[ft.Control] = []
     if not captured_path:
         if mode == "photo":
@@ -982,7 +998,7 @@ def CaptureScreen() -> ft.Control:
                     icon=ft.Icons.PHOTO_CAMERA_ROUNDED,
                     height=48,
                     expand=True,
-                    disabled=busy or recording,
+                    disabled=busy or recording or not cam_live,
                     on_click=lambda _: page.run_task(_take_photo),
                 )
             )
@@ -1021,7 +1037,7 @@ def CaptureScreen() -> ft.Control:
                         icon=ft.Icons.VIDEOCAM_ROUNDED,
                         height=48,
                         expand=True,
-                        disabled=busy,
+                        disabled=busy or not cam_live,
                         on_click=lambda _: page.run_task(_toggle_video),
                     )
                 )

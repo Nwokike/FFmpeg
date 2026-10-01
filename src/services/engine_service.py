@@ -1036,6 +1036,21 @@ class EngineService:
 
             video_reformatter = VideoReformatter()
             last_video_pts = -1
+            # Packet-level DTS floor per output stream index: the encoder can
+            # still emit two packets with identical DTS even when frame PTS is
+            # strictly monotonic (observed 12800 >= 12800 on the phone's wheel).
+            # The MP4 muxer rejects those, so bump at mux time — same pattern
+            # the concat path uses at encode time.
+            last_mux_dts: dict[int, int] = {}
+
+            def _mux_packet(container, pkt) -> None:
+                stream_idx = pkt.stream.index if pkt.stream is not None else -1
+                if pkt.dts is not None:
+                    floor = last_mux_dts.get(stream_idx)
+                    if floor is not None and pkt.dts <= floor:
+                        pkt.dts = floor + 1
+                    last_mux_dts[stream_idx] = pkt.dts
+                container.mux(pkt)
 
             def _monotonic_video_pts(frame: av.VideoFrame) -> None:
                 """Rebase every output frame to the encoder time base.
@@ -1133,7 +1148,7 @@ class EngineService:
                             if out_video:
                                 _monotonic_video_pts(frame)
                                 for enc_pkt in out_video.encode(frame):
-                                    out.mux(enc_pkt)
+                                    _mux_packet(out, enc_pkt)
 
                 elif in_audio and packet.stream == in_audio:
                     for frame in _decode_packet(packet):
@@ -1149,7 +1164,7 @@ class EngineService:
                         for frame in out_frames:
                             _monotonic_audio_pts(frame)
                             for enc_pkt in out_audio.encode(frame):
-                                out.mux(enc_pkt)
+                                _mux_packet(out, enc_pkt)
 
                 now = time.monotonic()
                 if on_progress and (now - last_report >= 0.25):
@@ -1177,17 +1192,17 @@ class EngineService:
                         )
                     _monotonic_video_pts(frame)
                     for enc_pkt in out_video.encode(frame):
-                        out.mux(enc_pkt)
+                        _mux_packet(out, enc_pkt)
             if audio_graph is not None and out_audio:
                 for frame in _drain_graph(audio_graph):
                     for enc_pkt in out_audio.encode(frame):
-                        out.mux(enc_pkt)
+                        _mux_packet(out, enc_pkt)
             if out_video:
                 for enc_pkt in out_video.encode(None):
-                    out.mux(enc_pkt)
+                    _mux_packet(out, enc_pkt)
             if out_audio:
                 for enc_pkt in out_audio.encode(None):
-                    out.mux(enc_pkt)
+                    _mux_packet(out, enc_pkt)
 
             if on_progress:
                 on_progress(1.0, "Complete")
@@ -3122,6 +3137,124 @@ class EngineService:
             inp_b.close()
 
     @staticmethod
+    def _parse_hls_playlist(text: str, base: str) -> tuple[list[str], bool, str | None]:
+        """Split an HLS playlist into segment URLs.
+
+        Returns ``(segments, is_master, key_error)``.  A master variant
+        playlist (``#EXT-X-STREAM-INF``) resolves to the highest-BANDWIDTH
+        media playlist URL as the single "segment" for the caller to recurse
+        into; ``key_error`` names the cause when ``#EXT-X-KEY`` (encrypted
+        segments) is present, which this offline-concat path cannot decrypt.
+        """
+        lines = [ln.strip() for ln in text.splitlines()]
+        key_error = None
+        for ln in lines:
+            if ln.startswith("#EXT-X-KEY"):
+                key_error = f"encrypted segments are not supported ({ln[:80]})"
+                break
+        is_master = any(ln.startswith("#EXT-X-STREAM-INF") for ln in lines)
+        variants: list[tuple[int, str]] = []
+        segs: list[str] = []
+        pending_bw = 0
+        for ln in lines:
+            if ln.startswith("#EXT-X-STREAM-INF"):
+                bw = 0
+                for part in ln.split(":", 1)[1].split(","):
+                    if part.strip().upper().startswith("BANDWIDTH="):
+                        try:
+                            bw = int(part.split("=", 1)[1])
+                        except ValueError:
+                            bw = 0
+                pending_bw = bw
+                continue
+            if not ln or ln.startswith("#"):
+                continue
+            url = urljoin(base, ln)
+            if is_master:
+                variants.append((pending_bw, url))
+                pending_bw = 0
+            else:
+                segs.append(url)
+        if variants:
+            variants.sort(key=lambda v: v[0], reverse=True)
+            return [variants[0][1]], True, key_error
+        return segs, False, key_error
+
+    @staticmethod
+    def _hls_fetch_text(client, url: str) -> str:
+        """GET a playlist URL, raising a loud error on failure."""
+        resp = client.get(url, timeout=(10.0, 30.0))
+        resp.raise_for_status()
+        return resp.text
+
+    @staticmethod
+    def _hls_download_segment(client, seg: str, chunk_size: int, on_cancel) -> bytes:
+        """Download one media segment, rejecting HTML/text error pages."""
+        parts: list[bytes] = []
+        with client.stream("GET", seg, timeout=(10.0, 30.0)) as resp:
+            resp.raise_for_status()
+            first = True
+            for chunk in resp.iter_bytes(chunk_size=chunk_size):
+                on_cancel()
+                if not chunk:
+                    continue
+                if first:
+                    first = False
+                    # A segment that answers HTML/text is an error page, not
+                    # media — fail loud with the cause instead of a blind EOF
+                    # at av.open time.
+                    head = chunk[:512].lstrip().lower()
+                    if (
+                        head.startswith((b"<!doctype", b"<html", b"<head", b"{", b"<"))
+                        and b"#extm3u" not in chunk[:512].lower()
+                    ):
+                        raise ValueError(
+                            f"Segment is not media ({seg[:80]}…) — the server returned an error page"
+                        )
+                parts.append(chunk)
+        return b"".join(parts)
+
+    @staticmethod
+    def _download_hls_segments(client, url: str, on_cancel) -> list[tuple[str, bytes]]:
+        """Resolve master→media playlist and download every segment.
+
+        Raises a loud, specific ValueError for encrypted streams, empty
+        playlists, error-page segments, or payloads too small to be media.
+        """
+        playlist = EngineService._hls_fetch_text(client, url)
+        base = urljoin(url, ".")
+        segments, is_master, key_error = EngineService._parse_hls_playlist(playlist, base)
+        if key_error is not None:
+            raise ValueError(f"This stream is encrypted and can't be recorded offline: {key_error}")
+        if is_master:
+            # The master holds variant URLs, not media bytes — writing those
+            # produced the EOF-on-.dat failure. Recurse into the top variant.
+            media_url = segments[0]
+            logger.info("HLS master playlist — using %s", media_url)
+            playlist = EngineService._hls_fetch_text(client, media_url)
+            base = urljoin(media_url, ".")
+            segments, _, key_error = EngineService._parse_hls_playlist(playlist, base)
+            if key_error is not None:
+                raise ValueError(
+                    f"This stream is encrypted and can't be recorded offline: {key_error}"
+                )
+        if not segments:
+            raise ValueError("HLS playlist contained no media segments")
+        out: list[tuple[str, bytes]] = []
+        for seg in segments:
+            on_cancel()
+            out.append(
+                (seg, EngineService._hls_download_segment(client, seg, 256 * 1024, on_cancel))
+            )
+        total = sum(len(b) for _, b in out)
+        if total < 32 * 1024:
+            raise ValueError(
+                f"Stream produced too little data to be media ({total} bytes) — "
+                "check the URL and your network"
+            )
+        return out
+
+    @staticmethod
     def _open_https_via_httpx(url: str, cancel_event: Event | None = None):
         """Download an HTTPS (optionally HLS) stream into a local temp file.
 
@@ -3154,31 +3287,14 @@ class EngineService:
 
                 with temp_path.open("wb") as fh:
                     if is_hls:
-                        resp = client.get(url, timeout=(10.0, 30.0))
-                        resp.raise_for_status()
-                        playlist = resp.text
-                        base = urljoin(url, ".")
-                        segments = [
-                            urljoin(base, line.strip())
-                            for line in playlist.splitlines()
-                            if line.strip() and not line.strip().startswith("#")
-                        ]
-                        if not segments:
-                            # Raising inside the try is what triggers the
-                            # partial-file unlink in the except handler.
-                            raise ValueError(  # noqa: TRY301
-                                "HLS playlist contained no media segments"
-                            )
-                        logger.info("HLS playlist: %d segment(s) to download", len(segments))
-                        for seg in segments:
+                        segments = EngineService._download_hls_segments(
+                            client, url, _raise_if_cancelled
+                        )
+                        for _seg, seg_bytes in segments:
                             _raise_if_cancelled()
-                            with client.stream("GET", seg, timeout=(10.0, 30.0)) as resp:
-                                resp.raise_for_status()
-                                for chunk in resp.iter_bytes(chunk_size=chunk_size):
-                                    _raise_if_cancelled()
-                                    if chunk:
-                                        fh.write(chunk)
-                                        total_written += len(chunk)
+                            fh.write(seg_bytes)
+                            total_written += len(seg_bytes)
+                        logger.info("HLS playlist: %d segment(s) to download", len(segments))
                     else:
                         with client.stream("GET", url, timeout=(10.0, 30.0)) as resp:
                             resp.raise_for_status()

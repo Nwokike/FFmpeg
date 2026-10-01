@@ -68,3 +68,35 @@ def test_interstitial_close_handler_is_synced_before_show(monkeypatch):
     assert page.updates >= 1
     assert asyncio.run(service.show_interstitial()) is True
     assert service.interstitial is None
+
+
+def test_consent_misconfiguration_logs_actionable_error(monkeypatch, caplog):
+    """Code-3 / publisher-misconfiguration must log the dashboard fix at error."""
+    import logging
+
+    class Consent:
+        async def request_consent_info_update(self):
+            raise RuntimeError(
+                "Consent info update failed (3): Publisher misconfiguration: "
+                "Failed to read publisher's account configuration; no form(s) "
+                "configured for the input app ID."
+            )
+
+        async def load_and_show_consent_form_if_required(self):
+            return None  # pragma: no cover
+
+        async def can_request_ads(self):
+            return False  # pragma: no cover
+
+    monkeypatch.setattr(ad_module, "_HAS_ADS", True)
+    monkeypatch.setattr(ad_module.fta, "ConsentManager", Consent)
+    page = _Page()
+    service = AdService(page)
+
+    with caplog.at_level(logging.ERROR, logger="AdService"):
+        asyncio.run(service.gather_consent())
+
+    assert service._can_request_ads is False
+    assert any("UMP form" in r.message or "consent form" in r.message for r in caplog.records), (
+        "misconfiguration must name the AdMob UMP-form fix"
+    )

@@ -437,9 +437,16 @@ def _measure() -> EngineProbe:
 def _probe_protocol(proto: str) -> str:
     port = "443" if proto == "https" else "9"
     url = f"{proto}://127.0.0.1:{port}/"
+    # The dead-port open below ALWAYS emits native ERROR lines (connection
+    # refused/timeout) on success paths too — that is the signal, not a
+    # failure.  Swallow them inside this probe window only (av.logging.Capture
+    # verified empirically: native lines suppressed, exception still raised,
+    # no global level change).  Everything outside this function keeps full
+    # native diagnostics.
     try:
-        c = av.open(url, timeout=(1, 2))
-        c.close()
+        with av.logging.Capture():
+            c = av.open(url, timeout=(1, 2))
+            c.close()
         return "present"
     except Exception as exc:
         # PyAV 18 exposes ProtocolNotFoundError; older wheels used
