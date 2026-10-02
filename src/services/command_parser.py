@@ -12,16 +12,21 @@ returned in ``notes`` and shown in the terminal before the job is confirmed.
 from __future__ import annotations
 
 import logging
+import math
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import NoReturn
 
 logger = logging.getLogger("CommandParser")
 
-AUDIO_EXTS = {".mp3", ".aac", ".m4a", ".flac", ".opus", ".wav"}
+AUDIO_EXTS = {".mp3", ".aac", ".m4a", ".flac", ".opus", ".ogg", ".wav"}
 SUBTITLE_EXTS = {".srt", ".vtt", ".ass"}
 VIDEO_EXTS = {".mp4", ".mkv", ".mov", ".avi", ".webm", ".ts", ".flv", ".m4v", ".gif"}
-NO_ARG_FLAGS = {"-y", "-hide_banner", "-nostdin"}
+# Flags taking no value — matched EXACTLY before any prefix scan, so -vn can
+# never be misread as "-v n" (the attached-value fallback below is prefix-based
+# and "-vn" startswith "-v").
+NO_ARG_FLAGS = {"-y", "-hide_banner", "-nostdin", "-vn", "-an", "-sn"}
 # Display-only / ignored-with-note flags: value consumed, behavior unchanged.
 VALUE_FLAGS = {
     "-i",
@@ -53,7 +58,7 @@ REFUSED_FLAGS = {
     "-filter_complex": "build the chain with -vf/-af instead",
     "-map": "stream selection is the Dossier/Remux screen's job",
     "-metadata": "metadata editing is not available in command mode",
-    "-sslide": "",
+    "-sslide": "subtitle stream selection is not available in command mode — the Dossier screen lists tracks",
 }
 ENCODER_PRESETS = {
     "ultrafast",
@@ -72,7 +77,7 @@ class CommandError(ValueError):
     """A command the engine cannot honestly run — surfaced verbatim to the user."""
 
 
-def _refuse(msg: str) -> None:
+def _refuse(msg: str) -> NoReturn:
     logger.warning("Command refused: %s", msg)
     raise CommandError(msg)
 
@@ -99,27 +104,37 @@ def tokenize(command: str) -> list[str]:
 
     ``shlex`` in POSIX mode eats ``C:\\media\\in.mp4`` backslashes — this
     tokenizer keeps every byte inside quotes, only stripping the quotes.
+    Empty quoted strings (``-i ""``) are refused, not silently bound to the
+    next token; backslash escapes are NOT processed (documented: quote the
+    whole path instead of escaping characters).
     """
     tokens: list[str] = []
     buf: list[str] = []
+    buf_has_content = False
     quote: str | None = None
     for ch in command.strip():
         if quote:
             if ch == quote:
                 quote = None
+                buf_has_content = True
             else:
                 buf.append(ch)
         elif ch in "\"'":
             quote = ch
         elif ch.isspace():
-            if buf:
+            if buf or buf_has_content:
+                if not buf and buf_has_content:
+                    _refuse("empty quoted string is not a valid path or value")
                 tokens.append("".join(buf))
                 buf = []
+                buf_has_content = False
         else:
             buf.append(ch)
     if quote:
         _refuse(f"unterminated {quote} quote in command")
-    if buf:
+    if buf or buf_has_content:
+        if not buf and buf_has_content:
+            _refuse("empty quoted string is not a valid path or value")
         tokens.append("".join(buf))
     return tokens
 
@@ -127,6 +142,7 @@ def tokenize(command: str) -> list[str]:
 def _parse_ts(value: str, flag: str) -> float:
     """``HH:MM:SS(.ms)`` | ``MM:SS`` | plain seconds → seconds."""
     bad = f"{flag} expects a timestamp (12, 1:02, or 00:01:02.5), got {value!r}"
+    secs: float | None = None
     if ":" in value:
         parts = value.split(":")
         if len(parts) > 3:
@@ -135,21 +151,23 @@ def _parse_ts(value: str, flag: str) -> float:
             secs = 0.0
             for p in parts:
                 secs = secs * 60 + float(p)
-            return secs
         except ValueError:
             _refuse(bad)
-    try:
-        return float(value)
-    except ValueError:
-        _refuse(bad)
-    raise AssertionError(bad)  # unreachable — _refuse always raises
+    else:
+        try:
+            secs = float(value)
+        except ValueError:
+            _refuse(bad)
+    assert secs is not None  # _refuse always raises on every failure above
+    if not math.isfinite(secs) or secs < 0:
+        _refuse(f"{flag} expects a finite timestamp >= 0, got {value!r}")
+    return secs
 
 
 def _parse_size(value: str, flag: str) -> tuple[int, int]:
     m = re.fullmatch(r"(\d{2,5})x(\d{2,5})", value)
     if not m:
         _refuse(f"{flag} expects WIDTHxHEIGHT (e.g. 1280x720), got {value!r}")
-        raise
     return int(m.group(1)), int(m.group(2))
 
 
@@ -157,7 +175,6 @@ def _parse_bitrate_kbps(value: str, flag: str) -> int:
     m = re.fullmatch(r"(\d+)([kKmM])?", value)
     if not m:
         _refuse(f"{flag} expects a bitrate like 128k, got {value!r}")
-        raise
     n = int(m.group(1))
     unit = (m.group(2) or "").lower()
     return n * 1000 if unit == "m" else n
@@ -180,7 +197,7 @@ def _parse_vf(vf: str, params: dict, notes: list[str]) -> None:
             params["scale_height"] = int(m_scale[2])
         elif name == "fps":
             try:
-                params["fps"] = int(float(arg_list[0]))
+                params["fps"] = round(float(arg_list[0]))
             except (ValueError, IndexError):
                 _refuse(f"-vf fps expects a number, got {part!r}")
         elif name == "crop":
@@ -191,20 +208,26 @@ def _parse_vf(vf: str, params: dict, notes: list[str]) -> None:
                 "instead; use the Filters screen or -vf scale=W:H"
             )
         elif name == "transpose":
-            deg = {"0": 90, "1": 90, "2": 270, "3": 270}.get(
-                (arg_list[0].split(";")[0] if arg_list else "").strip()
-            )
+            # ffmpeg transpose: 0 = 90deg CCW, 1 = 90deg CW, 2 = 90deg CCW + flip,
+            # 3 = 90deg CW + flip; clock/cclock are the named equivalents. The
+            # engine rotates by right angles only (flips need the Filters
+            # screen), so 2/3 map to their rotation with an honest note.
+            raw = (arg_list[0].split(";")[0] if arg_list else "").strip().lower()
+            named = {"clock": 90, "cclock": 270}
+            deg = named[raw] if raw in named else {"0": 270, "1": 90, "2": 270, "3": 90}.get(raw)
             if deg is None:
-                _refuse(f"-vf transpose expects 0-3, got {part!r}")
+                _refuse(f"-vf transpose expects 0-3 (or clock/cclock), got {part!r}")
             params["rotation"] = (params.get("rotation", 0) + deg) % 360
-            notes.append("transpose approximated as rotation")
+            notes.append(
+                "transpose approximated as rotation (flip component needs the Filters screen)"
+            )
         elif name in ("hflip", "vflip"):
             _refuse(f"-vf {name} is not available in command mode — use the Filters screen")
         elif name == "atempo":
-            try:
-                params["speed"] = round(params.get("speed", 1.0) * float(arg_list[0]), 4)
-            except (ValueError, IndexError):
-                _refuse(f"-vf atempo expects a factor (0.5-2.0), got {part!r}")
+            _refuse(
+                "-vf atempo is an AUDIO filter — real ffmpeg rejects it in -vf too; "
+                "use -af atempo=FACTOR instead"
+            )
         elif name == "eq":
             eq = params.setdefault("eq", {})
             for kv in arg_list:
@@ -243,10 +266,19 @@ def _parse_af(af: str, params: dict, notes: list[str]) -> None:
             params["target_lufs"] = float(m.group(1)) if m else -16.0
             notes.append("loudnorm run as the engine's two-pass master")
         elif name in ("volume",):
+            # ffmpeg volume takes a linear factor (1.5 = 150%) or dB with a
+            # dB suffix (6dB approx 2x). The engine wants percent: linear x 100,
+            # dB to 10^(dB/20) x 100. rstrip("dB") would strip a CHARACTER SET, not
+            # a suffix — strip exact suffixes only.
+            raw_arg = args.strip()
             try:
-                params["volume_pct"] = max(1, min(400, round(float(args.rstrip("dB")))))
+                if raw_arg.lower().endswith("db"):
+                    pct = (10 ** (float(raw_arg[:-2]) / 20.0)) * 100.0
+                else:
+                    pct = float(raw_arg) * 100.0
+                params["volume_pct"] = max(1, min(400, round(pct)))
             except ValueError:
-                _refuse(f"-af volume expects e.g. 1.5 or 150, got {part!r}")
+                _refuse(f"-af volume expects e.g. 1.5 (=150%) or 6dB, got {part!r}")
         else:
             _refuse(f"-af filter {name!r} is not available in command mode")
 
@@ -283,12 +315,17 @@ def parse_command(
 
     inputs: list[str] = []
     flags: dict[str, str] = {}
+    stream_flags: set[str] = set()  # -vn/-an/-sn presence (no values to store)
     positionals: list[str] = []
     notes: list[str] = []
     i = 0
     while i < len(tokens):
         tok = tokens[i]
         if tok in NO_ARG_FLAGS:
+            # -vn/-an/-sn must be VISIBLE downstream — skipping them here is
+            # what made `drop_video` permanently False.
+            if tok in ("-vn", "-an", "-sn"):
+                stream_flags.add(tok)
             i += 1
             continue
         if tok.startswith("-"):
@@ -296,7 +333,9 @@ def parse_command(
             if name in REFUSED_FLAGS:
                 _refuse(f"{name} is not supported in command mode — {REFUSED_FLAGS[name]}")
             if name not in VALUE_FLAGS:
-                # attached-value form: -crf23 / -presetfast
+                # attached-value form: -crf23 / -presetfast. NO_ARG_FLAGS was
+                # already exact-matched above, so -vn/-an/-sn never reach this
+                # prefix scan (that was the "-vn parsed as -v n" bug).
                 attached = next(
                     (
                         f
@@ -319,6 +358,14 @@ def parse_command(
             if name == "-i":
                 inputs.append(value)
             else:
+                # Duplicates are refused, not last-wins: silently keeping the
+                # last -ss/-vf/-crf while dropping the first violates the
+                # never-silently-drops contract. (-i accumulates by design.)
+                if name in flags:
+                    _refuse(
+                        f"duplicate {name} ({flags[name]!r}, then {value!r}) — "
+                        "run one command per value instead"
+                    )
                 flags[name] = value
             i += 1
             continue
@@ -338,6 +385,13 @@ def parse_command(
         if missing:
             _refuse("input file(s) not found: " + ", ".join(missing))
 
+    # The engine would clobber the input — refuse before anything is opened.
+    try:
+        if any(Path(src).resolve() == Path(output).resolve() for src in inputs):
+            _refuse(f"input and output are the same file ({output}) — pick another output name")
+    except OSError:
+        pass
+
     out_ext = Path(output).suffix.lower()
 
     # ── display-only acceptances ─────────────────────────────────────────
@@ -351,6 +405,28 @@ def parse_command(
 
     # ── multi-input → concat ─────────────────────────────────────────────
     if len(inputs) > 1:
+        # A join takes paths + container only. Anything else on the line
+        # (-ss/-vf/-crf/-c…) would be silently discarded, so refuse loudly.
+        shaping = sorted(
+            name
+            for name in flags
+            if name
+            not in (
+                "-i",
+                "-f",
+                "-loglevel",
+                "-v",
+                "-pix_fmt",
+                "-y",
+                "-hide_banner",
+                "-nostdin",
+            )
+        )
+        if shaping:
+            _refuse(
+                f"joining {len(inputs)} inputs takes no per-clip flags — "
+                f"these would be ignored: {', '.join(shaping)}"
+            )
         return OpPlan(
             op="concat",
             input_path=inputs[0],
@@ -383,7 +459,7 @@ def parse_command(
         _map_video_codec(flags.get("-c:v") or flags.get("-vcodec", ""), params, notes)
     if "-r" in flags:
         try:
-            params["fps"] = int(float(flags["-r"]))
+            params["fps"] = round(float(flags["-r"]))
         except ValueError:
             _refuse(f"-r expects a frame rate (24, 25, 29.97…), got {flags['-r']!r}")
     if "-s" in flags:
@@ -427,10 +503,31 @@ def parse_command(
     else:
         end = None
 
+    # Anything that forces pixels through the encoder — including the codec
+    # itself, audio shaping, and every codec-carrying -vf node — means this
+    # is a re-encode. Default is re-encode (like real ffmpeg); only an
+    # explicit `-c copy` with NO encode flags takes the instant path.
+    # NOTE: `-c:v copy` / `-c:a copy` request NO re-encode, so copy-valued
+    # codec flags are excluded from the encode set (they gate remux below).
+    def _codec_flag_requests_encode(name: str) -> bool:
+        return name in ("-c:v", "-vcodec", "-c:a", "-acodec") and flags.get(name) != "copy"
+
+    _ENCODE_VF_NODES = ("transpose", "eq", "hqdn3d", "unsharp")
+    vf_text = flags.get("-vf", "")
     has_encode_flags = (
-        any(k in params for k in ("crf", "preset", "fps"))
+        any(k in params for k in ("crf", "preset", "fps", "video_codec"))
         or bool(params.get("scale_width"))
         or "-vf" in flags
+        or "-af" in flags
+        or any(k in params for k in ("speed", "volume_pct", "target_lufs"))
+        or "-r" in flags
+        or "-s" in flags
+        or "-b:v" in flags
+        or "-b:a" in flags
+        or "-ar" in flags
+        or "-ac" in flags
+        or any(_codec_flag_requests_encode(name) for name in flags)
+        or any(node in vf_text for node in _ENCODE_VF_NODES)
     )
 
     # Output-extension routing wins over time-range routing: a gif/subtitle/
@@ -450,32 +547,43 @@ def parse_command(
             start = 0.0
         if end <= start:
             _refuse(f"empty range: start {start}s >= end {end}s")
-        copy = not has_encode_flags and flags.get("-c", "") in ("copy", "")
+        # Explicit `-c copy` with no encode flags: instant trim. Everything
+        # else re-encodes (real ffmpeg's default) — and a -crf/-preset that
+        # forced the re-encode is CARRIED into params, never dropped.
+        copy = flags.get("-c", "") == "copy" and not has_encode_flags
         if "-c" in flags and flags["-c"] != "copy":
             _map_video_codec(flags["-c"], params, notes)
             copy = False
-        if copy:
-            notes.append("stream copy — instant, bit-exact trim")
+        cut_params: dict = {
+            "start_seconds": float(start),
+            "end_seconds": float(end),
+            "stream_copy": bool(copy),
+        }
+        if not copy:
+            notes.append("frame-accurate re-encode trim")
+            for key in ("crf", "preset"):
+                if key in params:
+                    cut_params[key] = params[key]
         else:
-            notes.append(
-                "trim re-encodes (crf/preset for trims use engine defaults)"
-                if "-crf" in flags or "-preset" in flags
-                else "frame-accurate re-encode trim"
-            )
+            notes.append("stream copy — instant, bit-exact trim")
         return OpPlan(
             op="cut",
             input_path=src,
             output_path=output,
-            params={
-                "start_seconds": float(start),
-                "end_seconds": float(end),
-                "stream_copy": bool(copy),
-            },
+            params=cut_params,
             notes=notes,
         )
 
     # ── pure stream copy (no time range) → remux ─────────────────────────
-    if flags.get("-c") == "copy" and not has_encode_flags and out_ext not in AUDIO_EXTS:
+    # `-c copy`, `-c:v copy`, and `-c:a copy` all mean "don't re-encode".
+    copy_requested = (
+        flags.get("-c") == "copy"
+        or flags.get("-c:v") == "copy"
+        or flags.get("-vcodec") == "copy"
+        or flags.get("-c:a") == "copy"
+        or flags.get("-acodec") == "copy"
+    )
+    if copy_requested and not has_encode_flags and out_ext not in AUDIO_EXTS:
         if out_ext != ".mkv":
             _refuse(
                 "lossless -c copy remuxes to Matroska in this engine — "
@@ -490,39 +598,65 @@ def parse_command(
         )
 
     # ── audio-only extraction ────────────────────────────────────────────
-    drop_video = "-vn" in flags
-    if drop_video or (out_ext in AUDIO_EXTS and "-c:v" not in flags and "-vf" not in flags):
+    drop_video = "-vn" in stream_flags
+    if drop_video or out_ext in AUDIO_EXTS:
         fmt = out_ext.lstrip(".") or "mp3"
-        if fmt not in ("mp3", "aac", "m4a", "flac", "opus", "wav"):
+        if fmt not in ("mp3", "aac", "m4a", "flac", "opus", "ogg", "wav"):
             _refuse(
                 f"-vn with {out_ext or 'no'} output extension — name an audio "
-                "output (.mp3 .m4a .flac .opus .wav)"
+                "output (.mp3 .m4a .flac .opus .ogg .wav)"
             )
         merged = {"format_name": fmt, **audio_params}
         if "target_lufs" in params:
             merged["target_lufs"] = params.pop("target_lufs")
-        if any(k in params for k in ("speed", "volume_pct", "scale_width", "fps", "rotation")):
+        # Every shaping key the extractor cannot consume must refuse — a
+        # dropped -vf scale would hand back the full track while the user
+        # believes it was shaped.
+        shaping_keys = (
+            "speed",
+            "volume_pct",
+            "scale_width",
+            "scale_height",
+            "fps",
+            "rotation",
+            "crf",
+            "preset",
+            "video_codec",
+            "denoise",
+            "sharpen",
+            "eq",
+        )
+        dropped_shaping = sorted(k for k in shaping_keys if k in params)
+        if dropped_shaping:
             _refuse(
-                "shaping filters cannot ride an extraction — use a video output, "
-                "or the Audio Studio screen for volume/speed"
+                f"shaping ({', '.join(dropped_shaping)}) cannot ride an extraction — "
+                "use a video output, or the Audio Studio screen for volume/speed/loudness"
             )
         if audio_codec and audio_codec != "copy":
             codec_fmt = {
                 "libmp3lame": "mp3",
+                "mp3": "mp3",
                 "aac": "aac",
                 "flac": "flac",
                 "libopus": "opus",
                 "opus": "opus",
+                "vorbis": "ogg",
+                "libvorbis": "ogg",
                 "pcm_s16le": "wav",
+                "pcm_s24le": "wav",
+                "alac": "m4a",
             }.get(audio_codec)
             if codec_fmt:
                 merged["format_name"] = codec_fmt
-            elif audio_codec != "copy":
+            else:
                 _refuse(f"-c:a {audio_codec!r} is not an extractable audio format")
         elif audio_codec == "copy":
             _refuse("-c:a copy with -vn would need a container remux, not an extract")
         if start is not None or end is not None:
-            notes.append("time range ignored — extraction covers the full track")
+            _refuse(
+                "time ranges need a cut first — extraction covers the full track; "
+                "trim to a file, then extract from the trim"
+            )
         return OpPlan(
             op="extract_audio",
             input_path=src,
@@ -533,15 +667,17 @@ def parse_command(
 
     # ── subtitle extraction ──────────────────────────────────────────────
     if out_ext in SUBTITLE_EXTS:
-        sub_notes = notes
         if start is not None or end is not None:
-            sub_notes = [*notes, "time range ignored — full subtitle track extracted"]
+            _refuse(
+                "time ranges need a cut first — subtitle extraction covers the full "
+                "track; trim to a file, then extract from the trim"
+            )
         return OpPlan(
             op="extract_subtitles",
             input_path=src,
             output_path=output,
             params={"format_name": out_ext.lstrip("."), "stream_index": 0},
-            notes=sub_notes,
+            notes=notes,
         )
 
     # ── GIF ──────────────────────────────────────────────────────────────
@@ -549,9 +685,13 @@ def parse_command(
         gif_params = {
             "fps": params.get("fps", 15),
             "width": params.get("scale_width", 480),
-            "start_s": float(start or 0.0),
-            "duration_s": float((end - start) if (start is not None and end) else 5.0),
+            "start_s": float(start) if start is not None else 0.0,
+            "duration_s": float(end - start)
+            if (start is not None and end is not None)
+            else (float(duration_s - (start or 0.0)) if duration_s else 5.0),
         }
+        if start is None and end is None and not duration_s:
+            notes.append("no range given — first 5s becomes the GIF (pass -ss/-t to choose)")
         return OpPlan(
             op="create_gif",
             input_path=src,
@@ -565,6 +705,15 @@ def parse_command(
         params["audio_codec"] = audio_codec
     elif audio_codec == "copy":
         notes.append("-c:a copy inside a transcode is not possible — audio re-encoded")
+    if "target_lufs" in params:
+        _refuse(
+            "-af loudnorm targets mastered audio — use the Audio Studio screen "
+            "(a video convert has no loudness slot to put it in)"
+        )
+    if "-c" in flags and flags["-c"] not in ("copy", ""):
+        # A bare `-c <codec>` that survived the cut branch (no time range):
+        # treat it as the video codec rather than dropping it.
+        _map_video_codec(flags["-c"], params, notes)
     if drop_video and out_ext in VIDEO_EXTS:
         _refuse("-vn with a video output extension — name an audio extension instead")
     return OpPlan(
@@ -582,18 +731,19 @@ def help_text() -> str:
         [
             "ffmpeg command mode — FFmpeg libraries via PyAV (no binary)",
             "",
-            "inputs     -i <file>            (2+ inputs → join)",
-            "trim       -ss <ts> [-t <dur> | -to <ts>]  (+ -c copy = instant)",
+            "inputs     -i <file>            (2+ inputs → join, flags refused)",
+            "trim       -ss <ts> [-t <dur> | -to <ts>]  (re-encodes; + -c copy = instant)",
             "convert    -c:v libx264|libx265 -crf 0-51 -preset <name>",
-            "audio out  -vn / .mp3 .m4a .flac .opus .wav out",
+            "audio out  -vn / .mp3 .m4a .flac .opus .ogg .wav out",
             "             -b:a 128k -ar 44100 -ac 2",
-            "filters     -vf scale,fps,crop,transpose,atempo,eq,hqdn3d,unsharp",
+            "filters     -vf scale,fps,transpose,eq,hqdn3d,unsharp",
             "             -af atempo,loudnorm,volume",
-            "lossless   -c copy out.mkv     (remux)",
-            "gif        out.gif  [-ss -t -r]",
+            "lossless   -c copy out.mkv     (remux; -c:v/-c:a copy honoured)",
+            "gif        out.gif  [-ss -t | -to] [-r]",
             "subs       out.srt|vtt|ass",
             "",
             "refused loudly (never silently): -filter_complex, -map, -metadata,",
-            "hflip/vflip, exotic filters. See any screen's Dossier for probes.",
+            "-sslide, hflip/vflip, -vf crop/atempo, duplicates, shaping on",
+            "extracts, time-boxed extracts, input==output. Probes via Dossier.",
         ]
     )

@@ -19,6 +19,11 @@ import av
 import av.codec
 import av.filter
 
+try:
+    from av.codec.hwaccel import hwdevices_available as _hwdevices_available
+except Exception:  # pragma: no cover - build without hwaccel module
+    _hwdevices_available = None
+
 from core.storage_paths import get_cache_dir
 
 logger = logging.getLogger(__name__)
@@ -159,7 +164,7 @@ class EngineProbe:
     @property
     def hls_ok(self) -> bool:
         """HLS is a DEMUXER (format), never a protocol — see PROTOCOLS."""
-        return "hls" in self.formats or "hls" in self.codecs
+        return "hls" in self.formats
 
     @property
     def dash_ok(self) -> bool:
@@ -181,7 +186,7 @@ class EngineProbe:
         lines = [
             f"av {self.av_version}",
             f"libraries: {self.library_versions or 'unavailable'}",
-            f"codecs: {self.codec_count} total | decoders verified: {self.decoder_count}",
+            f"codecs: {self.codec_count} total | preferred encoders verified: {self.encoder_count} | preferred decoders verified: {self.decoder_count}",
             f"filters: {self.filter_count} | formats: {self.format_count}",
             f"bitstream filters: {len(self.bitstream_filters)}",
             f"video encoders (verified): {', '.join(self.video_encoder_picks) or 'NONE'}",
@@ -230,20 +235,25 @@ def _codec_mode_available(name: str, mode: str) -> bool:
 
 
 def _find_attr(root, *names) -> set[str]:
-    """Find a name-set on `root`, in the `av.format` module, or under `av.*`."""
+    """Find a name-set on `root` or in the `av.format` module."""
     for name in names:
         obj = getattr(root, name, None)
         if obj is not None:
             return _as_name_set(obj)
-        try:
-            import importlib
+        # `names` entries after the first are dotted attr paths like
+        # "av.format.formats_available" — split the module off the front and
+        # import THAT (importing the full dotted path is never a module).
+        if "." in name:
+            mod_name, _, attr = name.rpartition(".")
+            try:
+                import importlib
 
-            mod = importlib.import_module(name)
-            obj = getattr(mod, "formats_available", None)
+                mod = importlib.import_module(mod_name or name)
+                obj = getattr(mod, attr or name, None)
+            except Exception:
+                continue
             if obj is not None:
                 return _as_name_set(obj)
-        except Exception:
-            continue
     return set()
 
 
@@ -257,7 +267,7 @@ AUDIO_FORMAT_ENCODERS = {
     "m4a": ("aac",),
     "flac": ("flac",),
     "opus": ("libopus", "opus"),
-    "ogg": ("vorbis", "libvorbis"),
+    "ogg": ("vorbis",),
     "wav": ("pcm_s16le", "pcm_s24le"),
 }
 
@@ -290,11 +300,36 @@ _SET_FIELDS = (
 )
 
 
+def _ffmpeg_build_identity() -> str:
+    """Short hash of the linked FFmpeg build (NOT the PyAV wrapper version).
+
+    ``av.__version__`` tracks the Python wrapper; a rebuilt FFmpeg (Mobile
+    Forge bumps, system library swaps) under the same PyAV serves stale
+    capabilities forever if the cache key ignores it. ``ffmpeg_version_info``
+    is a plain string attribute (not a callable) plus the per-library tuple
+    map — both change exactly when the native build does.
+    """
+    try:
+        version_info = av.ffmpeg_version_info
+    except Exception:
+        version_info = "unknown"
+    try:
+        libs = ",".join(
+            f"{name}={'.'.join(str(v) for v in ver)}"
+            for name, ver in sorted(av.library_versions.items())
+        )
+    except Exception:
+        libs = "unknown"
+    import hashlib
+
+    return hashlib.sha256(f"{version_info}|{libs}".encode()).hexdigest()[:12]
+
+
 def _probe_cache_path() -> Path:
-    # caps3: adds the LGPL encoder set + demuxer-based HLS/DASH probing, so
-    # older caps2 files (which reported "no video encoders" on Android) are
-    # deliberately ignored rather than trusted.
-    return get_cache_dir() / f"engine_probe_{av.__version__}_caps3.json"
+    # caps4: the key now includes the FFmpeg build identity, so a rebuilt
+    # native library under the same PyAV version re-measures instead of
+    # trusting stale caps3 files (which are deliberately ignored).
+    return get_cache_dir() / f"engine_probe_{av.__version__}_{_ffmpeg_build_identity()}_caps4.json"
 
 
 def _load_cached() -> EngineProbe | None:
@@ -326,8 +361,9 @@ def _save_cached(p: EngineProbe) -> None:
 
 def probe() -> EngineProbe:
     """Full capability probe — measured once per wheel, then served from RAM
-    and a CACHE JSON. The socket-level protocol pass costs ~2s and cannot
-    change within one installed wheel, so Settings/Engine Info/spike reuse it.
+    and a CACHE JSON. The socket-level protocol pass is sequential (five
+    dead-port opens, ~5s total) and cannot change within one installed wheel,
+    so Settings/Engine Info/spike reuse it.
     """
     global _PROBE_MEM, _ALL_CODECS
     if _PROBE_MEM is None:
@@ -346,10 +382,9 @@ def _measure() -> EngineProbe:
     global _ALL_CODECS
     p = EngineProbe(av_version=av.__version__)
 
-    # Verified in installed source: av.codec.codecs_available and
-    # av.filter.filters_available are module-level SETS (codec.py:369,
-    # filter.py:67) — no per-mode split exists, so encoder/decoder support
-    # is probed per preferred name via Codec(name, mode=...).
+    # codecs_available / filters_available are module-level SETS re-exported
+    # from av.codec / av.filter — no per-mode split exists, so encoder/
+    # decoder support is probed per preferred name via Codec(name, mode=...).
     p.codecs = _as_name_set(getattr(av.codec, "codecs_available", None))
     _ALL_CODECS = p.codecs
     p.codec_count = len(p.codecs)
@@ -408,9 +443,11 @@ def _measure() -> EngineProbe:
         p.notes.append(f"av logging setup unavailable: {exc}")
 
     # Hardware accel (may be empty on the mobile build — that is a result, not a failure).
+    # The function lives in av.codec.hwaccel (no av.codec re-export); a stale
+    # getattr on av.codec always returned None and reported "none detected"
+    # even on machines with backends.
     try:
-        fns = getattr(av.codec, "hwdevices_available", None)
-        p.hw_devices = _as_name_set(fns()) if fns else set()
+        p.hw_devices = _as_name_set(_hwdevices_available()) if _hwdevices_available else set()
         if not p.hw_devices:
             p.notes.append("hw accel: no devices detected — query per-encoder hardware_configs")
     except Exception as exc:
@@ -490,7 +527,13 @@ def synthetic_transcode(out_dir: str | Path) -> dict:
         frame.planes[0].update(bytes(rows))
         return frame
 
-    encoder = "libx264" if _codec_mode_available("libx264", "w") else "h264"
+    encoder = "libx264" if _codec_mode_available("libx264", "w") else "mpeg4"
+    if encoder == "mpeg4" and not _codec_mode_available("mpeg4", "w"):
+        # Plain ValueError (not EngineCapabilityError — that lives in
+        # engine_service, which imports this module): same contract, the
+        # message names the missing capability instead of leaking
+        # UnknownCodecError.
+        raise ValueError("This FFmpeg build has no usable video encoder")
     tb = Fraction(1, fps)
 
     t0 = time.perf_counter()

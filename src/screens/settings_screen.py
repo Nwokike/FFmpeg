@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 
 import flet as ft
 
@@ -50,6 +51,9 @@ def SettingsScreen() -> ft.Control:
     muted = TEXT_MUTED_DARK if is_dark else TEXT_MUTED_LIGHT
 
     cache_size, set_cache_size = ft.use_state(get_cache_size_bytes())
+    hls_cap_text, set_hls_cap_text = ft.use_state(
+        str(app_state.settings.get("max_hls_download_mb", 2048))
+    )
     # Derive this from the subscribed app state instead of caching a second
     # local copy; the header toggle must update this picker immediately.
     active_theme = app_state.settings.get("theme_mode", "system")
@@ -93,6 +97,24 @@ def SettingsScreen() -> ft.Control:
         app_state.set_setting("hardware_accel", enabled)
         if services.storage:
             services.storage.set("hardware_accel", enabled)
+        page.update()
+
+    def _set_hls_cap(value: str) -> None:
+        # Validated finite/positive MB; garbage keeps the old value with a
+        # snack instead of persisting nonsense the engine would choke on.
+        try:
+            cap = float(value)
+        except (TypeError, ValueError):
+            show_snack(page, "Download cap must be a number in MB", bgcolor=ERROR)
+            return
+        if not math.isfinite(cap) or cap <= 0:
+            show_snack(page, "Download cap must be a positive number in MB", bgcolor=ERROR)
+            return
+        cap = min(cap, 65536.0)
+        app_state.set_setting("max_hls_download_mb", cap)
+        set_hls_cap_text(str(cap))
+        if services.storage:
+            services.storage.set("max_hls_download_mb", cap)
         page.update()
 
     def _do_clear_cache(_):
@@ -358,6 +380,56 @@ def SettingsScreen() -> ft.Control:
                         ),
                         ft.OutlinedButton(
                             "Clear", icon=ft.Icons.DELETE_SWEEP_ROUNDED, on_click=_do_clear_cache
+                        ),
+                    ],
+                    alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                ),
+                padding=SPACE_MD,
+                border_radius=RADIUS_MD,
+                is_dark=is_dark,
+            ),
+            card_container(
+                content=ft.Row(
+                    controls=[
+                        ft.Row(
+                            controls=[
+                                ft.Icon(ft.Icons.CLOUD_DOWNLOAD_OUTLINED, size=24, color=PRIMARY),
+                                ft.Column(
+                                    controls=[
+                                        ft.Text(
+                                            "Max Stream Download",
+                                            size=FONT_MD,
+                                            weight=ft.FontWeight.W_600,
+                                        ),
+                                        ft.Text(
+                                            "HLS/HTTPS past this needs Download anyway",
+                                            size=FONT_SM,
+                                            color=muted,
+                                        ),
+                                    ],
+                                    spacing=2,
+                                ),
+                            ],
+                            spacing=SPACE_MD,
+                        ),
+                        ft.Row(
+                            controls=[
+                                ft.TextField(
+                                    value=hls_cap_text,
+                                    label="MB",
+                                    dense=True,
+                                    width=110,
+                                    keyboard_type=ft.KeyboardType.NUMBER,
+                                    on_change=lambda e: set_hls_cap_text(e.control.value or ""),
+                                    on_submit=lambda e: _set_hls_cap(e.control.value or ""),
+                                ),
+                                ft.IconButton(
+                                    icon=ft.Icons.CHECK_ROUNDED,
+                                    tooltip="Save download cap",
+                                    on_click=lambda _: _set_hls_cap(hls_cap_text),
+                                ),
+                            ],
+                            spacing=SPACE_SM,
                         ),
                     ],
                     alignment=ft.MainAxisAlignment.SPACE_BETWEEN,

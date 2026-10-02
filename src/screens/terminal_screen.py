@@ -10,7 +10,6 @@ never dead-ends silently.
 from __future__ import annotations
 
 import logging
-import re
 
 import flet as ft
 
@@ -19,7 +18,7 @@ from core.state import Job, use_app_state
 from core.styles import card_container, section_header
 from core.theme import ACCENT_AMBER, PRIMARY, TEXT_MUTED_DARK, TEXT_MUTED_LIGHT, is_dark_mode
 from core.tokens import FONT_LG, FONT_MD, FONT_SM, RADIUS_MD, SPACE_LG, SPACE_MD, SPACE_SM
-from services.command_parser import CommandError, OpPlan, help_text, parse_command
+from services.command_parser import CommandError, OpPlan, help_text, parse_command, tokenize
 from state.controller_ctx import use_controller
 from state.service_ctx import use_services
 
@@ -78,10 +77,21 @@ def TerminalScreen() -> ft.Control:
 
         # Pre-probe only when a trim needs an end boundary (parser refuses
         # without it) — one header read, engine-side failures stay loud.
+        # Tokenizer-based (not substring): a filename containing "-ss" must
+        # not trigger a probe, and single-quoted / multi-input commands must
+        # resolve every input. tokenize() refuses bad quoting loudly already.
         duration: float | None = None
-        m_input = re.search(r'-i\s+(?:"([^"]+)"|(\S+))', cmd)
-        if m_input and "-ss" in cmd and "-t" not in cmd and "-to" not in cmd:
-            src = m_input.group(1) or m_input.group(2)
+        try:
+            probe_tokens = tokenize(cmd)
+        except CommandError:
+            probe_tokens = []
+        probe_inputs = [
+            probe_tokens[k + 1] for k in range(len(probe_tokens) - 1) if probe_tokens[k] == "-i"
+        ]
+        has_ss = "-ss" in probe_tokens
+        has_end = "-t" in probe_tokens or "-to" in probe_tokens
+        if probe_inputs and has_ss and not has_end:
+            src = probe_inputs[0]
             try:
                 duration = float(services.engine.probe(src).duration_s)
             except Exception as exc:  # engine raises loud; keep parsing honest

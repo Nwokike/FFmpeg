@@ -212,6 +212,11 @@ class AppState:
             "save_to_downloads": True,
             "http_proxy": "",
             "hardware_accel": True,
+            # Upper bound for one HLS/HTTPS stream download (MB). The streams
+            # screen preflights the total and refuses past this with a
+            # "download anyway" override — a multi-GB VOD must never silently
+            # fill the disk.
+            "max_hls_download_mb": 2048,
         }
 
     def set_setting(self, key: str, value: Any) -> None:

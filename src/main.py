@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import math
 import sys
 import threading
 import time
@@ -332,6 +333,12 @@ async def main(page: ft.Page) -> None:
     state.theme_mode = page.theme_mode
     state.set_setting("theme_mode", saved_theme)
     state.set_setting("hardware_accel", bool(storage.get("hardware_accel", True)))
+    try:
+        saved_cap = float(storage.get("max_hls_download_mb", 2048))
+        if math.isfinite(saved_cap) and saved_cap > 0:
+            state.set_setting("max_hls_download_mb", min(saved_cap, 65536.0))
+    except (TypeError, ValueError):
+        pass
 
     # Restore past jobs history
     saved_history = storage.get("history_jobs", [])
@@ -615,6 +622,7 @@ async def main(page: ft.Page) -> None:
                     video_codec=p.get("video_codec", "libx264"),
                     audio_codec=p.get("audio_codec", "aac"),
                     crf=p.get("crf", 23),
+                    preset=p.get("preset", "medium"),
                     fps=p.get("fps"),
                     scale_width=p.get("scale_width"),
                     scale_height=p.get("scale_height"),
@@ -684,6 +692,9 @@ async def main(page: ft.Page) -> None:
                     cancel_event=cancel_evt,
                 )
             elif job.op == "record":
+                # Per-download override (streams "Download anyway") is stored on
+                # the job, not the setting: None lifts the cap for this take.
+                cap_override = p.get("ignore_hls_cap", False)
                 engine.record(
                     input_url=p.get("url", job.input_path),
                     output_path=job.output_path,
@@ -691,6 +702,9 @@ async def main(page: ft.Page) -> None:
                     duration_s=p.get("duration_s"),
                     on_progress=_on_progress,
                     cancel_event=cancel_evt,
+                    max_hls_download_mb=(
+                        None if cap_override else state.settings.get("max_hls_download_mb", 2048)
+                    ),
                 )
             elif job.op == "concat":
                 engine.concat(
@@ -720,6 +734,12 @@ async def main(page: ft.Page) -> None:
                     duration_s=p.get("duration_s", 5.0),
                     on_progress=_on_progress,
                     cancel_event=cancel_evt,
+                )
+            else:
+                # Unknown op: fail LOUDLY naming the op. Falling through to
+                # completed-doing-nothing once faked success for a typo'd op.
+                raise ValueError(  # noqa: TRY301 — dispatch-level guard, no inner function to host it
+                    f"Unknown job op {job.op!r} — no engine path dispatches it"
                 )
 
             _set_worker_field(job, "status", "completed")
@@ -796,7 +816,9 @@ async def main(page: ft.Page) -> None:
     # Sherlock/DDGS pattern of an interstitial at a heavy search/content
     # boundary rather than on every button). A failed/no-ad call falls straight
     # through to enqueueing, so ads never gate a job behind a cooldown.
-    HIGH_VALUE_JOB_OPS = frozenset({"join", "convert", "compress", "cut", "record"})
+    # NOTE: "concat" is the real join op ("join" is a view name that never
+    # exists as an op) — listing the view name skipped the gate for joins.
+    HIGH_VALUE_JOB_OPS = frozenset({"concat", "convert", "compress", "cut", "record"})
 
     def start_job(job: Job) -> None:
         if job.op in HIGH_VALUE_JOB_OPS:

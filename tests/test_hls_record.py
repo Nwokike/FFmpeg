@@ -238,3 +238,181 @@ def test_encrypted_playlist_refused_loud(monkeypatch, tmp_path):
     monkeypatch.setattr("services.engine_service.get_temp_dir", lambda: tmp_path)
     with pytest.raises(ValueError, match="encrypted"):
         EngineService._open_https_via_httpx("https://x.example.com/live.m3u8")
+
+
+def test_hls_cap_refuses_oversize_with_loud_message(monkeypatch):
+    """Totals past the cap refuse naming size, cap, setting, and override."""
+
+    class FakeClient:
+        def get(self, url, timeout=None):
+            class R:
+                text = MEDIA
+
+                def raise_for_status(self):
+                    pass
+
+            return R()
+
+        def stream(self, method, url, timeout=None):
+            class Resp:
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *a):
+                    return False
+
+                def raise_for_status(self):
+                    pass
+
+                def iter_bytes(self, chunk_size=None):
+                    yield b"X" * (256 * 1024)
+
+            return Resp()
+
+    client = FakeClient()
+    with pytest.raises(ValueError, match="download cap") as exc_info:
+        EngineService._download_hls_segments(
+            client, "https://x.example.com/live.m3u8", lambda: None, max_hls_download_mb=0.001
+        )
+    msg = str(exc_info.value)
+    assert "Download anyway" in msg
+
+
+def test_hls_cap_override_bypasses(monkeypatch):
+    """ignore_hls_cap (None cap) lets the take through."""
+
+    class FakeClient:
+        def get(self, url, timeout=None):
+            class R:
+                text = MEDIA
+
+                def raise_for_status(self):
+                    pass
+
+            return R()
+
+        def stream(self, method, url, timeout=None):
+            class Resp:
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *a):
+                    return False
+
+                def raise_for_status(self):
+                    pass
+
+                def iter_bytes(self, chunk_size=None):
+                    yield b"X" * (64 * 1024)
+
+            return Resp()
+
+    out = EngineService._download_hls_segments(
+        FakeClient(), "https://x.example.com/live.m3u8", lambda: None, max_hls_download_mb=None
+    )
+    assert len(out) == 2
+
+
+def test_plain_file_single_get(monkeypatch, tmp_path):
+    """Non-HLS bodies stream through ONE GET (no sniff-discard-reGET)."""
+    import httpx
+
+    calls: list[str] = []
+
+    class Resp:
+        def __init__(self):
+            self.headers = {}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def raise_for_status(self):
+            pass
+
+        def iter_bytes(self, chunk_size=None):
+            yield b"BINARY-MEDIA-BYTES" * 4000
+
+    class FakeClient:
+        def __init__(self, **kw):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def stream(self, method, url, timeout=None):
+            calls.append(url)
+            return Resp()
+
+    monkeypatch.setattr(httpx, "Client", FakeClient)
+    monkeypatch.setattr("services.engine_service.get_temp_dir", lambda: tmp_path)
+    import av
+
+    class FakeContainer:
+        def close(self):
+            pass
+
+    monkeypatch.setattr(av, "open", lambda *a, **k: FakeContainer())
+    EngineService._open_https_via_httpx("https://x.example.com/file.mp4")
+    assert calls == ["https://x.example.com/file.mp4"], "exactly one GET per plain file"
+
+
+def test_estimate_hls_segments_sums_lengths(monkeypatch):
+    class Head:
+        def __init__(self, n):
+            self.headers = {"content-length": str(n)}
+
+        def raise_for_status(self):
+            pass
+
+    class FakeClient:
+        def get(self, url, timeout=None):
+            class R:
+                text = MEDIA
+
+                def raise_for_status(self):
+                    pass
+
+            return R()
+
+        def head(self, url, timeout=None):
+            return Head(100_000)
+
+    segs, total = EngineService.estimate_hls_segments(
+        FakeClient(), "https://x.example.com/live.m3u8"
+    )
+    assert len(segs) == 2
+    assert total == 200_000
+
+
+def test_estimate_hls_segments_none_when_length_missing(monkeypatch):
+    class Head:
+        def __init__(self):
+            self.headers = {}
+
+        def raise_for_status(self):
+            pass
+
+    class FakeClient:
+        def get(self, url, timeout=None):
+            class R:
+                text = MEDIA
+
+                def raise_for_status(self):
+                    pass
+
+            return R()
+
+        def head(self, url, timeout=None):
+            return Head()
+
+    segs, total = EngineService.estimate_hls_segments(
+        FakeClient(), "https://x.example.com/live.m3u8"
+    )
+    assert len(segs) == 2
+    assert total is None

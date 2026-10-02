@@ -130,3 +130,27 @@ def test_navigation_destinations_have_selected_icon():
         encoding="utf-8"
     )
     assert "selected_icon" in source
+
+
+_MAIN_SRC = Path(__file__).resolve().parents[1] / "src" / "main.py"
+
+
+def test_high_value_ops_uses_real_op_names():
+    text = _MAIN_SRC.read_text(encoding="utf-8")
+    assert '"concat"' in text.split("HIGH_VALUE_JOB_OPS")[1].split("}")[0]
+    assert '"join"' not in text.split("HIGH_VALUE_JOB_OPS")[1].split("}")[0], (
+        '"join" is a view name, never an op — the gate must list "concat"'
+    )
+
+
+def test_job_dispatch_fails_loud_on_unknown_op():
+    text = _MAIN_SRC.read_text(encoding="utf-8")
+    runner = text.split("def _job_runner", 1)[1].split("\n    def ", 1)[0]
+    assert "Unknown job op" in runner, "unknown ops must fail naming the op, never fake-complete"
+
+
+def test_convert_dispatch_plumbs_preset():
+    text = _MAIN_SRC.read_text(encoding="utf-8")
+    runner = text.split("def _job_runner", 1)[1].split("\n    def ", 1)[0]
+    convert_call = runner.split("engine.convert(", 1)[1].split("elif job.op", 1)[0]
+    assert "preset" in convert_call, "parser-emitted preset must reach engine.convert"

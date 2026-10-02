@@ -17,6 +17,7 @@ import contextlib
 import hashlib
 import json
 import logging
+import math
 import shutil
 import time
 from collections.abc import Callable
@@ -266,8 +267,9 @@ def friendly_job_error(exc: BaseException) -> str:
         return str(exc)
 
     # UnknownCodecError is a ValueError subclass, so catch it before the
-    # generic ValueError branch below would swallow it.
-    unknown_codec = getattr(av.codec, "UnknownCodecError", None)
+    # generic ValueError branch below would swallow it. It lives at
+    # av.codec.codec (no av.codec re-export) — see _unknown_codec_error_type.
+    unknown_codec = _unknown_codec_error_type()
     if unknown_codec is not None and isinstance(exc, unknown_codec):
         return (
             "This device's FFmpeg build can't encode that format. "
@@ -325,6 +327,57 @@ def _supported_encoder_options(codec_name: str, requested: dict[str, str]) -> di
     if dropped:
         logger.info("Dropping unsupported %s encoder options: %s", codec_name, ", ".join(dropped))
     return {key: value for key, value in requested.items() if key in valid}
+
+
+class _MuxClamp:
+    """Per-container packet DTS/PTS floor.
+
+    The encoder can emit two packets with identical DTS even when frame PTS
+    is strictly monotonic (observed 12800 >= 12800 on the phone's wheel —
+    coarse 1/out_fps time bases quantize two frames onto one tick). The MP4
+    muxer rejects those, and with bf=0 dts==pts so PTS needs the same floor.
+    One instance per output container; every re-encode path muxes through it.
+    """
+
+    def __init__(self) -> None:
+        self.last_pts: dict[int, int] = {}
+        self.last_dts: dict[int, int] = {}
+
+    def mux(self, container, pkt) -> None:
+        stream_idx = pkt.stream.index if pkt.stream is not None else -1
+        if pkt.pts is not None:
+            floor = self.last_pts.get(stream_idx)
+            if floor is not None and pkt.pts <= floor:
+                pkt.pts = floor + 1
+            self.last_pts[stream_idx] = pkt.pts
+        if pkt.dts is not None:
+            floor = self.last_dts.get(stream_idx)
+            if floor is not None and pkt.dts <= floor:
+                pkt.dts = floor + 1
+            self.last_dts[stream_idx] = pkt.dts
+        container.mux(pkt)
+
+
+def _close_container(container) -> None:
+    """Close a container without masking the encode-loop traceback.
+
+    Trailer writes can fail on a broken output; if the loop already raised,
+    that original error is the one the user must see — never the close.
+    """
+    try:
+        container.close()
+    except Exception as exc:
+        logger.warning("Container close failed (output may be incomplete): %s", exc)
+
+
+def _unknown_codec_error_type() -> type | None:
+    """UnknownCodecError lives at av.codec.codec, not av.codec (no re-export)."""
+    try:
+        from av.codec.codec import UnknownCodecError
+
+        return UnknownCodecError
+    except Exception:
+        return getattr(av.codec, "UnknownCodecError", None)
 
 
 # Stream disposition flags surfaced in the dossier (av.stream.Disposition names)
@@ -736,9 +789,13 @@ def _crop_dims(width: int, height: int, aspect: str) -> tuple[int, int]:
         cw, ch = int(height * target), height
     else:
         cw, ch = width, int(width / target)
+    # Clamp first, THEN even-align: aligning before min() lets an odd source
+    # dim (e.g. 853px) come back through min() still odd, and the crop filter
+    # rejects odd dims for yuv420p.
+    cw, ch = min(cw, width), min(ch, height)
     cw = max(2, (cw // 2) * 2)
     ch = max(2, (ch // 2) * 2)
-    return min(cw, width), min(ch, height)
+    return cw, ch
 
 
 _WM_POSITIONS = {
@@ -849,7 +906,9 @@ class EngineService:
                 streams_info.append(s_info)
 
             # Rotation lives in the display matrix — no stream-level accessor
-            # exists on this build, so decode ONE frame and read frame.rotation.
+            # exists on this build, so decode until the first non-empty frame
+            # and read frame.rotation. The first packet can yield nothing
+            # (decoder delay), so the loop — not a single break — is the fix.
             first_video = next((s for s in streams_info if s.stream_type == "video"), None)
             if first_video is not None and container.streams.video:
                 try:
@@ -857,7 +916,7 @@ class EngineService:
                         _frames = _pkt.decode()
                         if _frames:
                             first_video.rotation = int(getattr(_frames[0], "rotation", 0) or 0)
-                        break
+                            break
                 except Exception as exc:
                     logger.warning("Rotation probe failed: %s", exc)
 
@@ -1036,21 +1095,13 @@ class EngineService:
 
             video_reformatter = VideoReformatter()
             last_video_pts = -1
-            # Packet-level DTS floor per output stream index: the encoder can
-            # still emit two packets with identical DTS even when frame PTS is
-            # strictly monotonic (observed 12800 >= 12800 on the phone's wheel).
-            # The MP4 muxer rejects those, so bump at mux time — same pattern
-            # the concat path uses at encode time.
-            last_mux_dts: dict[int, int] = {}
+            # Packet-level DTS/PTS floor per output stream (see _MuxClamp):
+            # the encoder can still emit identical stamps even when frame PTS
+            # is strictly monotonic. Shared by all encode sites below.
+            mux_clamp = _MuxClamp()
 
             def _mux_packet(container, pkt) -> None:
-                stream_idx = pkt.stream.index if pkt.stream is not None else -1
-                if pkt.dts is not None:
-                    floor = last_mux_dts.get(stream_idx)
-                    if floor is not None and pkt.dts <= floor:
-                        pkt.dts = floor + 1
-                    last_mux_dts[stream_idx] = pkt.dts
-                container.mux(pkt)
+                mux_clamp.mux(container, pkt)
 
             def _monotonic_video_pts(frame: av.VideoFrame) -> None:
                 """Rebase every output frame to the encoder time base.
@@ -1176,8 +1227,11 @@ class EngineService:
                     )
                     on_progress(progress, f"Processing... {int(progress * 100)}%")
 
-            # Drain filter graphs (EOF), then flush encoders
-            if video_graph is not None and out_video:
+            # Drain filter graphs (EOF), then flush encoders — skipped when
+            # cancelled: drained packets would be muxed into a file that is
+            # about to be deleted, wasting seconds on large jobs.
+            cancelled = bool(cancel_event is not None and cancel_event.is_set())
+            if not cancelled and video_graph is not None and out_video:
                 for frame in _drain_graph(video_graph):
                     if (
                         frame.width != out_video.width
@@ -1193,14 +1247,15 @@ class EngineService:
                     _monotonic_video_pts(frame)
                     for enc_pkt in out_video.encode(frame):
                         _mux_packet(out, enc_pkt)
-            if audio_graph is not None and out_audio:
+            if not cancelled and audio_graph is not None and out_audio:
                 for frame in _drain_graph(audio_graph):
+                    _monotonic_audio_pts(frame)
                     for enc_pkt in out_audio.encode(frame):
                         _mux_packet(out, enc_pkt)
-            if out_video:
+            if not cancelled and out_video:
                 for enc_pkt in out_video.encode(None):
                     _mux_packet(out, enc_pkt)
-            if out_audio:
+            if not cancelled and out_audio:
                 for enc_pkt in out_audio.encode(None):
                     _mux_packet(out, enc_pkt)
 
@@ -1208,8 +1263,8 @@ class EngineService:
                 on_progress(1.0, "Complete")
 
         finally:
-            inp.close()
-            out.close()
+            _close_container(inp)
+            _close_container(out)
 
         if cancel_event and cancel_event.is_set():
             if Path(output_path).exists():
@@ -1317,6 +1372,7 @@ class EngineService:
 
             last_report = 0.0
             processed_pts = 0.0
+            mux_clamp = _MuxClamp()
 
             for packet in inp.demux([s for s in (in_video, in_audio) if s]):
                 _pause_hook(cancel_event)
@@ -1340,7 +1396,7 @@ class EngineService:
                                 )
                             _monotonic_video_pts(frame)
                             for enc_pkt in out_video.encode(frame):
-                                out.mux(enc_pkt)
+                                mux_clamp.mux(out, enc_pkt)
                         if frame.time:
                             processed_pts = frame.time
 
@@ -1351,7 +1407,7 @@ class EngineService:
                         if out_audio:
                             _monotonic_audio_pts(frame)
                             for enc_pkt in out_audio.encode(frame):
-                                out.mux(enc_pkt)
+                                mux_clamp.mux(out, enc_pkt)
 
                 now = time.monotonic()
                 if on_progress and (now - last_report >= 0.25):
@@ -1359,18 +1415,19 @@ class EngineService:
                     prog = min(0.99, max(0.01, processed_pts / duration))
                     on_progress(prog, f"Compressing... {int(prog * 100)}%")
 
-            if out_video:
+            cancelled = bool(cancel_event is not None and cancel_event.is_set())
+            if not cancelled and out_video:
                 for enc_pkt in out_video.encode(None):
-                    out.mux(enc_pkt)
-            if out_audio:
+                    mux_clamp.mux(out, enc_pkt)
+            if not cancelled and out_audio:
                 for enc_pkt in out_audio.encode(None):
-                    out.mux(enc_pkt)
+                    mux_clamp.mux(out, enc_pkt)
 
             if on_progress:
                 on_progress(1.0, "Compressed")
         finally:
-            inp.close()
-            out.close()
+            _close_container(inp)
+            _close_container(out)
 
         if cancel_event and cancel_event.is_set():
             if Path(output_path).exists():
@@ -1473,6 +1530,8 @@ class EngineService:
             duration = max(0.1, end_s - actual_start)
             last_report = 0.0
             start_pts_map: dict[int, int] = {}
+            start_dts_map: dict[int, int] = {}
+            mux_clamp = _MuxClamp()
 
             for packet in inp.demux(list(stream_map.keys())):
                 _pause_hook(cancel_event)
@@ -1497,18 +1556,21 @@ class EngineService:
                 if out_s.time_base is not None and packet.time_base != out_s.time_base:
                     packet.rescale_ts(_av_rational(out_s.time_base))
 
-                # Rebase PTS/DTS to start at 0, in the OUTPUT time base
+                # Rebase PTS/DTS to start at 0, in the OUTPUT time base.
+                # Separate bases per clock: with B-frame delay dts < pts, and
+                # a single base drives the first dts negative after rebase.
                 stream_idx = packet.stream.index
                 if stream_idx not in start_pts_map:
                     start_pts_map[stream_idx] = packet.pts if packet.pts is not None else packet.dts
+                if stream_idx not in start_dts_map:
+                    start_dts_map[stream_idx] = packet.dts if packet.dts is not None else packet.pts
 
-                base = start_pts_map[stream_idx]
                 if packet.pts is not None:
-                    packet.pts = packet.pts - base
+                    packet.pts = max(0, packet.pts - start_pts_map[stream_idx])
                 if packet.dts is not None:
-                    packet.dts = packet.dts - base
+                    packet.dts = max(0, packet.dts - start_dts_map[stream_idx])
                 packet.stream = out_s
-                out.mux(packet)
+                mux_clamp.mux(out, packet)
 
                 now = time.monotonic()
                 if on_progress and (now - last_report >= 0.25):
@@ -1519,8 +1581,8 @@ class EngineService:
             if on_progress:
                 on_progress(1.0, "Cut Complete")
         finally:
-            inp.close()
-            out.close()
+            _close_container(inp)
+            _close_container(out)
 
         if cancel_event and cancel_event.is_set():
             _discard_cancelled(output_path)
@@ -1599,6 +1661,7 @@ class EngineService:
             inp.seek(int(max(0.0, start_s - 2.0) * av.time_base), backward=True)
             duration = max(0.1, end_s - start_s)
             last_report = 0.0
+            mux_clamp = _MuxClamp()
 
             for packet in inp.demux([s for s in (in_video, in_audio) if s]):
                 _pause_hook(cancel_event)
@@ -1614,7 +1677,7 @@ class EngineService:
                         if out_video:
                             _monotonic_video_pts(frame)
                             for enc_pkt in out_video.encode(frame):
-                                out.mux(enc_pkt)
+                                mux_clamp.mux(out, enc_pkt)
                         now = time.monotonic()
                         if on_progress and (now - last_report >= 0.25):
                             last_report = now
@@ -1630,20 +1693,21 @@ class EngineService:
                         if out_audio:
                             _monotonic_audio_pts(frame)
                             for enc_pkt in out_audio.encode(frame):
-                                out.mux(enc_pkt)
+                                mux_clamp.mux(out, enc_pkt)
 
-            if out_video:
+            cancelled = bool(cancel_event is not None and cancel_event.is_set())
+            if not cancelled and out_video:
                 for enc_pkt in out_video.encode(None):
-                    out.mux(enc_pkt)
-            if out_audio:
+                    mux_clamp.mux(out, enc_pkt)
+            if not cancelled and out_audio:
                 for enc_pkt in out_audio.encode(None):
-                    out.mux(enc_pkt)
+                    mux_clamp.mux(out, enc_pkt)
 
             if on_progress:
                 on_progress(1.0, "Cut Complete")
         finally:
-            inp.close()
-            out.close()
+            _close_container(inp)
+            _close_container(out)
 
         if cancel_event and cancel_event.is_set():
             _discard_cancelled(output_path)
@@ -1801,10 +1865,12 @@ class EngineService:
                             for enc_pkt in out_audio.encode(full):
                                 out.mux(enc_pkt)
                         return
-                    except (TypeError, ValueError) as exc:
+                    except (TypeError, ValueError, av.error.FFmpegError) as exc:
                         # A decoder format that the FIFO cannot represent is
                         # still valid for the encoder's own resampler; fall
-                        # back rather than dropping the take.
+                        # back rather than dropping the take. FFmpegError is
+                        # the actual mismatch error — without it this branch
+                        # never triggered and the job crashed instead.
                         logger.debug("AudioFifo fallback to encoder resampler: %s", exc)
                         audio_fifo = None
                 for enc_pkt in out_audio.encode(f):
@@ -1880,8 +1946,8 @@ class EngineService:
             if on_progress:
                 on_progress(1.0, "Audio Extracted")
         finally:
-            inp.close()
-            out.close()
+            _close_container(inp)
+            _close_container(out)
 
         if cancel_event and cancel_event.is_set():
             _discard_cancelled(output_path)
@@ -1948,7 +2014,7 @@ class EngineService:
                 if done:
                     break
         finally:
-            inp.close()
+            _close_container(inp)
 
         if cancel_event and cancel_event.is_set():
             _discard_cancelled(output_dir, directory=True)
@@ -2083,8 +2149,8 @@ class EngineService:
             if on_progress:
                 on_progress(1.0, "GIF Created")
         finally:
-            inp.close()
-            out.close()
+            _close_container(inp)
+            _close_container(out)
 
         if cancel_event and cancel_event.is_set():
             _discard_cancelled(output_path)
@@ -2180,7 +2246,7 @@ class EngineService:
             if on_progress:
                 on_progress(1.0, f"Wrote {len(cues)} cues")
         finally:
-            inp.close()
+            _close_container(inp)
 
         if cancel_event and cancel_event.is_set():
             _discard_cancelled(output_path)
@@ -2239,7 +2305,7 @@ class EngineService:
                 if done:
                     break
         finally:
-            inp.close()
+            _close_container(inp)
         ordered = [results[i] for i in range(len(times)) if i in results]
         if cache_dir is not None and len(ordered) == len(times):
             try:
@@ -2364,8 +2430,8 @@ class EngineService:
             if on_progress:
                 on_progress(1.0, "Streams copied")
         finally:
-            inp.close()
-            out.close()
+            _close_container(inp)
+            _close_container(out)
 
         if cancel_event and cancel_event.is_set():
             _discard_cancelled(output_path)
@@ -2582,12 +2648,12 @@ class EngineService:
                             f"Joining {Path(path).name}… ({fi + 1}/{len(paths)})",
                         )
                 finally:
-                    inp.close()
+                    _close_container(inp)
 
             if not cancelled and on_progress:
                 on_progress(1.0, f"Joined {len(paths)} clips")
         finally:
-            out.close()
+            _close_container(out)
 
         if cancelled or (cancel_event and cancel_event.is_set()):
             _discard_cancelled(output_path)
@@ -2636,6 +2702,8 @@ class EngineService:
                 )
                 out_audio.layout = "stereo" if (fa.channels or 2) >= 2 else "mono"
 
+            mux_clamp = _MuxClamp()
+
             for fi, path in enumerate(paths):
                 if cancel_event and cancel_event.is_set():
                     cancelled = True
@@ -2667,12 +2735,12 @@ class EngineService:
                                     )
                                 frame.pts = None  # sequential across the whole chain
                                 for enc_pkt in out_video.encode(frame):
-                                    out.mux(enc_pkt)
+                                    mux_clamp.mux(out, enc_pkt)
                         elif in_audio and packet.stream == in_audio and out_audio is not None:
                             for frame in _decode_packet(packet):
                                 frame.pts = None
                                 for enc_pkt in out_audio.encode(frame):
-                                    out.mux(enc_pkt)
+                                    mux_clamp.mux(out, enc_pkt)
 
                     if on_progress:
                         on_progress(
@@ -2680,19 +2748,19 @@ class EngineService:
                             f"Joining {Path(path).name}… ({fi + 1}/{len(paths)})",
                         )
                 finally:
-                    inp.close()
+                    _close_container(inp)
 
             if not cancelled:
                 if out_video:
                     for enc_pkt in out_video.encode(None):
-                        out.mux(enc_pkt)
+                        mux_clamp.mux(out, enc_pkt)
                 if out_audio:
                     for enc_pkt in out_audio.encode(None):
-                        out.mux(enc_pkt)
+                        mux_clamp.mux(out, enc_pkt)
                 if on_progress:
                     on_progress(1.0, f"Joined {len(paths)} clips")
         finally:
-            out.close()
+            _close_container(out)
 
         if cancelled or (cancel_event and cancel_event.is_set()):
             _discard_cancelled(output_path)
@@ -2908,7 +2976,7 @@ class EngineService:
                 if on_progress:
                     on_progress(1.0, f"Joined {len(paths)} clips with crossfades")
         finally:
-            out.close()
+            _close_container(out)
 
         if cancelled or (cancel_event and cancel_event.is_set()):
             _discard_cancelled(output_path)
@@ -3215,12 +3283,80 @@ class EngineService:
         return b"".join(parts)
 
     @staticmethod
-    def _download_hls_segments(client, url: str, on_cancel) -> list[tuple[str, bytes]]:
+    def _hls_cap_bytes(max_hls_download_mb: float | None) -> int | None:
+        """Cap in bytes, or None when the caller overrode it for this download."""
+        if max_hls_download_mb is None:
+            return None
+        try:
+            cap = float(max_hls_download_mb)
+        except (TypeError, ValueError):
+            return None
+        if not math.isfinite(cap) or cap <= 0:
+            return None
+        return int(cap * 1024 * 1024)
+
+    @staticmethod
+    def _check_hls_cap(total: int, cap: int | None, url: str) -> None:
+        if cap is not None and total > cap:
+            raise ValueError(
+                f"Stream is ~{total // (1024 * 1024)} MB but the download cap is "
+                f"{cap // (1024 * 1024)} MB — raise Settings → max HLS download, "
+                "or tick 'Download anyway' on this stream to override once"
+            )
+
+    @staticmethod
+    def estimate_hls_segments(client, url: str) -> tuple[list[str], int | None]:
+        """Resolve the media playlist and HEAD each segment for its size.
+
+        Returns (segment URLs, total bytes or None when any server omits
+        Content-Length). Never downloads media — the streams screen calls this
+        for the preflight line before the user commits.
+        """
+        playlist = EngineService._hls_fetch_text(client, url)
+        base = urljoin(url, ".")
+        segments, is_master, key_error = EngineService._parse_hls_playlist(playlist, base)
+        if key_error is not None:
+            raise ValueError(f"This stream is encrypted and can't be recorded offline: {key_error}")
+        if is_master:
+            media_url = segments[0]
+            playlist = EngineService._hls_fetch_text(client, media_url)
+            base = urljoin(media_url, ".")
+            segments, _, key_error = EngineService._parse_hls_playlist(playlist, base)
+            if key_error is not None:
+                raise ValueError(
+                    f"This stream is encrypted and can't be recorded offline: {key_error}"
+                )
+        if not segments:
+            raise ValueError("HLS playlist contained no media segments")
+        total: int | None = 0
+        for seg in segments:
+            try:
+                head = client.head(seg, timeout=(10.0, 30.0))
+                head.raise_for_status()
+                length = head.headers.get("content-length")
+                if length is None:
+                    return segments, None
+                assert isinstance(total, int)
+                total += int(length)
+            except Exception:
+                return segments, None
+        return segments, total
+
+    @staticmethod
+    def _download_hls_segments(
+        client,
+        url: str,
+        on_cancel,
+        max_hls_download_mb: float | None = None,
+    ) -> list[tuple[str, bytes]]:
         """Resolve master→media playlist and download every segment.
 
         Raises a loud, specific ValueError for encrypted streams, empty
-        playlists, error-page segments, or payloads too small to be media.
+        playlists, error-page segments, payloads too small to be media, or
+        totals past the download cap (servers that lie about Content-Length
+        are caught by the running total mid-download).
         """
+        cap = EngineService._hls_cap_bytes(max_hls_download_mb)
         playlist = EngineService._hls_fetch_text(client, url)
         base = urljoin(url, ".")
         segments, is_master, key_error = EngineService._parse_hls_playlist(playlist, base)
@@ -3241,11 +3377,13 @@ class EngineService:
         if not segments:
             raise ValueError("HLS playlist contained no media segments")
         out: list[tuple[str, bytes]] = []
+        running = 0
         for seg in segments:
             on_cancel()
-            out.append(
-                (seg, EngineService._hls_download_segment(client, seg, 256 * 1024, on_cancel))
-            )
+            data = EngineService._hls_download_segment(client, seg, 256 * 1024, on_cancel)
+            running += len(data)
+            EngineService._check_hls_cap(running, cap, seg)
+            out.append((seg, data))
         total = sum(len(b) for _, b in out)
         if total < 32 * 1024:
             raise ValueError(
@@ -3255,13 +3393,22 @@ class EngineService:
         return out
 
     @staticmethod
-    def _open_https_via_httpx(url: str, cancel_event: Event | None = None):
+    def _open_https_via_httpx(
+        url: str,
+        cancel_event: Event | None = None,
+        max_hls_download_mb: float | None = None,
+    ):
         """Download an HTTPS (optionally HLS) stream into a local temp file.
 
         The Android FFmpeg build has no TLS handler, so ``av.open`` cannot open
         HTTPS directly. Fetch the bytes with ``httpx`` instead, using the app's
         own network stack. HLS playlists are expanded segment-by-segment so the
         resulting file is a plain container PyAV can demux.
+
+        Plain files stream in ONE GET (the old code sniffed 512B, discarded the
+        response, and GET again from byte 0). HLS totals are capped at
+        ``max_hls_download_mb`` (None = the caller overrode the cap for this
+        download).
 
         Returns ``(container, cleanup_path)`` — PyAV containers are Cython
         objects without a ``__dict__``, so the caller cannot be handed the
@@ -3273,6 +3420,7 @@ class EngineService:
         temp_path.parent.mkdir(parents=True, exist_ok=True)
         total_written = 0
         chunk_size = 256 * 1024
+        cap = EngineService._hls_cap_bytes(max_hls_download_mb)
 
         def _raise_if_cancelled() -> None:
             if cancel_event and cancel_event.is_set():
@@ -3284,27 +3432,38 @@ class EngineService:
                     first.raise_for_status()
                     head = next(first.iter_bytes(chunk_size=512), b"")
                     is_hls = ".m3u8" in url.lower() or head.lstrip().startswith(b"#EXTM3U")
-
-                with temp_path.open("wb") as fh:
+                    probe_len = getattr(first, "headers", {}).get("content-length")
+                    if not is_hls and probe_len is not None:
+                        EngineService._check_hls_cap(int(probe_len), cap, url)
                     if is_hls:
+                        # HLS goes segment-by-segment through the playlist
+                        # helpers; this sniff response is discarded.
+                        pass
+                    else:
+                        # Plain file: consume THIS response inline (single GET).
+                        # The 512B peek is prepended; servers that lie about
+                        # Content-Length are caught by the running total.
+                        with temp_path.open("wb") as fh:
+                            if head:
+                                fh.write(head)
+                                total_written += len(head)
+                            for chunk in first.iter_bytes(chunk_size=chunk_size):
+                                _raise_if_cancelled()
+                                if chunk:
+                                    total_written += len(chunk)
+                                    EngineService._check_hls_cap(total_written, cap, url)
+                                    fh.write(chunk)
+
+                if is_hls:
+                    with temp_path.open("wb") as fh:
                         segments = EngineService._download_hls_segments(
-                            client, url, _raise_if_cancelled
+                            client, url, _raise_if_cancelled, max_hls_download_mb
                         )
                         for _seg, seg_bytes in segments:
                             _raise_if_cancelled()
                             fh.write(seg_bytes)
                             total_written += len(seg_bytes)
                         logger.info("HLS playlist: %d segment(s) to download", len(segments))
-                    else:
-                        with client.stream("GET", url, timeout=(10.0, 30.0)) as resp:
-                            resp.raise_for_status()
-                            fh.write(head)
-                            total_written += len(head)
-                            for chunk in resp.iter_bytes(chunk_size=chunk_size):
-                                _raise_if_cancelled()
-                                if chunk:
-                                    fh.write(chunk)
-                                    total_written += len(chunk)
 
             if total_written == 0:
                 # Raising inside the try is what triggers the unlink below.
@@ -3322,16 +3481,21 @@ class EngineService:
             raise
 
     @staticmethod
-    def _open_network_input(input_url: str, cancel_event: Event | None = None):
+    def _open_network_input(
+        input_url: str,
+        cancel_event: Event | None = None,
+        max_hls_download_mb: float | None = None,
+    ):
         """Return ``(container, cleanup_path)`` for a URL.
 
         HTTP and other protocols PyAV handles natively go straight to
         ``av.open`` (no cleanup path). HTTPS goes through
         :meth:`_open_https_via_httpx` because the Android FFmpeg build ships
         without TLS, and its temp file must be removed after the mux closes.
+        ``max_hls_download_mb=None`` overrides the cap for this download.
         """
         if input_url.lower().startswith("https://"):
-            return EngineService._open_https_via_httpx(input_url, cancel_event)
+            return EngineService._open_https_via_httpx(input_url, cancel_event, max_hls_download_mb)
         return av.open(input_url, "r", timeout=(10.0, 30.0)), None
 
     @staticmethod
@@ -3342,6 +3506,7 @@ class EngineService:
         duration_s: float | None = None,
         on_progress: Callable[[float, str], None] | None = None,
         cancel_event: Event | None = None,
+        max_hls_download_mb: float | None = 2048,
     ) -> str:
         """Record an HTTP/HTTPS/HLS/DASH stream to a local file.
 
@@ -3349,6 +3514,9 @@ class EngineService:
         the recording (returns normally instead of raising InterruptedError) —
         a stopped stream is a successful partial capture. ``duration_s`` acts
         as an automatic clean stop.
+
+        ``max_hls_download_mb`` caps one HTTPS/HLS download (default 2 GB —
+        the app setting; None = the caller overrode it for this download).
 
         Flet Mobile Forge's Android FFmpeg build has NO TLS protocol handler,
         so ``av.open('https://…')`` raises ProtocolNotFoundError on the phone
@@ -3361,7 +3529,9 @@ class EngineService:
             raise ValueError("That doesn't look like a stream URL (need scheme://…)")
         cleanup_path: str | None = None
         try:
-            inp, cleanup_path = EngineService._open_network_input(input_url, cancel_event)
+            inp, cleanup_path = EngineService._open_network_input(
+                input_url, cancel_event, max_hls_download_mb
+            )
         except av.error.ProtocolNotFoundError as exc:
             raise ValueError(f"This build can't open that protocol: {exc}") from exc
         except av.error.TimeoutError as exc:
@@ -3523,7 +3693,7 @@ class EngineService:
                 total_s = time.monotonic() - start
                 on_progress(1.0, f"Recorded {total_s:.0f}s • {bytes_out // 1024} KB")
         finally:
-            out.close()
+            _close_container(out)
 
         # Zero-packet stops never trigger the muxer's lazy header write — keep
         # the "output exists" contract so callers can rely on the path.

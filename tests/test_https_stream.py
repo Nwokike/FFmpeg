@@ -18,7 +18,7 @@ def test_https_routes_through_httpx_not_av(monkeypatch):
     monkeypatch.setattr(
         EngineService,
         "_open_https_via_httpx",
-        staticmethod(lambda url, cancel_event=None: (sentinel, "/tmp/backing.dat")),
+        staticmethod(lambda url, cancel_event=None, max_hls_download_mb=None: (sentinel, "/tmp/backing.dat")),
     )
 
     def fail_open(*_args, **_kwargs):
