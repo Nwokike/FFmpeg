@@ -158,3 +158,15 @@ prefix). D3 4-char truncation (DEBU/ERRO). D4 second construction
 orphans instance. D5 strings-only (no filter future). DST comment
 accurate; maxlen honored. Fix: lock snapshot; message-only formatter
 or structured tuples; full level names; limit param; instance guard.
+
+## Router lesson (archived M3.5 — module deleted)
+
+`src/core/back_stack.py` (deleted) kept a `/blank` underlay + `?back=` re-key
+strategy from the Router era. It contradicted the single-view design three
+ways: it grew `page.views` to length 2 (the shell's length-1-forever
+invariant), its re-key broke `ACTIVE_VIEWS` exact-match gating, and its Dart
+`page.dart` claims (`_handleSystemPopRoute`, `ValueKey(route)` keying) were
+unverifiable from the published Python package. System-back stays on
+`views[0].can_pop = False` + `on_view_pop` → in-app navigation. If a future
+multi-view Router ever returns, re-derive the back contract from the
+installed Flet source first — do not resurrect this file from memory.

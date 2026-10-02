@@ -247,13 +247,31 @@ def test_app_shell_branch_renders_with_tool_stub():
 def test_shell_body_both_branches_directly():
     with _page_context():
         # Renderer frame required: _shell_body constructs @ft.component
-        # children (banners) which must build inside a render context.
+        # children (banners) which must build inside a render context, with
+        # both contexts provided like production (main mounts them at root).
         r = Renderer()
+        services, methods = Services(), ControllerMethods()
         trees = [
             r.render(
-                lambda: _shell_body(ft.Container(content=ft.Text("x")), state, header=ft.Text("H"))
+                lambda: ServiceCtx(
+                    services,
+                    lambda: ControllerMethodsCtx(
+                        methods,
+                        lambda: _shell_body(
+                            ft.Container(content=ft.Text("x")), state, header=ft.Text("H")
+                        ),
+                    ),
+                )
             ),
-            r.render(lambda: _shell_body(ft.Container(content=ft.Text("x")), state)),
+            r.render(
+                lambda: ServiceCtx(
+                    services,
+                    lambda: ControllerMethodsCtx(
+                        methods,
+                        lambda: _shell_body(ft.Container(content=ft.Text("x")), state),
+                    ),
+                )
+            ),
         ]
         controls: list = []
         components: list = []
@@ -356,7 +374,15 @@ def test_shell_body_safearea_uses_real_avoid_intrusions_fields():
     with _page_context():
         controls: list = []
         components: list = []
-        tree = Renderer().render(lambda: _shell_body(ft.Text("x"), state, header=ft.Text("H")))
+        services, methods = Services(), ControllerMethods()
+        tree = Renderer().render(
+            lambda: ServiceCtx(
+                services,
+                lambda: ControllerMethodsCtx(
+                    methods, lambda: _shell_body(ft.Text("x"), state, header=ft.Text("H"))
+                ),
+            )
+        )
         _collect_controls(tree, controls, set(), components)
         _unmount_all(components)
     safes = [c for c in controls if isinstance(c, ft.SafeArea)]

@@ -8,6 +8,7 @@ import flet as ft
 
 from components.empty_state import empty_state_view
 from components.job_card import job_card_view
+from core.constants import op_title
 from core.notify import ERROR, show_snack
 from core.state import use_app_state
 from core.styles import section_header
@@ -27,29 +28,52 @@ def HistoryScreen() -> ft.Control:
     search_query, set_search_query = ft.use_state("")
     history_items = app_state.history
 
+    query = search_query.strip().lower()
     filtered_items = (
         [
             j
             for j in history_items
             # Restored jobs can carry None paths/ops (explicit JSON null) —
             # Path(None) raised the moment the user typed a character.
-            if search_query.lower() in Path(j.input_path or "").name.lower()
-            or search_query.lower() in (j.op or "").lower()
-            or search_query.lower() in Path(j.output_path or "").name.lower()
+            if query in Path(j.input_path or "").name.lower()
+            or query in (j.op or "").lower()
+            or query in Path(j.output_path or "").name.lower()
         ]
-        if search_query
+        if query
         else history_items
     )
 
     def _confirm_clear_all(_):
+        shown = len(filtered_items)
+        total = len(history_items)
+
         def _clear(_):
+            snapshot = list(history_items)
             ctrl.clear_history()
+            set_search_query("")
             page.pop_dialog()
+            if snapshot:
+                show_snack(
+                    page,
+                    f"Cleared {len(snapshot)} record(s)",
+                    bgcolor=ERROR,
+                    duration_ms=5000,
+                    action=ft.SnackBarAction(
+                        label="UNDO",
+                        on_click=lambda _: ctrl.restore_all(snapshot),
+                    ),
+                )
 
         dlg = ft.AlertDialog(
             title=ft.Text("Clear All History?"),
             content=ft.Text(
                 "This will remove all job records from your local history. Converted files on your disk will remain untouched."
+                + (
+                    f" ({shown} of {total} shown by the current filter — "
+                    "this clears ALL records, not just the visible ones.)"
+                    if query
+                    else ""
+                )
             ),
             actions=[
                 ft.TextButton("Cancel", on_click=lambda _: page.pop_dialog()),
@@ -59,7 +83,7 @@ def HistoryScreen() -> ft.Control:
         )
         page.show_dialog(dlg)
 
-    def _build_dismissible_card(job):
+    def _build_dismissible_card(job, state_index: int):
         card = job_card_view(job, is_dark=is_dark)
 
         def _on_dismiss(_e):
@@ -67,17 +91,17 @@ def HistoryScreen() -> ft.Control:
             ctrl.delete_job(job.id)
             show_snack(
                 page,
-                f"Deleted {Path(job.output_path or '').name or (job.op or 'job')}",
+                f"Deleted {Path(job.output_path or '').name or op_title(job.op)}",
                 bgcolor=ERROR,
                 duration_ms=5000,
                 action=ft.SnackBarAction(
                     label="UNDO",
-                    on_click=lambda _: ctrl.restore_job(job),
+                    on_click=lambda _: ctrl.restore_job(job, state_index),
                 ),
             )
 
         return ft.Dismissible(
-            key=ft.ValueKey(job.id),
+            key=ft.ValueKey(f"{job.id}-{job.created_at}"),
             content=card,
             background=ft.Container(
                 content=ft.Row(
@@ -101,8 +125,17 @@ def HistoryScreen() -> ft.Control:
                 border_radius=RADIUS_MD,
                 alignment=ft.Alignment.CENTER_RIGHT,
             ),
+            dismiss_direction=ft.DismissDirection.HORIZONTAL,
             on_dismiss=_on_dismiss,
         )
+
+    # State index per card (NOT the filtered-view index — filtered position
+    # and history position differ whenever a query is active, and undo must
+    # restore the true position).
+    state_index_of = {id(j): i for i, j in enumerate(history_items)}
+
+    queue_count = len(app_state.jobs)
+    running_count = sum(1 for j in app_state.jobs if j.is_running)
 
     return ft.Column(
         scroll=ft.ScrollMode.AUTO,
@@ -110,7 +143,10 @@ def HistoryScreen() -> ft.Control:
             # Header
             section_header(
                 "History & Jobs",
-                subtitle=f"{len(history_items)} total recorded tasks",
+                subtitle=(
+                    f"{len(history_items)} in history"
+                    + (f" · {queue_count} active" if queue_count else "")
+                ),
                 action=ft.OutlinedButton(
                     "Clear All", icon=ft.Icons.DELETE_SWEEP_ROUNDED, on_click=_confirm_clear_all
                 )
@@ -118,18 +154,19 @@ def HistoryScreen() -> ft.Control:
                 else None,
                 is_dark=is_dark,
             ),
-            # Search bar if there are history items
+            # Search bar whenever there is anything to filter
             *(
                 [
                     ft.TextField(
                         value=search_query,
                         hint_text="Filter history by name or operation...",
                         prefix_icon=ft.Icons.SEARCH_ROUNDED,
+                        suffix_icon=ft.Icons.CLEAR_ROUNDED if search_query else None,
                         dense=True,
-                        on_change=lambda e: set_search_query(e.control.value),
+                        on_change=lambda e: set_search_query(e.control.value or ""),
                     )
                 ]
-                if len(history_items) > 2
+                if history_items
                 else []
             ),
             # Now Processing — the serial queue (running + pending jobs)
@@ -138,9 +175,13 @@ def HistoryScreen() -> ft.Control:
                     section_header(
                         "Now Processing",
                         (
-                            f"{len(app_state.jobs)} in queue"
-                            if len(app_state.jobs) > 1
-                            else ("1 running" if app_state.jobs else "")
+                            f"{queue_count} in queue"
+                            if queue_count > 1
+                            else (
+                                "1 running"
+                                if running_count
+                                else ("1 queued" if queue_count else "")
+                            )
                         ),
                         is_dark=is_dark,
                     ),
@@ -156,7 +197,10 @@ def HistoryScreen() -> ft.Control:
             *(
                 [
                     ft.Column(
-                        controls=[_build_dismissible_card(j) for j in filtered_items],
+                        controls=[
+                            _build_dismissible_card(j, state_index_of[id(j)])
+                            for j in filtered_items
+                        ],
                         spacing=SPACE_SM,
                     )
                 ]
@@ -164,13 +208,25 @@ def HistoryScreen() -> ft.Control:
                 else [
                     empty_state_view(
                         icon=ft.Icons.HISTORY_ROUNDED,
-                        title="No History Found" if search_query else "No Conversions Yet",
-                        subtitle="Your processed media tasks will appear here automatically with swipe-to-delete support.",
-                        action=ft.FilledButton(
-                            "Start New Conversion", on_click=lambda _: ctrl.select_tab(0)
-                        )
-                        if not search_query
-                        else None,
+                        title=(
+                            f'No matches for "{search_query.strip()}"'
+                            if query
+                            else "No Conversions Yet"
+                        ),
+                        subtitle=(
+                            "Try a different filter — your tasks are still here."
+                            if query
+                            else "Your processed media tasks will appear here automatically with swipe-to-delete support."
+                        ),
+                        action=(
+                            ft.OutlinedButton(
+                                "Clear search", on_click=lambda _: set_search_query("")
+                            )
+                            if query
+                            else ft.FilledButton(
+                                "Start New Conversion", on_click=lambda _: ctrl.select_tab(0)
+                            )
+                        ),
                         is_dark=is_dark,
                     )
                 ]

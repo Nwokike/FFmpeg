@@ -219,3 +219,68 @@ def test_pause_wakes_promptly_without_poll_delay():
         time.sleep(0.01)
     q.shutdown()
     assert time.time() - started < 1.0, "resume must wake the worker, not wait out a poll"
+
+
+def test_pause_queued_job_holds_at_head_until_resumed():
+    order: list[str] = []
+
+    def runner(job: Job, evt) -> None:
+        order.append(job.id)
+        job.status = "completed"
+        time.sleep(0.05)
+
+    q = JobQueue(runner=runner)
+    j1, j2 = _job(), _job()
+    q.enqueue(j1)
+    q.enqueue(j2)
+    assert q.set_job_paused(j2.id, True) is True
+    deadline = time.time() + 5
+    while len(order) < 1 and time.time() < deadline:
+        time.sleep(0.05)
+    time.sleep(0.3)
+    assert order == [j1.id], "paused job must wait at head"
+    assert q.is_job_paused(j2.id) is True
+    assert q.set_job_paused(j2.id, False) is True
+    deadline = time.time() + 5
+    while len(order) < 2 and time.time() < deadline:
+        time.sleep(0.05)
+    q.shutdown()
+    assert order == [j1.id, j2.id]
+
+
+def test_pause_unknown_job_returns_false():
+    q = JobQueue(runner=lambda job, evt: None)
+    assert q.set_job_paused("nope", True) is False
+    assert q.is_job_paused("nope") is False
+    q.shutdown()
+
+
+def test_cancel_clears_pause_mark():
+    started = threading.Event()
+
+    def runner(job: Job, evt) -> None:
+        started.set()
+        evt.wait(5)
+        job.status = "cancelled"
+
+    q = JobQueue(runner=runner)
+    j = _job()
+    q.enqueue(j)
+    assert started.wait(5)
+    assert q.set_job_paused(j.id, True) is True
+    assert q.cancel(j.id) is True
+    assert q.is_job_paused(j.id) is False
+    q.shutdown()
+
+
+def test_global_pause_survives_per_job_resume():
+    q = JobQueue(runner=lambda job, evt: setattr(job, "status", "completed"))
+    j = _job()
+    q.enqueue(j)
+    q.set_paused(True)
+    assert q.set_job_paused(j.id, False) is True  # must not release the global hold
+    assert q.pause_event.is_set() is True
+    assert q.is_job_paused(j.id) is True
+    q.set_paused(False)
+    assert q.is_job_paused(j.id) is False
+    q.shutdown()

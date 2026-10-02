@@ -306,6 +306,22 @@ def _tree_size(path: Path) -> int:
     return _walk_size(path)
 
 
+def unique_temp_name(stem: str, ext: str) -> str:
+    """Collision-proof temp output name: repeat runs never overwrite.
+
+    ``{stem}_{6-hex}{ext}`` — the old ``{stem}_converted.mp4`` / ``int(ts)``
+    patterns silently overwrote the previous take (and two taps in one
+    second shared a path). Callers join it onto ``get_temp_dir()``.
+    """
+    from uuid import uuid4
+
+    safe = "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in Path(stem).name)
+    safe = (safe or "output")[:_MAX_SAFE_NAME_CHARS]
+    if not ext.startswith("."):
+        ext = f".{ext}"
+    return f"{safe}_{uuid4().hex[:6]}{ext}"
+
+
 def format_bytes(size: int | float) -> str:
     """Format bytes into readable string (B … EB)."""
     try:

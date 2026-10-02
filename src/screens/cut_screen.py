@@ -9,8 +9,9 @@ from pathlib import Path
 
 import flet as ft
 
+from components.tool_job_status import tool_job_row
 from core.state import Job, use_app_state
-from core.storage_paths import format_bytes, get_temp_dir
+from core.storage_paths import format_bytes, get_temp_dir, unique_temp_name
 from core.styles import card_container, section_header
 from core.theme import ACCENT_AMBER, PRIMARY, TEXT_MUTED_DARK, TEXT_MUTED_LIGHT, is_dark_mode
 from core.tokens import FONT_LG, FONT_MD, FONT_SM, FONT_XS, RADIUS_LG, SPACE_MD, SPACE_SM
@@ -69,7 +70,6 @@ def CutScreen() -> ft.Control:
 
     ft.use_effect(_clamp_window, [total_dur])
     stream_copy, set_stream_copy = ft.use_state(True)
-    is_processing, set_is_processing = ft.use_state(False)
     thumbs, set_thumbs = ft.use_state([])
     keyframes, set_keyframes = ft.use_state([])
     strip_loaded, set_strip_loaded = ft.use_state(False)
@@ -78,6 +78,14 @@ def CutScreen() -> ft.Control:
     last_seek_ref = ft.use_ref(0.0)
 
     cut_duration = max(0.0, end_s - start_s)
+    # Live pipeline: derived from the queue, never a stuck local flag.
+    running_job = (
+        app_state.active_job if (app_state.active_job and app_state.active_job.is_running) else None
+    )
+    busy = running_job is not None
+    # Cutting needs a timeline: still images have no duration to trim.
+    media_kind = info.kind if info is not None else "video"
+    kind_ok = media_kind in ("video", "audio")
 
     def _is_mounted(ctrl) -> bool:
         """True once Flet has attached the control to the page.
@@ -201,6 +209,9 @@ def CutScreen() -> ft.Control:
     def _start_cut(_):
         if not media_path or cut_duration <= 0.05:
             return
+        running = app_state.active_job is not None and app_state.active_job.is_running
+        if running:
+            return
         # Frame-accurate re-encode needs a verified encoder; stream-copy
         # needs none.  Gate only the re-encode path on the probe.
         if not stream_copy and app_state.probe_info is None:
@@ -212,11 +223,10 @@ def CutScreen() -> ft.Control:
                 bgcolor=ERROR,
             )
             return
-        set_is_processing(True)
         _pause_scrub()  # the encode needs the CPU the preview would otherwise burn
 
         ext = Path(media_path).suffix or ".mp4"
-        out_name = f"{Path(media_path).stem}_trimmed{ext}"
+        out_name = unique_temp_name(f"{Path(media_path).stem}_trimmed", ext)
         out_path = str(get_temp_dir() / out_name)
 
         job = Job(
@@ -455,13 +465,15 @@ def CutScreen() -> ft.Control:
                 spacing=SPACE_SM,
             ),
             # Action button
+            *([tool_job_row(running_job, ctrl, is_dark=is_dark)] if running_job else []),
             ft.FilledButton(
                 f"Cut Segment ({_format_time_s(cut_duration)})",
                 icon=ft.Icons.CONTENT_CUT_ROUNDED,
                 height=48,
                 disabled=not media_path
-                or is_processing
+                or busy
                 or cut_duration <= 0.05
+                or not kind_ok
                 or (not stream_copy and app_state.probe_info is None),
                 on_click=_start_cut,
             ),

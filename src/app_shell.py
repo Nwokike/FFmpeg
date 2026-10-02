@@ -41,8 +41,22 @@ from state.controller_ctx import use_controller
 logger = logging.getLogger("AppShell")
 
 _TAB_NAMES = ("Home", "Jobs", "Settings")
-_TAB_ICONS = (ft.Icons.HOME_OUTLINED, ft.Icons.HISTORY_ROUNDED, ft.Icons.SETTINGS_OUTLINED)
-_TAB_SELECTED_ICONS = (ft.Icons.HOME_ROUNDED, ft.Icons.HISTORY_ROUNDED, ft.Icons.SETTINGS_ROUNDED)
+_TAB_ICONS = (ft.Icons.HOME_OUTLINED, ft.Icons.WORK_HISTORY_OUTLINED, ft.Icons.SETTINGS_OUTLINED)
+_TAB_SELECTED_ICONS = (
+    ft.Icons.HOME_ROUNDED,
+    ft.Icons.WORK_HISTORY_ROUNDED,
+    ft.Icons.SETTINGS_ROUNDED,
+)
+
+
+def clamp_tab(idx: int) -> int:
+    """Pin a tab index to the valid range — corruption renders Home, not Settings."""
+    try:
+        idx = int(idx)
+    except (TypeError, ValueError):
+        return 0
+    return max(0, min(idx, len(_TAB_NAMES) - 1))
+
 
 # Every active_view the shell can branch to. Unknown names never render —
 # main.navigate() rejects them before they reach here.
@@ -121,25 +135,26 @@ def _shell_body(
 
 
 def _build_navigation_bar(ctrl, app_state: AppState | None = None) -> ft.NavigationBar:
-    """Dashboard NavigationBar — declared on the view, never mutated post-hoc."""
+    """Dashboard NavigationBar — declared on the view, rebuilt on queue change."""
     if app_state is None:
         app_state = state
 
     def _on_tab_change(e):
-        idx = e.control.selected_index
+        idx = clamp_tab(e.control.selected_index)
         if idx == app_state.selected_tab:
             return
         ctrl.select_tab(idx)
 
-    job_count = len(app_state.jobs)  # observable read → badge re-renders on queue change
+    job_count = len(app_state.jobs)
 
     destinations = []
     for i, (icon, selected_icon, label) in enumerate(
         zip(_TAB_ICONS, _TAB_SELECTED_ICONS, _TAB_NAMES, strict=True)
     ):
         if i == 1 and job_count > 0:
-            # ft.Badge is the framework's badge API — the destination keeps a
-            # stable control identity whether or not jobs are queued.
+            # ft.Badge is the framework's badge API. The bar is rebuilt (not
+            # mutated) whenever the count changes — see _sync_chrome — so the
+            # badge label always matches the queue.
             icon_control = ft.Badge(
                 label=ft.Text(
                     str(min(job_count, 99)),
@@ -160,15 +175,15 @@ def _build_navigation_bar(ctrl, app_state: AppState | None = None) -> ft.Navigat
         else:
             destinations.append(
                 ft.NavigationBarDestination(
-                    icon=icon,
-                    selected_icon=selected_icon,
+                    icon=ft.Icon(icon),
+                    selected_icon=ft.Icon(selected_icon),
                     label=label,
                 )
             )
 
     return ft.NavigationBar(
         destinations=destinations,
-        selected_index=app_state.selected_tab,
+        selected_index=clamp_tab(app_state.selected_tab),
         on_change=_on_tab_change,
         label_behavior=ft.NavigationBarLabelBehavior.ALWAYS_SHOW,
     )
@@ -187,25 +202,48 @@ def AppShell() -> ft.Control:
     (no nav bar); the dashboard renders the tabbed Home / Jobs / Settings
     with the nav bar synced onto the root view.
     """
-    active_view, set_active_view = ft.use_state("dashboard")
+    # Branch on GLOBAL state.active_view with a local mirror: the shell seeds
+    # from global (so pre-mount navigate() survives first render) and syncs
+    # local←global whenever main drives navigation externally. Local-only
+    # writes were the re-entry stuck bug (global said "convert" while the
+    # shell showed dashboard, and the next navigate() no-op'd).
+    initial_view = state.active_view if state.active_view in ACTIVE_VIEWS else "dashboard"
+    active_view, set_active_view = ft.use_state(initial_view)
 
     controller = use_controller()
     app_state = use_app_state()
 
+    def _adopt_global_view() -> None:
+        if state.active_view in ACTIVE_VIEWS and state.active_view != active_view:
+            set_active_view(state.active_view)
+
+    ft.use_effect(_adopt_global_view)
+
     # Single source of truth: global selected_tab (shared with main._select_tab
     # and handle_system_back).  A local active_tab drifted from global and
     # silently froze History/Settings (Sherlock never has a second tab state).
-    active_tab = app_state.selected_tab
+    active_tab = clamp_tab(app_state.selected_tab)
 
     def set_active_tab(idx: int) -> None:
+        idx = clamp_tab(idx)
         app_state.selected_tab = idx
         state.selected_tab = idx  # keep both aliases in sync
 
     # Inject view-local closures into the controller methods instance
-    # (Sherlock pattern — main.navigate() drives these).
-    controller.show_view = set_active_view
-    controller.go_home = lambda: set_active_view("dashboard")
-    controller.back = lambda: set_active_view("dashboard")
+    # (Sherlock pattern — main.navigate() drives these). Both write GLOBAL
+    # state.active_view AND the local mirror, so neither can strand the other.
+    def _go_dashboard() -> None:
+        state.active_view = "dashboard"
+        set_active_view("dashboard")
+
+    def _show_view(view: str) -> None:
+        if view in ACTIVE_VIEWS:
+            state.active_view = view
+            set_active_view(view)
+
+    controller.show_view = _show_view
+    controller.go_home = _go_dashboard
+    controller.back = _go_dashboard
 
     def _system_back():
         # System/back button must never kill the single-view app.
@@ -220,6 +258,11 @@ def AppShell() -> ft.Control:
 
     controller.handle_system_back = _system_back
 
+    # Last queue length the nav bar was built for. Destinations are immutable
+    # once built, so the bar is rebuilt (not mutated) whenever the count
+    # flips between zero/non-zero or the capped label changes.
+    last_nav_job_count, set_last_nav_job_count = ft.use_state(-1)
+
     def _sync_chrome():
         """Sync the root view's navigation bar to the current branch."""
         page = ft.context.page
@@ -229,11 +272,15 @@ def AppShell() -> ft.Control:
             if _should_show_onboarding(app_state) or active_view != "dashboard":
                 page.views[0].navigation_bar = None
             else:
+                job_count = len(app_state.jobs)
                 current_nav = page.views[0].navigation_bar
-                if isinstance(current_nav, ft.NavigationBar):
-                    current_nav.selected_index = active_tab
-                else:
+                if not isinstance(current_nav, ft.NavigationBar) or (
+                    job_count != last_nav_job_count
+                ):
                     page.views[0].navigation_bar = _build_navigation_bar(controller, app_state)
+                    set_last_nav_job_count(job_count)
+                else:
+                    current_nav.selected_index = active_tab
             page.update()
         except Exception as exc:
             import logging as _lg
@@ -242,7 +289,7 @@ def AppShell() -> ft.Control:
 
     ft.use_effect(
         _sync_chrome,
-        [active_tab, active_view, app_state.has_accepted_terms],
+        [active_tab, active_view, app_state.has_accepted_terms, len(app_state.jobs)],
     )
 
     # --- Branching (lazy: only the active screen is constructed) ---
@@ -285,7 +332,8 @@ def AppShell() -> ft.Control:
     elif active_view == "terminal":
         body = _shell_body(TerminalScreen(key=ft.ValueKey("terminal")), app_state)
     else:
-        logger.error("Unknown active_view %r — falling back to dashboard", active_view)
+        logger.error("Unknown active_view %r — resetting to dashboard", active_view)
+        state.active_view = "dashboard"
         body = _shell_body(HomeScreen(key=ft.ValueKey("home")), app_state)
 
     return ft.SafeArea(content=body, expand=True)

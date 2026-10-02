@@ -6,9 +6,10 @@ from pathlib import Path
 
 import flet as ft
 
+from components.tool_job_status import tool_job_row
 from core.engine_probe import can_encode_format
 from core.state import Job, use_app_state
-from core.storage_paths import format_bytes, get_temp_dir
+from core.storage_paths import format_bytes, get_temp_dir, unique_temp_name
 from core.styles import card_container, section_header
 from core.theme import ACCENT_CYAN, TEXT_MUTED_DARK, TEXT_MUTED_LIGHT, is_dark_mode
 from core.tokens import FONT_LG, FONT_MD, FONT_SM, RADIUS_LG, SPACE_MD, SPACE_SM
@@ -32,6 +33,8 @@ def ExtractScreen() -> ft.Control:
         if media_path and Path(media_path).exists()
         else "0 B"
     )
+    media_kind = info.kind if info is not None else "video"
+    has_audio = info.audio_stream is not None if info is not None else True
     duration_s = max(0.5, info.duration_s if info and info.duration_s else 10.0)
 
     mode, set_mode = ft.use_state("audio")  # "audio", "frames", "gif", "subtitles"
@@ -43,31 +46,44 @@ def ExtractScreen() -> ft.Control:
     gif_duration, set_gif_duration = ft.use_state(min(5.0, duration_s))
     sub_fmt, set_sub_fmt = ft.use_state("srt")
     sub_sel, set_sub_sel = ft.use_state(0)  # index into sub_streams
-    is_processing, set_is_processing = ft.use_state(False)
 
-    # Keep the GIF duration inside the valid window when the underlying media
-    # shrinks (or was a still image: duration_s was 10.0 there, now smaller).
-    # Without this, Slider invariants fail: `max < min` or `value > max` on the
-    # very next build when the user switches to GIF mode.
+    # Live pipeline: derived from the queue, never a stuck local flag.
+    running_job = (
+        app_state.active_job if (app_state.active_job and app_state.active_job.is_running) else None
+    )
+    busy = running_job is not None
+
+    # GIF window: lo=1.0 floor AND hi ceiling (sub-1s media used to build
+    # max<min and render a broken slider); value pinned inside both.
+    # The clamp only ever *lowered*, so it could never repair max<min.
     def _clamp_gif_duration() -> None:
-        cur_max = min(15.0, duration_s)
-        if gif_duration > cur_max:
-            set_gif_duration(cur_max)
+        lo, hi = 1.0, max(1.0, min(15.0, duration_s))
+        if gif_duration < lo:
+            set_gif_duration(lo)
+        elif gif_duration > hi:
+            set_gif_duration(hi)
 
     ft.use_effect(_clamp_gif_duration, [duration_s])
 
     sub_streams = [s for s in (info.streams if info else []) if s.stream_type == "subtitle"]
 
+    def _clamp_sub_sel() -> None:
+        if sub_sel >= len(sub_streams):
+            set_sub_sel(0)
+
+    ft.use_effect(_clamp_sub_sel, [len(sub_streams)])
+
     def _start_extraction(_):
-        if not media_path:
+        if not media_path or busy:
             return
         if mode == "subtitles" and not sub_streams:
             return
-        set_is_processing(True)
+        if mode in ("audio", "subtitles") and not has_audio and media_kind != "video":
+            return
 
         stem = Path(media_path).stem
         if mode == "audio":
-            out_name = f"{stem}_audio.{chosen_audio_fmt}"
+            out_name = unique_temp_name(f"{stem}_audio", chosen_audio_fmt)
             out_path = str(get_temp_dir() / out_name)
             job = Job(
                 op="extract_audio",
@@ -84,7 +100,7 @@ def ExtractScreen() -> ft.Control:
             # it extract a different (or the first) track.
             stream_pos = sub_sel if sub_sel < len(sub_streams) else 0
             ext = "vtt" if sub_fmt == "webvtt" else sub_fmt
-            out_name = f"{stem}.{ext}"
+            out_name = unique_temp_name(stem, ext)
             out_path = str(get_temp_dir() / out_name)
             job = Job(
                 op="extract_subtitles",
@@ -99,7 +115,7 @@ def ExtractScreen() -> ft.Control:
                 else 0,
             )
         elif mode == "frames":
-            out_dir = str(get_temp_dir() / f"{stem}_frames")
+            out_dir = str(get_temp_dir() / unique_temp_name(f"{stem}_frames", ""))
             job = Job(
                 op="extract_frames",
                 input_path=media_path,
@@ -110,7 +126,7 @@ def ExtractScreen() -> ft.Control:
                 else 0,
             )
         else:  # gif
-            out_name = f"{stem}_animated.gif"
+            out_name = unique_temp_name(f"{stem}_animated", ".gif")
             out_path = str(get_temp_dir() / out_name)
             job = Job(
                 op="create_gif",
@@ -136,11 +152,19 @@ def ExtractScreen() -> ft.Control:
         f for f in ("mp3", "aac", "m4a", "flac", "opus", "ogg", "wav") if can_encode_format(f)
     ]
     # Clamp onto something encodable so the first chip and the job agree.
+    # DERIVED (not written back): the UI always shows the effective value.
     chosen_audio_fmt = (
         audio_fmt
         if audio_fmt in audio_formats
         else (audio_formats[0] if audio_formats else audio_fmt)
     )
+    lossless_audio = chosen_audio_fmt in ("wav", "flac")
+
+    start_blocked_reason: str | None = None
+    if mode == "audio" and not audio_formats:
+        start_blocked_reason = "This build has no audio encoders — extraction is unavailable."
+    elif mode in ("audio", "subtitles") and not has_audio and media_kind != "video":
+        start_blocked_reason = "This file has no audio track to extract."
 
     return ft.ListView(
         controls=[
@@ -189,6 +213,8 @@ def ExtractScreen() -> ft.Control:
                 border_radius=RADIUS_LG,
                 is_dark=is_dark,
             ),
+            # Live pipeline status (derived, never stuck)
+            *([tool_job_row(running_job, ctrl, is_dark=is_dark)] if running_job else []),
             # Mode Switcher Chips
             section_header("Extraction Target", "Choose what to extract", is_dark=is_dark),
             ft.Row(
@@ -196,22 +222,22 @@ def ExtractScreen() -> ft.Control:
                     ft.Chip(
                         label=ft.Text("Audio Track"),
                         selected=mode == "audio",
-                        on_select=lambda _: set_mode("audio"),
+                        on_click=lambda _: set_mode("audio"),
                     ),
                     ft.Chip(
                         label=ft.Text("Video Frames"),
                         selected=mode == "frames",
-                        on_select=lambda _: set_mode("frames"),
+                        on_click=lambda _: set_mode("frames"),
                     ),
                     ft.Chip(
                         label=ft.Text("Animated GIF"),
                         selected=mode == "gif",
-                        on_select=lambda _: set_mode("gif"),
+                        on_click=lambda _: set_mode("gif"),
                     ),
                     ft.Chip(
                         label=ft.Text("Subtitles"),
                         selected=mode == "subtitles",
-                        on_select=lambda _: set_mode("subtitles"),
+                        on_click=lambda _: set_mode("subtitles"),
                     ),
                 ],
                 spacing=SPACE_SM,
@@ -225,20 +251,32 @@ def ExtractScreen() -> ft.Control:
                             ft.Chip(
                                 label=ft.Text(fmt.upper()),
                                 selected=chosen_audio_fmt == fmt,
-                                on_select=lambda _, f=fmt: set_audio_fmt(f),
+                                on_click=lambda _, f=fmt: set_audio_fmt(f),
                             )
                             for fmt in audio_formats
                         ],
                         wrap=True,
                         spacing=SPACE_SM,
                     ),
-                    section_header("Audio Bitrate", f"{audio_kbps} kbps", is_dark=is_dark),
-                    ft.Slider(
-                        value=float(audio_kbps),
-                        min=96,
-                        max=320,
-                        divisions=7,
-                        on_change=lambda e: set_audio_kbps(int(e.control.value)),
+                    # Bitrate is a target/ceiling for lossy, meaningless for
+                    # WAV and advisory for FLAC — hidden for lossless.
+                    *(
+                        [
+                            section_header(
+                                "Audio Bitrate",
+                                f"{audio_kbps} kbps target",
+                                is_dark=is_dark,
+                            ),
+                            ft.Slider(
+                                value=float(audio_kbps),
+                                min=96,
+                                max=320,
+                                divisions=14,
+                                on_change=lambda e: set_audio_kbps(round(float(e.control.value))),
+                            ),
+                        ]
+                        if not lossless_audio
+                        else []
                     ),
                 ]
                 if mode == "audio"
@@ -281,7 +319,7 @@ def ExtractScreen() -> ft.Control:
                                             + (f" • {s.language}" if s.language else "")
                                         ),
                                         selected=sub_sel == i,
-                                        on_select=lambda _, idx=i: set_sub_sel(idx),
+                                        on_click=lambda _, idx=i: set_sub_sel(idx),
                                     )
                                     for i, s in enumerate(sub_streams)
                                 ],
@@ -299,7 +337,7 @@ def ExtractScreen() -> ft.Control:
                                     ft.Chip(
                                         label=ft.Text(fmt.upper() if fmt != "webvtt" else "VTT"),
                                         selected=sub_fmt == fmt,
-                                        on_select=lambda _, f=fmt: set_sub_fmt(f),
+                                        on_click=lambda _, f=fmt: set_sub_fmt(f),
                                     )
                                     for fmt in ("srt", "ass", "webvtt")
                                 ],
@@ -339,12 +377,23 @@ def ExtractScreen() -> ft.Control:
                     ft.Slider(
                         value=float(gif_duration),
                         min=1.0,
-                        max=float(min(15.0, duration_s)),
+                        max=max(1.0, float(min(15.0, duration_s))),
                         divisions=14,
                         on_change=lambda e: set_gif_duration(round(float(e.control.value), 1)),
                     ),
+                    ft.Text(
+                        "Tall portrait sources scale height proportionally — "
+                        "1080px-wide portrait GIFs get very tall and heavy.",
+                        size=FONT_SM,
+                        color=muted,
+                    ),
                 ]
                 if mode == "gif"
+                else []
+            ),
+            *(
+                [ft.Text(start_blocked_reason, size=FONT_SM, color="#EF4444")]
+                if start_blocked_reason
                 else []
             ),
             # Action button
@@ -353,8 +402,9 @@ def ExtractScreen() -> ft.Control:
                 icon=ft.Icons.DOWNLOAD_ROUNDED,
                 height=48,
                 disabled=not media_path
-                or is_processing
-                or (mode == "subtitles" and not sub_streams),
+                or busy
+                or (mode == "subtitles" and not sub_streams)
+                or start_blocked_reason is not None,
                 on_click=_start_extraction,
             ),
         ],

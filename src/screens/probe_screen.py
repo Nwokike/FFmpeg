@@ -3,14 +3,13 @@
 from __future__ import annotations
 
 import logging
-import time
 from pathlib import Path
 
 import flet as ft
 
 from core.notify import ERROR, show_snack
 from core.state import Job, MediaInfo, use_app_state
-from core.storage_paths import format_bytes, get_temp_dir
+from core.storage_paths import format_bytes, get_temp_dir, unique_temp_name
 from core.styles import card_container, section_header, status_badge
 from core.theme import (
     ACCENT_AMBER,
@@ -102,6 +101,7 @@ def ProbeScreen() -> ft.Control:
 
     # Hooks first (discipline): excluded-stream set survives info swaps.
     excluded, set_excluded = ft.use_state([])
+    remuxing, set_remuxing = ft.use_state(False)
 
     info = app_state.current_media_info
     media_path = app_state.current_media_path
@@ -260,12 +260,14 @@ def ProbeScreen() -> ft.Control:
         )
 
     def _start_remux(_):
+        if remuxing:
+            return
         if not media_path or not info.streams or len(excluded) >= len(info.streams):
             if info.streams and len(excluded) >= len(info.streams):
                 show_snack(page, "Keep at least one track", bgcolor=ERROR)
             return
         stem = Path(media_path).stem
-        out_path = str(get_temp_dir() / f"{stem}_{int(time.time())}_tracks.mkv")
+        out_path = str(get_temp_dir() / unique_temp_name(f"{stem}_tracks", ".mkv"))
         job = Job(
             op="remux",
             input_path=media_path,
@@ -273,12 +275,17 @@ def ProbeScreen() -> ft.Control:
             params={"drop": list(excluded)},
             original_size_bytes=info.file_size_bytes,
         )
-        ctrl.start_job(job)
+        set_remuxing(True)
+        try:
+            ctrl.start_job(job)
+        except Exception as exc:
+            logger.warning("Remux start failed: %s", exc)
+            set_remuxing(False)
 
     async def _share_report() -> None:
         try:
             report = build_media_report(info)
-            out = get_temp_dir() / f"{Path(media_path).stem}_dossier_{int(time.time())}.md"
+            out = get_temp_dir() / unique_temp_name(f"{Path(media_path).stem}_dossier", ".md")
             out.write_text(report, encoding="utf-8")
             ok = await services.media_io.share_file(str(out))
             if not ok:
@@ -420,7 +427,8 @@ def ProbeScreen() -> ft.Control:
                         icon=ft.Icons.CONTENT_COPY_ROUNDED,
                         height=48,
                         expand=True,
-                        disabled=bool(info.streams) and len(excluded) >= len(info.streams),
+                        disabled=(bool(info.streams) and len(excluded) >= len(info.streams))
+                        or remuxing,
                         on_click=_start_remux,
                     ),
                     ft.OutlinedButton(

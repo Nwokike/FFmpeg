@@ -203,6 +203,109 @@ def _friendly_codec(requested: str, kind: str) -> str:
     return labels.get(requested) or requested
 
 
+# Container ↔ codec pairs the wheel's muxers actually accept. Keyed by
+# container extension (no dot); values are (video codecs, audio codecs)
+# using RESOLVED encoder names as the engine emits them. Anything outside a
+# cell fails at mux time AFTER a full encode — check_pair() exists so the UI
+# refuses before Start instead of after minutes of work.
+_CONTAINER_CODEC_MATRIX: dict[str, tuple[frozenset[str], frozenset[str]]] = {
+    "mp4": (
+        frozenset({"libx264", "h264", "libx265", "hevc", "mpeg4", "libsvtav1", "av1"}),
+        frozenset({"aac", "libmp3lame", "mp3", "ac3"}),
+    ),
+    "mov": (
+        frozenset(
+            {
+                "libx264",
+                "h264",
+                "libx265",
+                "hevc",
+                "mpeg4",
+                "prores",
+                "libsvtav1",
+                "av1",
+            }
+        ),
+        frozenset({"aac", "alac", "pcm_s16le", "pcm_s24le"}),
+    ),
+    "mkv": (
+        frozenset(
+            {
+                "libx264",
+                "h264",
+                "libx265",
+                "hevc",
+                "mpeg4",
+                "vp9",
+                "libvpx-vp9",
+                "libvpx",
+                "libsvtav1",
+                "av1",
+                "ffv1",
+            }
+        ),
+        frozenset({"aac", "flac", "libopus", "opus", "vorbis", "pcm_s16le", "pcm_s24le"}),
+    ),
+    "webm": (
+        frozenset({"vp9", "libvpx-vp9", "libvpx", "libsvtav1", "av1"}),
+        frozenset({"libopus", "opus", "vorbis"}),
+    ),
+    "avi": (
+        frozenset({"mpeg4", "mjpeg"}),
+        frozenset({"pcm_s16le", "pcm_s24le", "libmp3lame", "mp3"}),
+    ),
+    "m4a": (frozenset(), frozenset({"aac", "alac"})),
+    "mp3": (frozenset(), frozenset({"libmp3lame", "mp3"})),
+    "ogg": (frozenset(), frozenset({"vorbis", "libopus", "opus", "flac"})),
+    "opus": (frozenset(), frozenset({"libopus", "opus"})),
+    "flac": (frozenset(), frozenset({"flac"})),
+    "wav": (frozenset(), frozenset({"pcm_s16le", "pcm_s24le"})),
+}
+
+
+def check_pair(container: str, video_codec: str | None, audio_codec: str | None) -> str | None:
+    """None when (container, vcodec, acodec) muxes; else the refusal reason.
+
+    Aliases resolve first (libx264↔h264 …), so an h264-only wheel still
+    offers H.264 instead of hiding the chip. Unknown containers fail OPEN
+    (None) — the matrix covers the wheel's muxers, not every FFmpeg build.
+    """
+    key = (container or "").lower().lstrip(".")
+    cell = _CONTAINER_CODEC_MATRIX.get(key)
+    if cell is None:
+        return None
+    allowed_video, allowed_audio = cell
+    if video_codec:
+        try:
+            resolved = _resolve_video_codec(video_codec)
+        except Exception:
+            resolved = video_codec
+        candidates = {video_codec, resolved}
+        try:
+            from core.engine_probe import can_encode as _can_encode
+
+            encodable = {c for c in candidates if _can_encode(c)}
+            if encodable:
+                candidates = encodable
+        except Exception:
+            pass
+        if not (candidates & allowed_video):
+            return (
+                f"{_friendly_codec(video_codec, 'video')} is not muxable into .{key} "
+                f"on this build — pick {sorted(allowed_video)[0] if allowed_video else 'another container'}"
+            )
+    if audio_codec:
+        try:
+            resolved_audio = _resolve_audio_codec(audio_codec)
+        except Exception:
+            resolved_audio = audio_codec
+        if resolved_audio not in allowed_audio and audio_codec not in allowed_audio:
+            return (
+                f"{_friendly_codec(audio_codec, 'audio')} is not muxable into .{key} on this build"
+            )
+    return None
+
+
 def available_video_encoders() -> list[str]:
     """Verified mode='w' video encoders this build ships, preference order."""
     return list(probe().video_encoder_picks)

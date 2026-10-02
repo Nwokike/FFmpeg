@@ -141,7 +141,7 @@ class Job:
     input_path: str
     output_path: str
     params: dict[str, Any] = field(default_factory=dict)
-    id: str = field(default_factory=lambda: str(uuid.uuid4())[:8])
+    id: str = field(default_factory=lambda: uuid.uuid4().hex)
     status: str = "pending"  # "pending", "running", "completed", "failed", "cancelled"
     progress: float = 0.0  # 0.0 to 1.0
     status_message: str = "Queued"

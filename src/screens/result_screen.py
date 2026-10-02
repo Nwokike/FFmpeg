@@ -42,6 +42,16 @@ try:
 except ImportError:  # pragma: no cover — package is in the dev tree
     _HAS_AUDIO_PLAYER = False
 
+    class AudioState:  # type: ignore[no-redef] — fallback so refs below never NameError
+        STOPPED = "stopped"
+        PLAYING = "playing"
+        PAUSED = "paused"
+        COMPLETED = "completed"
+        DISPOSED = "disposed"
+
+    class ReleaseMode:  # type: ignore[no-redef]
+        STOP = "stop"
+
 
 def _fmt_ms(ms: int) -> str:
     """Millisecond timestamp → mm:ss."""
@@ -92,12 +102,19 @@ def ResultScreen() -> ft.Control:
         except (RuntimeError, AttributeError):
             return False
 
+    def _safe_run_task(coro_fn) -> None:
+        """Schedule teardown work that must never throw (app exit, fast nav)."""
+        try:
+            page.run_task(coro_fn)
+        except Exception as exc:
+            logger.debug("Preview teardown skipped (page gone): %s", exc)
+
     def _set_compare(target: str) -> None:
         if target == compare:
             return
-        # Re-tapping the already-selected segment yields an empty `selected`
-        # set on the Dart side — bail rather than raising StopIteration here
-        # and surfacing as an Unhandled Flet error.
+        # A re-tap on the sole selected segment does not deselect (framework
+        # keeps it selected and skips on_change) — but a defensive bail costs
+        # nothing if a future Flet ever reports an empty selection.
         if not target:
             return
         set_compare(target)
@@ -114,7 +131,7 @@ def ResultScreen() -> ft.Control:
             except Exception as exc:
                 logger.warning("A/B preview switch failed: %s", exc)
 
-        page.run_task(_jump)
+        _safe_run_task(_jump)
 
     def _stop_video_player() -> None:
         v = video_ref.current
@@ -129,7 +146,7 @@ def ResultScreen() -> ft.Control:
             except Exception as exc:
                 logger.warning("Preview stop failed: %s", exc)
 
-        page.run_task(_stop)
+        _safe_run_task(_stop)
 
     def _release_audio() -> None:
         a = audio_ref.current
@@ -143,10 +160,14 @@ def ResultScreen() -> ft.Control:
             except Exception as exc:
                 logger.warning("Audio release failed: %s", exc)
             finally:
-                if a in page.services:
-                    page.services.remove(a)
+                try:
+                    if any(s is a for s in page.services):
+                        page.services.remove(a)
+                        page.update()
+                except Exception as exc:
+                    logger.debug("Audio service removal skipped: %s", exc)
 
-        page.run_task(_release)
+        _safe_run_task(_release)
 
     def _on_audio_state(e) -> None:
         next_state = getattr(e, "state", AudioState.STOPPED)
@@ -180,27 +201,12 @@ def ResultScreen() -> ft.Control:
                 playlist = [ftv.VideoMedia(str(out_p))]
                 if job.input_path and Path(job.input_path).exists():
                     playlist.append(ftv.VideoMedia(job.input_path))
-                # A/B compare only makes sense with two items; the
-                # SegmentedButton guards jump_to(1), but don't crash if
-                # the playlist ever lands here as length 1 anyway.
-                if len(playlist) > 1:
-                    video_ref.current = ftv.Video(
-                        playlist=playlist,
-                        autoplay=False,
-                        filter_quality=ft.FilterQuality.MEDIUM,
-                        on_error=lambda e: logger.warning(
-                            "Preview error: %s", getattr(e, "data", e)
-                        ),
-                    )
-                else:
-                    video_ref.current = ftv.Video(
-                        playlist=playlist,
-                        autoplay=False,
-                        filter_quality=ft.FilterQuality.MEDIUM,
-                        on_error=lambda e: logger.warning(
-                            "Preview error: %s", getattr(e, "data", e)
-                        ),
-                    )
+                video_ref.current = ftv.Video(
+                    playlist=playlist,
+                    autoplay=False,
+                    filter_quality=ft.FilterQuality.MEDIUM,
+                    on_error=lambda e: logger.warning("Preview error: %s", getattr(e, "data", e)),
+                )
             except Exception as exc:
                 logger.warning("Preview construction failed: %s", exc)
 
@@ -233,7 +239,7 @@ def ResultScreen() -> ft.Control:
 
     ft.use_effect(
         _mount_players,
-        [job.id if job else ""],
+        [job.id if job else "", job.output_path if job else "", job.input_path if job else ""],
         cleanup=lambda: (_stop_video_player(), _release_audio()),
     )
 
@@ -282,7 +288,10 @@ def ResultScreen() -> ft.Control:
     out_name = Path(out_path).name
 
     orig_size = job.original_size_bytes
-    out_size = Path(out_path).stat().st_size if Path(out_path).exists() else job.output_size_bytes
+    try:
+        out_size = Path(out_path).stat().st_size
+    except OSError:
+        out_size = job.output_size_bytes
 
     size_saved_str = ""
     if orig_size > 0 and out_size > 0:
@@ -300,22 +309,31 @@ def ResultScreen() -> ft.Control:
     has_orig = bool(job.input_path and Path(job.input_path).exists())
 
     preview_control: ft.Control
-    export_titles = {
-        "extract_audio": "Audio Export Complete",
-        "extract_subtitles": "Subtitles Extracted",
-        "record": "Recording Ready",
+    audio_player: list[ft.Control] = []
+    from core.constants import op_title as _op_title
+
+    _EXPORT_ICONS = {
+        "extract_subtitles": ft.Icons.SUBTITLES_ROUNDED,
+        "record": ft.Icons.VIDEOCAM_ROUNDED,
     }
-    export_title = export_titles.get(job.op, "Export Complete")
-    export_icon = (
-        ft.Icons.SUBTITLES_ROUNDED if job.op == "extract_subtitles" else ft.Icons.AUDIOTRACK_ROUNDED
+    export_title = (
+        f"{_op_title(job.op)} Complete" if job.op not in ("convert",) else "Export Complete"
     )
+    export_icon = _EXPORT_ICONS.get(job.op, ft.Icons.AUDIOTRACK_ROUNDED)
     if is_video and _HAS_VIDEO:
         video_control = video_ref.current
         preview_control = ft.Container(
             content=ft.Column(
                 controls=[
                     *(
-                        [video_control]
+                        [
+                            ft.Container(
+                                content=video_control,
+                                height=240,
+                                bgcolor="#000000",
+                                border_radius=RADIUS_LG,
+                            )
+                        ]
                         if video_control is not None
                         else [
                             ft.Container(
@@ -332,7 +350,9 @@ def ResultScreen() -> ft.Control:
                                     spacing=SPACE_SM,
                                 ),
                                 alignment=ft.Alignment.CENTER,
-                                height=200,
+                                height=240,
+                                bgcolor="#000000",
+                                border_radius=RADIUS_LG,
                             )
                         ]
                     ),
@@ -340,6 +360,8 @@ def ResultScreen() -> ft.Control:
                         [
                             ft.SegmentedButton(
                                 selected=[compare],
+                                allow_empty_selection=False,
+                                show_selected_icon=False,
                                 segments=[
                                     ft.Segment(value="output", label=ft.Text("Output")),
                                     ft.Segment(value="original", label=ft.Text("Original")),
@@ -381,6 +403,24 @@ def ResultScreen() -> ft.Control:
                     controls=[
                         ft.Text(export_title, size=FONT_MD, weight=ft.FontWeight.BOLD),
                         ft.Text(out_name, size=FONT_SM, color=muted),
+                        *(
+                            [
+                                ft.Text(
+                                    (
+                                        "Audio preview needs the flet-audio package, "
+                                        "which isn't installed — the file itself is "
+                                        "fine; use Save or Share below."
+                                        if not _HAS_AUDIO_PLAYER
+                                        else "Audio preview couldn't start for this file — "
+                                        "the file itself is fine; use Save or Share below."
+                                    ),
+                                    size=FONT_XS,
+                                    color=muted,
+                                )
+                            ]
+                            if not audio_player
+                            else []
+                        ),
                     ],
                     spacing=2,
                 ),
@@ -389,9 +429,9 @@ def ResultScreen() -> ft.Control:
             spacing=SPACE_MD,
         )
 
-        audio_player: list[ft.Control] = []
+        audio_player = []
         player = audio_ref.current
-        if player is not None and players_ready:
+        if player is not None and players_ready and _HAS_AUDIO_PLAYER:
 
             def _toggle_play(_e):
                 async def _t():
@@ -407,11 +447,12 @@ def ResultScreen() -> ft.Control:
                     except Exception as exc:
                         logger.warning("Playback control failed: %s", exc)
 
-                page.run_task(_t)
+                _safe_run_task(_t)
 
             def _drag(e):
+                # Thumb only: no set_pos_ms per tick (a rebuild mid-gesture can
+                # disturb the native drag and land the seek off-target).
                 dragging_ref.current = True
-                set_pos_ms(int(e.control.value))
 
             def _seek_player(e):
                 # Always release the drag guard here — a cancelled drag that
@@ -426,7 +467,7 @@ def ResultScreen() -> ft.Control:
                     except Exception as exc:
                         logger.warning("Seek failed: %s", exc)
 
-                page.run_task(_seek)
+                _safe_run_task(_seek)
 
             audio_player = [
                 ft.Row(

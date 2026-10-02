@@ -88,9 +88,17 @@ class JobQueue:
         self._current: Job | None = None
         self._thread: threading.Thread | None = None
         self._generation = 0
+        # Per-job pause ids: pausing a QUEUED job holds it when it reaches
+        # head (no-op cards are a lie); pausing the RUNNING job additionally
+        # drives pause_event so the engine hook holds inside the take.
+        # Mutated only under _cond so wait_for() can never miss a flip.
+        # ``_global_paused`` is the sticky whole-queue switch (only
+        # set_paused(False) clears it); per-job resume never clears a global
+        # hold — that was the convoluted branch this flag replaces.
+        self._paused_ids: set[str] = set()
+        self._global_paused = False
         # Shared pause switch: the worker holds BEFORE pulling the next job and
         # the engine's pause hook (same Event) holds INSIDE the running one.
-        # Mutated only under _cond so wait_for() can never miss a flip.
         self.pause_event = threading.Event()
 
     # ── Pause ──────────────────────────────────────────────────────────────
@@ -100,18 +108,55 @@ class JobQueue:
         return self.pause_event.is_set()
 
     def set_paused(self, value: bool) -> bool:
-        """Pause (True) or resume (False) the queue; returns the new state."""
+        """Pause (True) or resume (False) the whole queue; returns the new state.
+
+        Sticky: only set_paused(False) releases a global hold. Per-job
+        resume (set_job_paused(id, False)) never clears it.
+        """
         with self._cond:
+            self._global_paused = value
             if value:
                 self.pause_event.set()
-            else:
+            elif not self._paused_ids:
                 self.pause_event.clear()
             # Wake under the same lock the worker waits on — no lost signal.
             self._cond.notify_all()
         return value
 
     def toggle_pause(self) -> bool:
-        return self.set_paused(not self.paused)
+        return self.set_paused(not self._global_paused)
+
+    def is_job_paused(self, job_id: str) -> bool:
+        """True when this job (or the whole queue) is holding."""
+        with self._cond:
+            return self._global_paused or self.pause_event.is_set() or job_id in self._paused_ids
+
+    def set_job_paused(self, job_id: str, value: bool) -> bool:
+        """Pause/resume one job by id; False when the job is unknown.
+
+        Pausing the running job drives ``pause_event`` (engine holds inside);
+        pausing a queued job marks the id (worker holds it at head). Resuming
+        releases the engine hook only when nothing else holds: a sticky
+        global pause (set_paused) always wins over a per-job resume.
+        """
+        with self._cond:
+            known = (
+                (self._current is not None and self._current.id == job_id)
+                or any(j.id == job_id for j in self._pending)
+                or job_id in self._paused_ids
+            )
+            if not known:
+                return False
+            if value:
+                self._paused_ids.add(job_id)
+                if self._current is not None and self._current.id == job_id:
+                    self.pause_event.set()
+            else:
+                self._paused_ids.discard(job_id)
+                if not self._global_paused and not self._paused_ids:
+                    self.pause_event.clear()
+            self._cond.notify_all()
+            return True
 
     # ── Lifecycle ────────────────────────────────────────────────────────
 
@@ -163,6 +208,8 @@ class JobQueue:
             running_evt = self._cancel_events.get(self._current.id) if self._current else None
             running = self._current
             # A paused worker must observe _shutdown, not sleep on the gate.
+            self._global_paused = False
+            self._paused_ids.clear()
             self.pause_event.clear()
             self._cond.notify_all()
             thread = self._thread
@@ -216,11 +263,19 @@ class JobQueue:
                 evt = self._cancel_events.get(job_id)
                 if evt is not None:
                     evt.set()
+                    self._paused_ids.discard(job_id)
+                    # A cancelled job must release the engine hook NOW, not
+                    # when the runner gets around to exiting: drop the
+                    # per-job hold unless a sticky global pause owns it.
+                    if not self._global_paused and not self._paused_ids:
+                        self.pause_event.clear()
+                    self._cond.notify_all()
                     return True
                 return False
             # Matched entry removed while we held the condition — finish the
             # bookkeeping without holding it (finisher may re-enter the queue).
             removed = job
+            self._paused_ids.discard(job_id)
         _set_worker_field(removed, "status", "cancelled")
         _set_worker_field(removed, "status_message", "Cancelled")
         self._notify_finished(removed)
@@ -243,12 +298,18 @@ class JobQueue:
                     lambda: (
                         self._shutdown
                         or self._generation != generation
-                        or (not self.pause_event.is_set() and bool(self._pending))
+                        or (
+                            bool(self._pending)
+                            and not self._global_paused
+                            and not self.pause_event.is_set()
+                            and self._pending[0].id not in self._paused_ids
+                        )
                     )
                 )
                 if self._shutdown or self._generation != generation:
                     break
                 job = self._pending.pop(0)
+                self._paused_ids.discard(job.id)
                 cancel_evt = threading.Event()
                 self._cancel_events[job.id] = cancel_evt
                 self._current = job
@@ -278,8 +339,15 @@ class JobQueue:
             finally:
                 with self._cond:
                     self._cancel_events.pop(job.id, None)
+                    self._paused_ids.discard(job.id)
                     if self._current is job:
                         self._current = None
+                    # A finished job must not keep the engine hook held: if
+                    # this was a per-job pause, release it when nothing else
+                    # holds (sticky global pause survives — only set_paused
+                    # clears that).
+                    if not self._global_paused and not self._paused_ids:
+                        self.pause_event.clear()
                 # Reconcile: a runner that returns (or raises) without leaving
                 # a terminal status must not strand a ghost row. A set cancel
                 # event means cancelled even if the runner ignored it.

@@ -6,8 +6,10 @@ from pathlib import Path
 
 import flet as ft
 
+from components.tool_job_status import tool_job_row
+from core.notify import ERROR, show_snack
 from core.state import Job, use_app_state
-from core.storage_paths import format_bytes, get_temp_dir
+from core.storage_paths import format_bytes, get_temp_dir, unique_temp_name
 from core.styles import card_container, section_header
 from core.theme import ACCENT_BLUE, TEXT_MUTED_DARK, TEXT_MUTED_LIGHT, is_dark_mode
 from core.tokens import FONT_LG, FONT_MD, FONT_SM, FONT_XS, RADIUS_LG, SPACE_MD, SPACE_SM
@@ -28,14 +30,26 @@ def CompressScreen() -> ft.Control:
     file_name = Path(media_path).name if media_path else "No file selected"
     orig_bytes = Path(media_path).stat().st_size if media_path and Path(media_path).exists() else 0
     orig_size_str = format_bytes(orig_bytes)
+    # Compress is a VIDEO op (bitrate ladder + H.264/AAC encode): images and
+    # audio-only files are refused with an explanation, not a confusing .mp4.
+    media_kind = info.kind if info is not None else "video"
+    kind_ok = media_kind == "video"
     duration_s = info.duration_s if info and info.duration_s > 0 else 10.0
 
     target_mb, set_target_mb = ft.use_state(16.0)  # Default 16MB (WhatsApp)
-    is_processing, set_is_processing = ft.use_state(False)
 
-    # The engine falls back to the first verified encoder, but starting
-    # before the probe lands still guesses — gate Start like Convert does.
+    # Encoder-empty guard mirrors Convert: without verified video encoders
+    # Start would fail late in _pick_video_encoder instead of refusing here.
     probing = app_state.probe_info is None
+    available_video = (
+        list(app_state.probe_info.video_encoder_picks or []) if app_state.probe_info else []
+    )
+
+    # Live pipeline: derived from the queue, never a stuck local flag.
+    running_job = (
+        app_state.active_job if (app_state.active_job and app_state.active_job.is_running) else None
+    )
+    busy = running_job is not None
 
     # Preset sizes (MB)
     presets = [
@@ -45,25 +59,27 @@ def CompressScreen() -> ft.Control:
         ("small", "Ultra Small (5 MB)", 5.0),
     ]
 
-    # Calculate estimated bitrate
+    # Estimated split mirrors the engine (total minus audio headroom):
+    # the old readout showed the TOTAL as video kbps (15-20% high at 5MB/60s).
     est_bits = target_mb * 8 * 1024 * 1024 * 0.92
-    est_kbps = int((est_bits / duration_s) / 1000)
+    est_total = int(est_bits / duration_s)
+    est_audio = min(128000, max(64000, int(est_total * 0.15)))
+    est_video_kbps = max(0, (est_total - est_audio) // 1000)
 
     def _start_compression(_):
-        if not media_path:
+        if not media_path or busy:
             return
-        if probing:
-            from core.notify import ERROR, show_snack
-
+        if probing or not available_video:
             show_snack(
                 page,
                 "Still probing engine capabilities — try again in a moment.",
                 bgcolor=ERROR,
             )
             return
-        set_is_processing(True)
+        if not kind_ok:
+            return
 
-        out_name = f"{Path(media_path).stem}_compressed_{int(target_mb)}MB.mp4"
+        out_name = unique_temp_name(f"{Path(media_path).stem}_compressed_{target_mb:.1f}MB", ".mp4")
         out_path = str(get_temp_dir() / out_name)
 
         job = Job(
@@ -104,7 +120,11 @@ def CompressScreen() -> ft.Control:
                                     overflow=ft.TextOverflow.ELLIPSIS,
                                 ),
                                 ft.Text(
-                                    f"Current Size: {orig_size_str} • {duration_s:.1f}s",
+                                    (
+                                        f"Current Size: {orig_size_str} • {duration_s:.1f}s"
+                                        if info
+                                        else f"Current Size: {orig_size_str}"
+                                    ),
                                     size=FONT_SM,
                                     color=muted,
                                 ),
@@ -122,6 +142,27 @@ def CompressScreen() -> ft.Control:
                 border_radius=RADIUS_LG,
                 is_dark=is_dark,
             ),
+            # Live pipeline status (derived, never stuck)
+            *([tool_job_row(running_job, ctrl, is_dark=is_dark)] if running_job else []),
+            # Kind gate: compress needs a video timeline.
+            *(
+                [
+                    card_container(
+                        content=ft.Text(
+                            "Compression needs a video file — images and audio-only "
+                            "files have no video timeline to squeeze. Use Convert "
+                            "for stills or Audio Studio for sound.",
+                            size=FONT_SM,
+                            color=muted,
+                        ),
+                        padding=SPACE_MD,
+                        border_radius=RADIUS_LG,
+                        is_dark=is_dark,
+                    )
+                ]
+                if media_path and not kind_ok
+                else []
+            ),
             # Target Presets
             section_header("Destination Presets", "Quick target size limits", is_dark=is_dark),
             ft.Row(
@@ -129,24 +170,25 @@ def CompressScreen() -> ft.Control:
                     ft.Chip(
                         label=ft.Text(label),
                         selected=abs(target_mb - val) < 0.1,
-                        on_select=lambda _, v=val: set_target_mb(v),
+                        on_click=lambda _, v=val: set_target_mb(v),
                     )
                     for _, label, val in presets
                 ],
                 wrap=True,
                 spacing=SPACE_SM,
             ),
-            # Target Size Slider
+            # Target Size Slider (0.1 MB steps — the old 78 divisions made the
+            # round(…,1) a lie at exactly 1.0 MB granularity).
             section_header(
                 "Custom Target Size",
-                f"Maximum file size: {target_mb:.1f} MB (≈ {est_kbps} kbps)",
+                f"Maximum file size: {target_mb:.1f} MB (≈ {est_video_kbps} kbps video + audio)",
                 is_dark=is_dark,
             ),
             ft.Slider(
                 value=float(target_mb),
                 min=2.0,
                 max=80.0,
-                divisions=78,
+                divisions=780,
                 on_change=lambda e: set_target_mb(round(float(e.control.value), 1)),
             ),
             # Efficiency readout card
@@ -163,8 +205,11 @@ def CompressScreen() -> ft.Control:
                             spacing=SPACE_SM,
                         ),
                         ft.Text(
-                            f"Original: {orig_size_str} → Target: ≤ {target_mb:.1f} MB.\n"
-                            f"Resolution will be dynamically scaled if necessary to maintain sharp visual clarity.",
+                            f"Original: {orig_size_str} → Target: ≤ {target_mb:.1f} MB "
+                            "(decimal MB vs platform quotas).\n"
+                            "Below ~1 Mbps the engine downscales to 720p, below "
+                            "~400 kbps to 480p; always H.264/AAC, preset fast, "
+                            "~8% container headroom.",
                             size=FONT_XS,
                             color=muted,
                         ),
@@ -174,7 +219,7 @@ def CompressScreen() -> ft.Control:
                 padding=SPACE_MD,
                 is_dark=is_dark,
             ),
-            # Action button — gated on the probe like Convert.
+            # Action button — gated on probe + encoders + kind like Convert.
             *(
                 [
                     ft.Row(
@@ -197,7 +242,7 @@ def CompressScreen() -> ft.Control:
                 f"Compress to ≤ {target_mb:.1f} MB",
                 icon=ft.Icons.CHECK_ROUNDED,
                 height=48,
-                disabled=not media_path or is_processing or probing,
+                disabled=not media_path or busy or probing or not available_video or not kind_ok,
                 on_click=_start_compression,
             ),
         ],

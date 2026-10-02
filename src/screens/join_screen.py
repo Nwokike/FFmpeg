@@ -10,15 +10,15 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import time
 from pathlib import Path
 
 import flet as ft
 
 from components.banner_ad import BannerAdView
+from components.tool_job_status import tool_job_row
 from core.notify import ERROR, show_snack
 from core.state import Job, use_app_state
-from core.storage_paths import format_bytes, get_temp_dir
+from core.storage_paths import format_bytes, get_temp_dir, unique_temp_name
 from core.styles import card_container, section_header
 from core.theme import TEXT_MUTED_DARK, TEXT_MUTED_LIGHT, is_dark_mode
 from core.tokens import FONT_LG, FONT_SM, FONT_XS, RADIUS_LG, SPACE_MD, SPACE_SM
@@ -42,12 +42,18 @@ def JoinScreen() -> ft.Control:
     is_dark = is_dark_mode(page, app_state)
     muted = TEXT_MUTED_DARK if is_dark else TEXT_MUTED_LIGHT
 
-    entries, set_entries = ft.use_state([])  # [{path,name,size_s,dur_s,fps,w,h,...}]
+    entries, set_entries = ft.use_state([])  # [{path,name,size_s,dur_s,fps,w,h,kind,...}]
     container_fmt, set_container_fmt = ft.use_state("mp4")
     transition, set_transition = ft.use_state("cut")  # cut | crossfade
     fade_s, set_fade_s = ft.use_state(0.5)
     avail, set_avail = ft.use_state(frozenset())
     busy, set_busy = ft.use_state(False)
+
+    # Live pipeline: derived from the queue (Start locks while it runs).
+    running_job = (
+        app_state.active_job if (app_state.active_job and app_state.active_job.is_running) else None
+    )
+    queue_busy = running_job is not None
 
     async def _load_avail() -> None:
         try:
@@ -70,6 +76,8 @@ def JoinScreen() -> ft.Control:
                 return f"not in this build: {', '.join(sorted(missing))}"
         first_fps = entries[0].get("fps") or 30.0
         for e in entries:
+            if (e.get("kind") or "video") != "video":
+                return f"{e['name']} is not a video clip"
             fps = e.get("fps") or 0.0
             if not fps:
                 return f"{e['name']} has no video"
@@ -109,6 +117,7 @@ def JoinScreen() -> ft.Control:
                     "name": Path(p).name,
                     "size_s": info.file_size_bytes,
                     "dur_s": info.duration_s,
+                    "kind": info.kind,
                     "fps": v.fps if v else None,
                     "w": v.width if v else None,
                     "h": v.height if v else None,
@@ -118,13 +127,24 @@ def JoinScreen() -> ft.Control:
                 }
 
             new_entries = list(entries)
+            failed = 0
             for p in added:
                 try:
                     e = await asyncio.to_thread(_probe_sync, p)
+                    if (e.get("kind") or "video") != "video":
+                        show_snack(
+                            page,
+                            f"Skipped {e['name']}: joins need video clips",
+                            bgcolor=ERROR,
+                        )
+                        continue
                     new_entries.append(e)
                 except Exception as exc:
+                    failed += 1
                     logger.warning("Skipping %s: %s", p, exc)
             set_entries(new_entries)
+            if failed:
+                show_snack(page, f"{failed} file(s) couldn't be read — skipped", bgcolor=ERROR)
             if added and len(new_entries) < 2:
                 show_snack(page, "Add at least one more clip to join")
         finally:
@@ -145,13 +165,16 @@ def JoinScreen() -> ft.Control:
         if len(entries) < 2:
             show_snack(page, "Pick at least two files to join", bgcolor=ERROR)
             return
+        if queue_busy:
+            return
         if transition == "crossfade":
             reason = _crossfade_reason()
             if reason is not None:
                 show_snack(page, f"Crossfade unavailable: {reason}", bgcolor=ERROR)
                 return
         ext = container_fmt
-        out_path = str(get_temp_dir() / f"joined_{int(time.time())}.{ext}")
+        out_name = unique_temp_name("joined", ext)
+        out_path = str(get_temp_dir() / out_name)
         job = Job(
             op="concat",
             input_path=entries[0]["path"],
@@ -349,11 +372,13 @@ def JoinScreen() -> ft.Control:
             # Banner slot directly above the primary action — the natural
             # pause between reviewing the clip list and starting the join.
             BannerAdView(slot="join-action"),
+            # Live pipeline status (derived, never stuck)
+            *([tool_job_row(running_job, ctrl, is_dark=is_dark)] if running_job else []),
             ft.FilledButton(
                 f"Join {len(entries) or ''} Clips".replace("  ", " "),
                 icon=ft.Icons.MERGE_TYPE_ROUNDED,
                 height=48,
-                disabled=len(entries) < 2 or busy,
+                disabled=len(entries) < 2 or busy or queue_busy,
                 on_click=_start_join,
             ),
         ],

@@ -13,9 +13,10 @@ from pathlib import Path
 
 import flet as ft
 
+from components.tool_job_status import tool_job_row
 from core.notify import ERROR, show_snack
 from core.state import Job, use_app_state
-from core.storage_paths import cache_bytes, format_bytes, get_temp_dir
+from core.storage_paths import cache_bytes, format_bytes, get_temp_dir, unique_temp_name
 from core.styles import card_container, section_header
 from core.theme import ACCENT_PURPLE, TEXT_MUTED_DARK, TEXT_MUTED_LIGHT, is_dark_mode
 from core.tokens import FONT_LG, FONT_MD, FONT_SM, FONT_XS, RADIUS_LG, SPACE_MD, SPACE_SM
@@ -63,8 +64,12 @@ def FiltersScreen() -> ft.Control:
     wm_path, set_wm_path = ft.use_state(None)
     wm_pos, set_wm_pos = ft.use_state("br")
     wm_pct, set_wm_pct = ft.use_state(20)
-    avail, set_avail = ft.use_state(frozenset())
-    is_processing, set_is_processing = ft.use_state(False)
+    # Tri-state: None = loading (skeleton), set() = loaded, _LOAD_FAILED =
+    # enumeration threw (conservative gating + warning banner). The old
+    # empty-set start rendered every gate OPEN, so EQ flashed then collapsed
+    # on every visit — and a load failure left everything silently no-op.
+    avail, set_avail = ft.use_state(None)
+    _LOAD_FAILED = "load-failed"
 
     speeds = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0]
     rotations = [(0, "Normal"), (90, "90° CW"), (180, "180°"), (270, "270° CW")]
@@ -75,12 +80,27 @@ def FiltersScreen() -> ft.Control:
             set_avail(frozenset(names))
         except Exception as exc:
             logger.warning("Filter availability load failed: %s", exc)
+            set_avail(frozenset({_LOAD_FAILED}))
 
     ft.use_effect(lambda: page.run_task(_load_avail), [])
 
     def _missing(*names: str) -> bool:
-        """True only after enumeration, when any named filter is absent."""
-        return bool(avail) and any(n not in avail for n in names)
+        """True when a named filter is absent. Loading → False ONLY after a
+        successful load; a failed enumeration gates everything (conservative)
+        instead of rendering controls that silently do nothing."""
+        if avail is None:
+            return False
+        if _LOAD_FAILED in avail:
+            return True
+        return any(n not in avail for n in names)
+
+    def _denoise_backend() -> str:
+        if avail is None:
+            return "checking…"
+        for candidate in ("hqdn3d", "nlmeans", "atadenoise"):
+            if candidate in avail:
+                return candidate
+        return "unavailable"
 
     def _note(filter_label: str) -> ft.Control:
         return ft.Text(
@@ -125,17 +145,53 @@ def FiltersScreen() -> ft.Control:
         w = int(vw * target_h / vh)
         return (w // 2) * 2, (target_h // 2) * 2
 
+    # Live pipeline: derived from the queue, never a stuck local flag.
+    running_job = (
+        app_state.active_job if (app_state.active_job and app_state.active_job.is_running) else None
+    )
+    busy = running_job is not None
+
     def _start_filters(_):
-        if not media_path:
+        if not media_path or busy:
             return
-        set_is_processing(True)
 
         stem = Path(media_path).stem
         ext = Path(media_path).suffix or ".mp4"
-        out_name = f"{stem}_filtered{ext}"
+        out_name = unique_temp_name(f"{stem}_filtered", ext)
         out_path = str(get_temp_dir() / out_name)
         scale_w, scale_h = _scale_dims()
 
+        # Prune gated-off params before building the Job: the engine silently
+        # ignores a missing filter's params, so an unpruned job SUCCEEDS but
+        # does nothing — the history would lie about what ran.
+        eq_params = (
+            {
+                "brightness": float(brightness),
+                "contrast": float(contrast),
+                "saturation": float(saturation),
+            }
+            if not _missing("eq")
+            and (
+                abs(brightness) > 1e-6 or abs(contrast - 1.0) > 1e-6 or abs(saturation - 1.0) > 1e-6
+            )
+            else None
+        )
+        denoise_value = (
+            denoise
+            if denoise == "off" or _denoise_backend() in ("hqdn3d", "nlmeans", "atadenoise")
+            else "off"
+        )
+        sharpen_value = int(sharpen) if not _missing("unsharp") else 0
+        watermark_value = (
+            {"path": wm_path, "position": wm_pos, "width_pct": int(wm_pct)}
+            if wm_path and not _missing("movie", "overlay")
+            else None
+        )
+
+        try:
+            file_bytes = Path(media_path).stat().st_size if Path(media_path).exists() else 0
+        except OSError:
+            file_bytes = 0
         job = Job(
             op="convert",
             input_path=media_path,
@@ -147,22 +203,18 @@ def FiltersScreen() -> ft.Control:
                 "crop": crop if crop != "original" else None,
                 "scale_width": scale_w,
                 "scale_height": scale_h,
-                "eq": {
-                    "brightness": float(brightness),
-                    "contrast": float(contrast),
-                    "saturation": float(saturation),
-                },
-                "denoise": denoise,
-                "sharpen": int(sharpen),
-                "watermark": (
-                    {"path": wm_path, "position": wm_pos, "width_pct": int(wm_pct)}
-                    if wm_path
-                    else None
-                ),
+                "eq": eq_params,
+                "denoise": denoise_value,
+                "sharpen": sharpen_value,
+                "watermark": watermark_value,
             },
-            original_size_bytes=Path(media_path).stat().st_size if Path(media_path).exists() else 0,
+            original_size_bytes=file_bytes,
         )
-        ctrl.start_job(job)
+        try:
+            ctrl.start_job(job)
+        except Exception as exc:
+            logger.warning("Filter job start failed: %s", exc)
+            show_snack(page, f"Couldn't start: {exc}", bgcolor=ERROR)
 
     media_kind = info.kind if info is not None else "video"
     header = ft.Row(
@@ -251,6 +303,26 @@ def FiltersScreen() -> ft.Control:
         controls=[
             header,
             file_card,
+            # Live pipeline status (derived, never stuck)
+            *([tool_job_row(running_job, ctrl, is_dark=is_dark)] if running_job else []),
+            # Availability warning (failed enumeration gates conservatively).
+            *(
+                [
+                    card_container(
+                        content=ft.Text(
+                            "Filter list couldn't load — controls are gated off "
+                            "until it does, so nothing renders a no-op job.",
+                            size=FONT_XS,
+                            color=muted,
+                        ),
+                        padding=SPACE_MD,
+                        border_radius=RADIUS_LG,
+                        is_dark=is_dark,
+                    )
+                ]
+                if avail is not None and _LOAD_FAILED in avail
+                else []
+            ),
             # Speed / Tempo
             section_header("Playback Speed", f"{speed_val}x playback multiplier", is_dark=is_dark),
             ft.Row(
@@ -396,7 +468,11 @@ def FiltersScreen() -> ft.Control:
                 else [_note("eq")]
             ),
             # Denoise (gated: hqdn3d > nlmeans > atadenoise)
-            section_header("Denoise", "Clean grain and compression noise", is_dark=is_dark),
+            section_header(
+                "Denoise",
+                f"Backend: {_denoise_backend()}" if avail is not None else "Checking filters…",
+                is_dark=is_dark,
+            ),
             *(
                 [
                     ft.Row(
@@ -411,7 +487,7 @@ def FiltersScreen() -> ft.Control:
                         spacing=SPACE_SM,
                     )
                 ]
-                if not avail or "hqdn3d" in avail or "nlmeans" in avail or "atadenoise" in avail
+                if avail is None or _denoise_backend() != "unavailable"
                 else [_note("hqdn3d/nlmeans/atadenoise")]
             ),
             # Sharpen (gated: unsharp)
@@ -526,7 +602,7 @@ def FiltersScreen() -> ft.Control:
                 "Apply Filters & Render",
                 icon=ft.Icons.AUTO_FIX_HIGH_ROUNDED,
                 height=48,
-                disabled=not media_path or is_processing,
+                disabled=not media_path or busy or avail is None,
                 on_click=_start_filters,
             ),
         ],

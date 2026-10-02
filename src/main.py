@@ -60,17 +60,15 @@ TERMS_VERSION = "1"
 # The mounted ControllerMethods instance (set once AppShell mounts). Lets
 # main-level helpers drive the single-view branch swap even before/around the
 # shell (Sherlock pattern: navigate-then-work, controller-owned closures).
-_show_view_box: list = [None]
 
 
 def _select_tab(page: ft.Page, tab_idx: int) -> None:
     """Select a dashboard tab inside the single-view shell."""
+    from app_shell import clamp_tab
+
+    tab_idx = clamp_tab(tab_idx)
     state.selected_tab = tab_idx
     state.active_view = "dashboard"
-    # If AppShell's show_view setter is already mounted, drive it directly.
-    setter = _show_view_box[0]
-    if setter is not None:
-        setter("dashboard")
     page.update()
 
 
@@ -347,7 +345,7 @@ async def main(page: ft.Page) -> None:
             Job(
                 # `or` defaults, not .get defaults: an explicit JSON null came
                 # back as None and detonated Path(None) in History.
-                id=d.get("id") or uuid.uuid4().hex[:8],
+                id=d.get("id") or uuid.uuid4().hex,
                 op=d.get("op") or "convert",
                 input_path=d.get("input_path") or "",
                 output_path=d.get("output_path") or "",
@@ -384,18 +382,18 @@ async def main(page: ft.Page) -> None:
     # branch swaps in place — no Router, no page.views surgery (Sherlock).
 
     def _swap_view(view: str) -> None:
+        # Single mount path: global flip first (the shell's effect adopts it),
+        # then the mounted controller closure for immediacy. Before mount the
+        # state flip is enough — the first render seeds from state.active_view.
         state.active_view = view
-        live = _show_view_box[0]
-        if live is not None:
-            live(view)
-            return
         show = methods.show_view
         if show is not None:
-            show(view)
-        else:
-            # Shell not mounted yet (early boot): state flip is enough —
-            # the first render reads state.active_view.
-            page.update()
+            try:
+                show(view)
+                return
+            except Exception:
+                logger.debug("Controller show_view failed; state flip stands", exc_info=True)
+        page.update()
 
     def navigate(view: str) -> None:
         leaving_result = state.active_view == "result" and view == "dashboard"
@@ -804,12 +802,16 @@ async def main(page: ft.Page) -> None:
     # One Event drives both gates: the worker (before the next job) and the
     # engine's per-packet pause hook inside the running one.
     set_pause_event(queue.pause_event)
+    # Late-bind: cards/banner read pause state off the queue through Services.
+    services.queue = queue
 
-    def toggle_pause_job() -> None:
-        paused = queue.toggle_pause()
-        current = queue.current
-        if current is not None:
-            current.status_message = "Paused" if paused else "Processing…"
+    def toggle_pause_job(job_id: str) -> None:
+        if not queue.set_job_paused(job_id, not queue.is_job_paused(job_id)):
+            logger.warning("Pause toggle missed: no such job %s", job_id)
+            return
+        # Republish so every card/banner label updates (in-place Job writes
+        # notify the Job, not AppState — same whole-value rule as set_setting).
+        state.jobs = list(state.jobs)
         page.update()
 
     # Jobs whose submission is the monetizable "big action" (matches the
@@ -858,20 +860,43 @@ async def main(page: ft.Page) -> None:
             if current and current.id == job_id:
                 current.status_message = "Cancelling..."
                 page.update()
+        else:
+            logger.warning("Cancel missed: no such job %s", job_id)
+            show_snack(page, "That job is already gone", bgcolor=ERROR)
 
     def delete_job(job_id: str) -> None:
+        before = len(state.history)
         state.history = [j for j in state.history if j.id != job_id]
+        if len(state.history) == before:
+            logger.warning("Delete missed: no history entry %s", job_id)
+            return
         _persist_history()
         page.update()
 
-    def restore_job(job: Job) -> None:
-        """Undo target for the history swipe-delete SnackBar."""
-        state.history.insert(0, job)
+    def restore_job(job: Job, index: int = -1) -> None:
+        """Undo target for the history swipe-delete SnackBar.
+
+        Whole-value insert AT the captured index (not always front) — the
+        in-place insert this replaces persisted to disk but never re-rendered,
+        and teleported middle items to the top.
+        """
+        if any(j.id == job.id for j in state.history):
+            return
+        items = list(state.history)
+        items.insert(index if 0 <= index <= len(items) else 0, job)
+        state.history = items
         _persist_history()
         page.update()
 
     def clear_history() -> None:
         state.history = []
+        _persist_history()
+        page.update()
+
+    def restore_all(jobs: list) -> None:
+        """Undo target for the Clear-All SnackBar — restores the snapshot."""
+        existing = {j.id for j in state.history}
+        state.history = list(state.history) + [j for j in jobs if j.id not in existing]
         _persist_history()
         page.update()
 
@@ -1024,6 +1049,7 @@ async def main(page: ft.Page) -> None:
         retry_job=retry_job,
         delete_job=delete_job,
         restore_job=restore_job,
+        restore_all=restore_all,
         finish_onboarding=finish_onboarding,
         share_result=lambda j: page.run_task(share_result, j),
         save_result=lambda j: page.run_task(save_result, j),

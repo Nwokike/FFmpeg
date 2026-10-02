@@ -86,4 +86,31 @@ KIRI_DARK_BG = "#0F1114"  # launcher/splash dark background (icon_background)
 KIRI_DARK_2 = "#1A1D22"
 KIRI_LIGHT_BG = "#FAFAFA"
 
+# ── Job op labels (single source of truth for cards, banners, snacks) ──
+# "concat" is the real join op ("join" is a view name, never an op);
+# "record" renders as a noun everywhere, not a verb in one place.
+OP_LABELS: dict[str, str] = {
+    "convert": "Convert",
+    "compress": "Compress",
+    "cut": "Trim",
+    "extract_audio": "Extract Audio",
+    "extract_frames": "Extract Frames",
+    "extract_subtitles": "Extract Subtitles",
+    "create_gif": "Create GIF",
+    "filters": "Filters",
+    "audio_studio": "Audio Studio",
+    "audio": "Audio Studio",
+    "concat": "Join",
+    "join": "Join",
+    "remux": "Remux",
+    "record": "Recording",
+}
+
+
+def op_title(op: str | None) -> str:
+    """Human label for a job op; never raises, never returns blanks."""
+    key = (op or "").strip() or "convert"
+    return OP_LABELS.get(key, key.replace("_", " ").title())
+
+
 PYTHON_VERSION = f"{sys.version_info.major}.{sys.version_info.minor}"
