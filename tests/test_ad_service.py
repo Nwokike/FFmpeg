@@ -100,3 +100,46 @@ def test_consent_misconfiguration_logs_actionable_error(monkeypatch, caplog):
     assert any("UMP form" in r.message or "consent form" in r.message for r in caplog.records), (
         "misconfiguration must name the AdMob UMP-form fix"
     )
+
+
+def test_privacy_revoke_publishes_ads_ready(monkeypatch):
+    """Withdrawing consent must collapse banners now, not on a later render."""
+
+    class Consent:
+        def __init__(self):
+            self.granted = True
+
+        async def get_privacy_options_requirement_status(self):
+            return ad_module.fta.PrivacyOptionsRequirementStatus.REQUIRED
+
+        async def show_privacy_options_form(self):
+            self.granted = False
+
+        async def can_request_ads(self):
+            return self.granted
+
+    monkeypatch.setattr(ad_module, "_HAS_ADS", True)
+    page = _Page()
+    service = AdService(page)
+    service._consent_manager = Consent()
+    service._can_request_ads = True
+    state.ads_ready = True
+
+    asyncio.run(service.show_privacy_options())
+
+    assert service._can_request_ads is False
+    assert state.ads_ready is False
+    state.ads_ready = False  # leave global clean for other tests
+
+
+def test_gather_consent_off_mobile_publishes_closed_gate(monkeypatch):
+    monkeypatch.setattr(ad_module, "_HAS_ADS", False)
+    page = _Page()
+    service = AdService(page)
+    state.ads_ready = True
+
+    asyncio.run(service.gather_consent())
+
+    assert service._can_request_ads is False
+    assert state.ads_ready is False
+    state.ads_ready = False

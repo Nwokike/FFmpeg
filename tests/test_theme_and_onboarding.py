@@ -83,3 +83,25 @@ def test_app_state_context_actually_subscribes_component():
     rendered = Renderer().render(lambda: AppStateCtx(state, _probe))
     rendered.before_update()
     assert len(rendered._state.observable_subscriptions) == 1
+
+
+def test_onboarding_has_no_skip_path():
+    # Consent is explicit: the only way in is the checked Get Started
+    # button. A Skip control that persisted terms_accepted was a legal defect.
+    src = (_ROOT / "src" / "screens" / "onboarding_screen.py").read_text(encoding="utf-8")
+    assert 'TextButton("Skip"' not in src and "TextButton('Skip'" not in src
+    assert "finish_onboarding()" in src  # the accept path still exists
+
+
+def test_onboarding_accept_requires_checkbox():
+    src = (_ROOT / "src" / "screens" / "onboarding_screen.py").read_text(encoding="utf-8")
+    assert "disabled=is_last and not accepted_terms" in src
+    # The whole row toggles, not just the box hit-target.
+    assert 'label="I agree to local processing terms"' in src
+
+
+def test_finish_onboarding_writes_versioned_terms():
+    src = (_ROOT / "src" / "main.py").read_text(encoding="utf-8")
+    handler = src.split("def finish_onboarding", 1)[1].split("\n    def ", 1)[0]
+    assert 'storage.set("terms_accepted", TERMS_VERSION)' in handler
+    assert "terms_skipped" not in src, "no skipped state may persist consent-adjacent flags"

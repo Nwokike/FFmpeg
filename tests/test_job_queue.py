@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 import time
 
 from core.state import Job
@@ -129,3 +130,92 @@ def test_worker_space_failure_does_not_notify_outside_page_context(monkeypatch):
 
     assert job.status == "failed"
     assert notified == []
+
+
+def test_double_start_keeps_single_worker():
+    order: list[str] = []
+
+    def runner(job: Job, evt) -> None:
+        order.append(job.id)
+        job.status = "completed"
+        time.sleep(0.2)
+
+    q = JobQueue(runner=runner)
+    q.enqueue(_job())
+    q.start()
+    q.start()  # second call must not spawn a second worker
+    q.start()
+    deadline = time.time() + 5
+    while len(order) < 1 and time.time() < deadline:
+        time.sleep(0.05)
+    q.shutdown()
+    assert len(order) == 1
+
+
+def test_runner_exception_marks_failed_not_ghost():
+    finished: dict[str, str] = {}
+
+    def runner(job: Job, evt) -> None:
+        raise RuntimeError("boom")
+
+    q = JobQueue(runner=runner, on_finished=lambda j: finished.update({j.id: j.status}))
+    j = _job()
+    q.enqueue(j)
+    deadline = time.time() + 5
+    while j.id not in finished and time.time() < deadline:
+        time.sleep(0.05)
+    q.shutdown()
+    assert j.status == "failed"
+    assert j.error_message, "reconciled failure must explain itself"
+
+
+def test_cancel_reconciles_ignoring_runner():
+    finished: dict[str, str] = {}
+
+    def runner(job: Job, evt) -> None:
+        # Never checks the event, never sets a terminal status.
+        time.sleep(0.4)
+
+    q = JobQueue(runner=runner, on_finished=lambda j: finished.update({j.id: j.status}))
+    j = _job()
+    q.enqueue(j)
+    time.sleep(0.1)  # let the worker pick it up
+    assert q.cancel(j.id) is True
+    deadline = time.time() + 5
+    while finished.get(j.id) is None and time.time() < deadline:
+        time.sleep(0.05)
+    q.shutdown()
+    assert j.status == "cancelled"
+    assert j.is_finished
+
+
+def test_shutdown_joins_worker():
+    gate = threading.Event()
+
+    def runner(job: Job, evt) -> None:
+        gate.wait(5)
+        job.status = "completed"
+
+    q = JobQueue(runner=runner)
+    j = _job()
+    q.enqueue(j)
+    time.sleep(0.1)
+    gate.set()
+    q.shutdown(join_timeout=5.0)
+    assert not (q._thread is not None and q._thread.is_alive())
+
+
+def test_pause_wakes_promptly_without_poll_delay():
+    q = JobQueue(runner=lambda job, evt: setattr(job, "status", "completed"))
+    q.set_paused(True)
+    j = _job()
+    q.enqueue(j)
+    time.sleep(0.1)
+    assert j.status == "pending"
+    started = time.time()
+    q.set_paused(False)
+    deadline = time.time() + 5
+    while j.status == "pending" and time.time() < deadline:
+        time.sleep(0.01)
+    q.shutdown()
+    assert time.time() - started < 1.0, "resume must wake the worker, not wait out a poll"

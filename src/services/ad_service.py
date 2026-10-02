@@ -76,11 +76,18 @@ class AdService:
                 self.page.services.remove(registered)
                 break
 
+    def _publish_consent(self) -> None:
+        # The observable AdService state is invisible to Flet's change
+        # detection, so every consent settle — grant, revoke, or fail-closed —
+        # publishes through it and mounted banner slots re-render at once.
+        state.ads_ready = self._can_request_ads
+
     async def gather_consent(self) -> None:
         """Execute Google UMP consent request on mobile platforms."""
         if not _HAS_ADS or not self._is_mobile():
             # Ads never render off-mobile; keep the gate shut regardless.
             self._can_request_ads = False
+            self._publish_consent()
             return
 
         try:
@@ -114,10 +121,7 @@ class AdService:
                 logger.warning("UMP consent check failed (fail closed, no ads): %s", exc)
             self._can_request_ads = False
         finally:
-            # Publish through the observable so every mounted banner slot
-            # re-renders immediately; AdService state alone is invisible to
-            # Flet's change detection.
-            state.ads_ready = self._can_request_ads
+            self._publish_consent()
 
     async def show_privacy_options(self) -> None:
         """Show privacy settings form if required by EU/UK regulation."""
@@ -128,6 +132,9 @@ class AdService:
             if status == fta.PrivacyOptionsRequirementStatus.REQUIRED:
                 await self._consent_manager.show_privacy_options_form()
                 self._can_request_ads = await self._consent_manager.can_request_ads()
+                # Revoke path: withdrawing consent must collapse banners now,
+                # not on some unrelated later re-render (privacy risk).
+                self._publish_consent()
         except Exception as exc:
             logger.warning("Privacy options display error: %s", exc)
 

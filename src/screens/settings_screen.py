@@ -100,7 +100,9 @@ def SettingsScreen() -> ft.Control:
         set_cache_size(get_cache_size_bytes())
         page.update()
         show_snack(
-            page, f"Removed {format_bytes(freed)} of cache & temporary files", bgcolor=SUCCESS
+            page,
+            f"Removed {format_bytes(freed)} of regenerable cache (in-progress work untouched)",
+            bgcolor=SUCCESS,
         )
 
     def _copy_logs(text: str) -> None:
@@ -119,8 +121,8 @@ def SettingsScreen() -> ft.Control:
         page.run_task(services.url_launcher.launch_url, url)
 
     def _open_activity_terminal(_):
-        logs = MemoryLogHandler.get_logs()
-        log_text = "\n".join(logs[-100:])
+        logs = MemoryLogHandler.get_logs(limit=100)
+        log_text = "\n".join(logs) if logs != ["No logs recorded yet."] else "No logs yet."
         page.show_dialog(
             ft.AlertDialog(
                 title=ft.Text("Activity Terminal"),
@@ -339,12 +341,12 @@ def SettingsScreen() -> ft.Control:
                                 ft.Column(
                                     controls=[
                                         ft.Text(
-                                            "Scratchpad & Cache",
+                                            "Regenerable Cache",
                                             size=FONT_MD,
                                             weight=ft.FontWeight.W_600,
                                         ),
                                         ft.Text(
-                                            f"{format_bytes(cache_size)} in cache & temporary files",
+                                            f"{format_bytes(cache_size)} cached (thumbnails, previews)",
                                             size=FONT_SM,
                                             color=muted,
                                         ),

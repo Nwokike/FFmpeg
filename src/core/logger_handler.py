@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 from collections import deque
 from datetime import UTC, datetime
 
@@ -14,6 +15,11 @@ class MemoryLogHandler(logging.Handler):
 
     def __init__(self, maxlen: int = 500):
         super().__init__()
+        # Message-only formatter: the timestamp/level prefix is added once in
+        # get_logs(). Formatting the full record here too would print every
+        # line's time and level twice.
+        super().setFormatter(logging.Formatter("%(name)s: %(message)s"))
+        self._lock = threading.Lock()
         self.records: deque[tuple[str, str, str]] = deque(maxlen=maxlen)
         MemoryLogHandler._instance = self
 
@@ -24,20 +30,24 @@ class MemoryLogHandler(logging.Handler):
             timestamp = (
                 datetime.fromtimestamp(record.created, tz=UTC).astimezone().strftime("%H:%M:%S")
             )
-            level = record.levelname[:4]
+            level = record.levelname
             msg = self.format(record)
-            self.records.append((timestamp, level, msg))
+            with self._lock:
+                self.records.append((timestamp, level, msg))
         except Exception:
             self.handleError(record)
 
     @classmethod
-    def get_logs(cls) -> list[str]:
-        """Return formatted log lines."""
+    def get_logs(cls, limit: int = 100) -> list[str]:
+        """Return up to ``limit`` formatted log lines (newest last)."""
         if not cls._instance:
             return ["No logs recorded yet."]
-        return [f"[{t}] {lvl} {m}" for t, lvl, m in cls._instance.records]
+        with cls._instance._lock:
+            records = list(cls._instance.records)[-limit:]
+        return [f"[{t}] {lvl} {m}" for t, lvl, m in records]
 
     @classmethod
     def clear(cls) -> None:
         if cls._instance:
-            cls._instance.records.clear()
+            with cls._instance._lock:
+                cls._instance.records.clear()
