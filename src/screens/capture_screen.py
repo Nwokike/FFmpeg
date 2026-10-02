@@ -2,8 +2,9 @@
 
 Mobile/web only (flet-camera's platform guard raises on desktop); desktop shows
 a pick-a-file fallback instead. Permission flow is just-in-time: rationale on
-first capture attempt, DENIED → retry, PERMANENTLY_DENIED/RESTRICTED → App
-Settings deep link (6-status handling per flet-permission-handler).
+first capture attempt, DENIED → retry, PERMANENTLY_DENIED → App Settings deep
+link, RESTRICTED → "unavailable on this device" (the OS forbids changes, so no
+Settings trip can help).
 """
 
 from __future__ import annotations
@@ -11,8 +12,6 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-import math
-import struct
 import time
 from pathlib import Path
 
@@ -57,10 +56,11 @@ except ImportError:  # pragma: no cover
 
 logger = logging.getLogger(__name__)
 
-# Streaming meter mode forces PCM16BITS (flet-audio-recorder constraint) — these
-# are the raw-PCM recording presets we WAV-wrap ourselves on stop.
+# Direct file mode: the native plugin writes the complete audio file itself
+# (WAV/Opus/AAC per chip). No PCM streaming is wired — on_stream stays None
+# and there is no live level meter (a streaming meter would need PCM16BITS +
+# an on_stream handler; that is M5 work, not this screen).
 _PCM_RATE_CHANNELS = {"studio": (44100, 2), "voice": (16000, 1)}
-_MAX_PCM_BYTES = 200 * 1024 * 1024  # streaming safety cap (~9 min studio WAV)
 _MAX_RECORD_SEC = 1200  # hard stop for runaway recordings
 
 
@@ -72,46 +72,23 @@ def _status_value(status) -> str:
 def next_permission_action(status, just_requested: bool = False) -> str:
     """Map a permission status to the next UI action.
 
-    Returns one of: ``ok`` | ``ask`` | ``explain`` | ``settings``.
-    ``explain`` = a just-made request was denied → show rationale with retry;
-    ``settings`` = only the OS Settings page can help (permanent/restricted).
+    Returns one of: ``ok`` | ``ask`` | ``explain`` | ``settings`` |
+    ``unavailable``. ``explain`` = a just-made request was denied → show
+    rationale with retry; ``settings`` = permanent denial, only the OS
+    Settings page can help; ``unavailable`` = RESTRICTED (parental/MDM lock):
+    the OS forbids changes, so neither retry nor Settings helps.
     """
     val = _status_value(status)
     if val in ("granted", "limited", "provisional"):
         return "ok"
-    if val in ("permanentlydenied", "restricted"):
+    if val in ("permanentlydenied",):
         return "settings"
+    if val in ("restricted",):
+        return "unavailable"
     if val in ("denied",):
         return "explain" if just_requested else "ask"
     # None/unknown → ask
     return "explain" if just_requested else "ask"
-
-
-def _write_wav(path: str, data: bytes, sample_rate: int, channels: int) -> None:
-    """Wrap raw PCM16 chunks in a RIFF/WAV header (streaming mode has no muxer)."""
-    byte_rate = sample_rate * channels * 2
-    block_align = channels * 2
-    header = (
-        b"RIFF"
-        + struct.pack("<I", 36 + len(data))
-        + b"WAVEfmt "
-        + struct.pack("<IHHIIHH", 16, 1, channels, sample_rate, byte_rate, block_align, 16)
-        + b"data"
-        + struct.pack("<I", len(data))
-    )
-    Path(path).write_bytes(header + data)
-
-
-def _pcm_rms(chunk: bytes) -> float:
-    """Normalized RMS (0..1) of a PCM16 little-endian chunk."""
-    usable = len(chunk) - (len(chunk) % 2)
-    if usable <= 0:
-        return 0.0
-    samples = struct.unpack(f"<{usable // 2}h", chunk[:usable])
-    acc = 0
-    for s in samples:
-        acc += s * s
-    return min(1.0, math.sqrt(acc / (usable // 2)) / 32768.0 * 3.0)
 
 
 def _can_capture(page: ft.Page) -> bool:
@@ -126,8 +103,8 @@ def _can_capture(page: ft.Page) -> bool:
 def _is_mounted(ctrl) -> bool:
     """True once Flet has attached the control to the page.
 
-    Control has no ``_page`` attribute in Flet 1.0.1 — ``getattr(ctrl, "_page")``
-    is always None, which made every guard silently false (camera never starts,
+    Control has no ``_page`` attribute — ``getattr(ctrl, "_page")`` is always
+    None, which made every guard silently false (camera never starts,
     teardown never runs). The ``page`` property walks the parent chain and is
     the canonical probe: it raises RuntimeError while unmounted.
     """
@@ -155,7 +132,6 @@ def CaptureScreen() -> ft.Control:
     recording, set_recording = ft.use_state(False)
     rec_paused, set_rec_paused = ft.use_state(False)
     elapsed, set_elapsed = ft.use_state(0)
-    level, set_level = ft.use_state(0.0)
     pcm_preset, set_pcm_preset = ft.use_state("studio")  # "studio" | "voice"
     mic_codec, set_mic_codec = ft.use_state("pcm16")  # "pcm16" | "opus" | "aac"
     captured_path, set_captured_path = ft.use_state(None)
@@ -171,9 +147,6 @@ def CaptureScreen() -> ft.Control:
     )  # queryable from unmount cleanup (effect captures first render)
     ticking_ref = ft.use_ref(False)
     elapsed_ref = ft.use_ref(0)
-    chunks_ref = ft.use_ref([])
-    chunk_bytes_ref = ft.use_ref(0)
-    last_level_ts_ref = ft.use_ref(0.0)
     mic_out_ref = ft.use_ref(None)
     mic_codec_ref = ft.use_ref("pcm16")
     mic_preset_ref = ft.use_ref("studio")
@@ -218,9 +191,8 @@ def CaptureScreen() -> ft.Control:
     def _apply_requested_mode():
         """Apply the pending_capture_mode a tool requested before routing here.
 
-        Registered before the platform early-return so hook order is identical
-        on every render path, and keyed on the observable field so a second
-        tool request re-applies the mode (the value clears once consumed).
+        Keyed on the observable field so a second tool request re-applies the
+        mode (the value clears once consumed).
         """
         requested = app_state.pending_capture_mode
         if requested in ("photo", "video", "mic") and requested != mode:
@@ -261,7 +233,7 @@ def CaptureScreen() -> ft.Control:
 
     # ── Permission flow ─────────────────────────────────────────────────────
 
-    def _perm_rationale(perm, settings_only: bool) -> None:
+    def _perm_rationale(perm, action: str) -> None:
         # Only camera/mic are requested today; anything else gets a neutral
         # label instead of being misnamed as one of the two.
         name = (
@@ -271,7 +243,13 @@ def CaptureScreen() -> ft.Control:
             if perm == Permission.MICROPHONE
             else "this"
         )
-        if settings_only:
+        if action == "unavailable":
+            body = (
+                f"{name.title()} access is restricted on this device (parental "
+                "controls or device policy). The OS forbids changes — contact "
+                "the device administrator."
+            )
+        elif action == "settings":
             body = (
                 f"{name.title()} access is blocked for this app. Enable it in "
                 "Android/iOS Settings to use capture."
@@ -312,9 +290,12 @@ def CaptureScreen() -> ft.Control:
                 page.run_task(_toggle_mic)
 
         actions = []
-        if not settings_only:
+        if action not in ("settings", "unavailable"):
             actions.append(ft.FilledButton("Try Again", on_click=_retry))
-        actions.append(ft.TextButton("Open Settings", on_click=_open_settings))
+        if action == "settings":
+            actions.append(ft.TextButton("Open Settings", on_click=_open_settings))
+        else:
+            actions.append(ft.TextButton("Close", on_click=lambda _: page.pop_dialog()))
         page.show_dialog(
             ft.AlertDialog(
                 title=ft.Text(f"{name.title()} access needed"),
@@ -337,7 +318,7 @@ def CaptureScreen() -> ft.Control:
                 action = next_permission_action(status, just_requested=True)
             if action == "ok":
                 return True
-            _perm_rationale(perm, settings_only=(action == "settings"))
+            _perm_rationale(perm, action)
             return False
         except Exception:
             logger.exception("Permission flow failed")
@@ -446,6 +427,7 @@ def CaptureScreen() -> ft.Control:
             camera_ref.current = None
             camera_inited_ref.current = False
             camera_audio_mode_ref.current = None
+            set_camera_ready(False)
             return
         try:
             await cam.pause_preview()
@@ -488,8 +470,8 @@ def CaptureScreen() -> ft.Control:
     # ── Shared ticker (video record + mic record) ───────────────────────────
 
     async def _tick() -> None:
-        # Loop is gated on ticking_ref so it exits even if task-cancelling is
-        # unavailable on this platform's Flet runtime.
+        # Loop is gated on ticking_ref (cleared by _stop_ticker and unmount
+        # cleanup), so it always has an exit — no reliance on task cancellation.
         try:
             while ticking_ref.current:
                 await asyncio.sleep(1)
@@ -643,21 +625,7 @@ def CaptureScreen() -> ft.Control:
             logger.warning("Pause toggle failed: %s", exc)
             show_snack(page, f"Pause failed: {exc}", bgcolor=ERROR)
 
-    # ── Mic ─────────────────────────────────────────────────────────────────
-
-    def _on_mic_stream(e) -> None:
-        chunk = getattr(e, "chunk", b"") or b""
-        chunks_ref.current.append(chunk)
-        chunk_bytes_ref.current += len(chunk)
-        now = time.monotonic()
-        if now - last_level_ts_ref.current >= 0.1:
-            last_level_ts_ref.current = now
-            set_level(_pcm_rms(chunk))
-            if chunk_bytes_ref.current >= _MAX_PCM_BYTES:
-                logger.warning(
-                    "PCM cap reached (%d bytes) — auto-stopping", chunk_bytes_ref.current
-                )
-                page.run_task(_finish_mic)
+    # ── Mic (direct file mode: the native plugin writes the file) ─────────
 
     def _codec_for(mic_codec_name: str):
         return {
@@ -676,7 +644,6 @@ def CaptureScreen() -> ft.Control:
             out_path = mic_out_ref.current
             returned = await rec.stop_recording()
             final = returned or out_path
-            set_level(0.0)
             if final and Path(final).exists() and Path(final).stat().st_size > 100:  # noqa: ASYNC240
                 await _finalize_capture(final)
             else:
@@ -686,8 +653,6 @@ def CaptureScreen() -> ft.Control:
             show_snack(page, f"Recording failed: {exc}", bgcolor=ERROR)
         finally:
             rec.on_stream = None
-            chunks_ref.current = []
-            chunk_bytes_ref.current = 0
             set_recording(False)
             set_rec_paused(False)
             set_busy(False)
@@ -736,11 +701,9 @@ def CaptureScreen() -> ft.Control:
         else:
             rate, ch, ext, bit_rate = 44100, 2, "m4a", 128000
 
-        # Direct file mode: native plugin writes the complete audio file
-        # directly without streaming interference.
+        # Direct file mode: the native plugin writes the complete audio file
+        # itself. on_stream stays None — nothing streams anywhere.
         rec.on_stream = None
-        chunks_ref.current = []
-        chunk_bytes_ref.current = 0
 
         mic_codec_ref.current = codec_name
         mic_preset_ref.current = pcm_preset
@@ -758,15 +721,11 @@ def CaptureScreen() -> ft.Control:
             started = await rec.start_recording(output_path=recording_name, configuration=cfg)
         except Exception as exc:
             logger.exception("Mic start failed")
-            rec.on_stream = None  # don't stream into chunks nobody will write
-            chunks_ref.current = []
-            chunk_bytes_ref.current = 0
+            rec.on_stream = None
             show_snack(page, f"Recording failed: {exc}", bgcolor=ERROR)
             return
         if not started:
             rec.on_stream = None
-            chunks_ref.current = []
-            chunk_bytes_ref.current = 0
             show_snack(page, "Recorder refused to start", bgcolor=ERROR)
             return
         try:
@@ -774,8 +733,6 @@ def CaptureScreen() -> ft.Control:
             # (mic held by a call, OEM policy).
             if not await rec.is_recording():
                 rec.on_stream = None
-                chunks_ref.current = []
-                chunk_bytes_ref.current = 0
                 show_snack(page, "Recorder didn't start — mic may be in use", bgcolor=ERROR)
                 return
         except Exception as exc:
@@ -944,13 +901,10 @@ def CaptureScreen() -> ft.Control:
                         ],
                         spacing=SPACE_SM,
                     ),
-                    ft.ProgressBar(
-                        value=float(level or 0.0) if recording else 0.0,
-                        height=8,
-                        color=ACCENT_RED if level > 0.7 else PRIMARY,
-                    ),
                     ft.Text(
-                        "Live level meter needs WAV mode — Opus/AAC record without it.",
+                        f"Recording {elapsed_str} — tap Stop to keep the take"
+                        if recording
+                        else "Tap Record, speak, then Stop — the file lands below.",
                         size=FONT_XS,
                         color=muted,
                     ),
@@ -1151,4 +1105,4 @@ def CaptureScreen() -> ft.Control:
     )
 
 
-__all__ = ["CaptureScreen", "_can_capture", "_pcm_rms", "_write_wav", "next_permission_action"]
+__all__ = ["CaptureScreen", "_can_capture", "next_permission_action"]

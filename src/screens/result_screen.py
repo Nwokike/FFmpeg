@@ -10,7 +10,14 @@ import flet as ft
 from core.state import use_app_state
 from core.storage_paths import format_bytes
 from core.styles import card_container, status_badge
-from core.theme import PRIMARY, TEXT_MUTED_DARK, TEXT_MUTED_LIGHT, is_dark_mode
+from core.theme import (
+    PRIMARY,
+    PRIMARY_CONTAINER_DARK,
+    PRIMARY_CONTAINER_LIGHT,
+    TEXT_MUTED_DARK,
+    TEXT_MUTED_LIGHT,
+    is_dark_mode,
+)
 from core.tokens import (
     FONT_LG,
     FONT_MD,
@@ -61,7 +68,7 @@ def _fmt_ms(ms: int) -> str:
 
 @ft.component
 def ResultScreen() -> ft.Control:
-    """Finished job presentation with hardware-accelerated preview player and export actions."""
+    """Finished job presentation with preview player (platform default) and export actions."""
     page = ft.context.page
     ctrl = use_controller()
     app_state = use_app_state()
@@ -511,7 +518,7 @@ def ResultScreen() -> ft.Control:
                 horizontal_alignment=ft.CrossAxisAlignment.CENTER,
             ),
             padding=SPACE_LG,
-            bgcolor="#1E3E1C" if is_dark else "#E2F4E0",
+            bgcolor=PRIMARY_CONTAINER_DARK if is_dark else PRIMARY_CONTAINER_LIGHT,
             border_radius=RADIUS_LG,
         )
 

@@ -59,7 +59,7 @@ TERMS_VERSION = "1"
 
 # The mounted ControllerMethods instance (set once AppShell mounts). Lets
 # main-level helpers drive the single-view branch swap even before/around the
-# shell (Sherlock pattern: navigate-then-work, controller-owned closures).
+# shell (navigate-then-work: controller-owned closures set at mount).
 
 
 def _select_tab(page: ft.Page, tab_idx: int) -> None:
@@ -76,7 +76,7 @@ def _bootstrap_logging() -> MemoryLogHandler:
     """Attach terminal + file + memory handlers — never clobber the host's.
 
     ``basicConfig(force=True)`` used to wipe any handler the Flet runner had
-    installed (Sherlock never forces — that is why its logs show). Root runs at
+    installed (never force: clobbering the runner's handlers hides its logs). Root runs at
     DEBUG so nothing is hidden; chatty client libraries are hushed instead.
     """
     fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s", datefmt="%H:%M:%S")
@@ -379,7 +379,7 @@ async def main(page: ft.Page) -> None:
 
     # Controller Methods implementation
     # Single-view shell: screens keep calling ctrl.navigate(name); the shell
-    # branch swaps in place — no Router, no page.views surgery (Sherlock).
+    # branch swaps in place — no Router, no page.views surgery.
 
     def _swap_view(view: str) -> None:
         # Single mount path: global flip first (the shell's effect adopts it),
@@ -814,9 +814,8 @@ async def main(page: ft.Page) -> None:
         state.jobs = list(state.jobs)
         page.update()
 
-    # Jobs whose submission is the monetizable "big action" (matches the
-    # Sherlock/DDGS pattern of an interstitial at a heavy search/content
-    # boundary rather than on every button). A failed/no-ad call falls straight
+    # Jobs whose submission is the monetizable "big action" (an interstitial
+    # at a heavy search/content boundary rather than on every button). A failed/no-ad call falls straight
     # through to enqueueing, so ads never gate a job behind a cooldown.
     # NOTE: "concat" is the real join op ("join" is a view name that never
     # exists as an op) — listing the view name skipped the gate for joins.
@@ -999,7 +998,7 @@ async def main(page: ft.Page) -> None:
     def handle_system_back() -> None:
         """Map Android/system back onto in-app navigation, never app teardown.
 
-        Single-view shell (Sherlock): page.views stays length 1 for the whole
+        Single-view shell: page.views stays length 1 for the whole
         session, so Dart's own pop handler has nothing to pop — this callback
         (via ``page.on_view_pop``) just swaps the branch. Nothing is ever
         popped, re-keyed, or restored.
@@ -1059,9 +1058,9 @@ async def main(page: ft.Page) -> None:
         toggle_theme=toggle_theme,
     )
 
-    # Wire lifecycle.  Flet tears down the page connection before invoking
-    # on_disconnect, so calling page.run_task() from that synchronous callback
-    # can raise before the coroutine is ever scheduled.
+    # Wire lifecycle. Defensive: page.run_task() from a synchronous close
+    # callback can raise before the coroutine is ever scheduled — _shutdown
+    # tolerates a dead page (schedule-and-swallow at each call site).
     async def _shutdown() -> None:
         _post_progress(None, 0.0, "")
         queue.shutdown()
@@ -1116,11 +1115,9 @@ async def main(page: ft.Page) -> None:
     async def _startup_prune():
         """Reclaim the TEMP tier on boot without deleting work the app still needs.
 
-        Every tool writes its output to TEMP and nothing deleted it — a single
-        test session reached 2.2 GB. TEMP is documented as throwaway, so files
-        older than 24h are removed; the active job's output and the result
-        screen's current file are protected so an in-flight or unsaved take
-        survives the prune.
+        Every tool writes its output to TEMP; files older than 24h are removed.
+        The active job's output and the result screen's current file are
+        protected so an in-flight or unsaved take survives the prune.
         """
         try:
             keep: set[str] = set()
@@ -1137,7 +1134,7 @@ async def main(page: ft.Page) -> None:
     page.run_task(_startup_prune)
 
     # Mount UI — page.render puts the AppShell tree into the single root
-    # view's controls (Sherlock: page.render once, branch via state).
+    # view's controls (render once at boot, branch via state after).
     def _mount_ui() -> None:
         """Render the single-view shell once at session boot."""
         page.render(
@@ -1155,12 +1152,13 @@ async def main(page: ft.Page) -> None:
 
     _mount_ui()
 
-    # Back-button ownership (KTV lesson, single-view edition): the root view
-    # is declared non-poppable, so Android back can never finish the activity
-    # through the Dart stack — every press arrives here as view_pop and maps
-    # to in-app navigation (tool → dashboard, tab → Home, Home → swallowed).
-    # Verified in installed flet 1.0.1: View(can_pop=False) is honored by
-    # _handleSystemPopRoute (returns early, emits view_pop via _markViewAsPopped).
+    # Back-button ownership (single-view edition): the root view is declared
+    # non-poppable, so Android back can never finish the activity through the
+    # Dart stack — every press arrives here as view_pop and maps to in-app
+    # navigation (tool → dashboard, tab → Home, Home → swallowed).
+    # Root sets can_pop=False (verified field at flet view.py); the
+    # client-side Navigator behavior behind view_pop delivery is not
+    # verifiable from this package — only the handling here is.
     try:
         if page.views:
             page.views[0].can_pop = False

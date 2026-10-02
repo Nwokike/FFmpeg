@@ -1,4 +1,4 @@
-"""Joiner screen — merge clips end-to-end: instant lossless, uniform re-encode,
+"""Joiner screen — merge clips end-to-end: lossless copy, uniform re-encode,
 or crossfade transitions (runtime-gated on the engine's blend window).
 
 Owns its OWN local file list so the app-wide single-file `current_media`
@@ -304,7 +304,7 @@ def JoinScreen() -> ft.Control:
                 else [
                     ft.Text(
                         "Clips are joined end-to-end. Identical formats merge "
-                        "losslessly (instant); mixed formats get a uniform re-encode.",
+                        "losslessly (no re-encode); mixed formats get a uniform re-encode.",
                         size=FONT_SM,
                         color=muted,
                     )
@@ -317,7 +317,7 @@ def JoinScreen() -> ft.Control:
                         ft.Row(
                             controls=[
                                 ft.Chip(
-                                    label=ft.Text("Instant (hard cut)"),
+                                    label=ft.Text("Lossless (hard cut)"),
                                     selected=transition == "cut",
                                     on_select=lambda _: set_transition("cut"),
                                 ),

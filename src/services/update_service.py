@@ -93,8 +93,7 @@ class UpdateService:
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code in (403, 404):
                 # Unpublished/private repo or the manifest isn't on the branch
-                # yet — an expected pre-release state, not a failure. A public
-                # manifest (e.g. the Sherlock sibling) answers 200 here.
+                # yet — an expected pre-release state, not a failure.
                 logger.info("Update manifest not reachable (HTTP %s)", exc.response.status_code)
             else:
                 logger.warning("Update check rejected: %s", exc)

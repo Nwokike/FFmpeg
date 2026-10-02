@@ -15,6 +15,10 @@ from core.state import state
 PRIMARY_LIGHT = "#5BA656"
 PRIMARY_CONTAINER_DARK = "#1E3E1C"
 PRIMARY_CONTAINER_LIGHT = "#E2F4E0"
+# Neutral card surfaces (status badges, banner strip): single source so a
+# re-theme reaches every card instead of the hardcoded dupes.
+SURFACE_CARD_DARK = "#242930"
+SURFACE_CARD_LIGHT = "#E5E7EB"
 
 ACCENT_BLUE = "#3B82F6"
 ACCENT_AMBER = "#F59E0B"
@@ -33,6 +37,8 @@ class AppTheme:
 
     @staticmethod
     def get_light_theme() -> ft.Theme:
+        # color_scheme_seed is inert while color_scheme is explicit (kept so a
+        # future scheme-generation pass has the brand seed in place).
         return ft.Theme(
             color_scheme_seed=PRIMARY,
             use_material3=True,
@@ -124,9 +130,9 @@ def is_dark_mode(page: ft.Page | None, app_state=None) -> bool:
     small non-rendered tests without pretending that a raw singleton read
     creates a subscription.
 
-    Mirrors Sherlock: if the page is unavailable (test stub, early lifecycle),
-    fall back through ``ft.context.page`` rather than crashing the whole
-    screen build — a None page must never poison history/settings.
+    If the page is unavailable (test stub, early lifecycle), fall back through
+    ``ft.context.page`` rather than crashing the whole screen build — a None
+    page must never poison history/settings.
     """
     if app_state is None:
         app_state = state

@@ -19,7 +19,13 @@ def tool_job_row(job: Job, ctrl: ControllerMethods, *, is_dark: bool = True) -> 
     else as honest pipeline state (never "your convert is at 40%" when the
     running job is a join).
     """
-    from core.theme import PRIMARY
+    from core.constants import KIRI_DARK_2, KIRI_LIGHT_BG
+    from core.theme import (
+        ACCENT_RED,
+        PRIMARY,
+        TEXT_MUTED_DARK,
+        TEXT_MUTED_LIGHT,
+    )
 
     pct = clamped_progress(job.progress)
     return ft.Container(
@@ -38,7 +44,7 @@ def tool_job_row(job: Job, ctrl: ControllerMethods, *, is_dark: bool = True) -> 
                         ),
                         ft.IconButton(
                             icon=ft.Icons.STOP_CIRCLE_OUTLINED,
-                            icon_color="#EF4444",
+                            icon_color=ACCENT_RED,
                             tooltip="Cancel Job",
                             on_click=lambda _: ctrl.cancel_job(job.id),
                         ),
@@ -49,7 +55,7 @@ def tool_job_row(job: Job, ctrl: ControllerMethods, *, is_dark: bool = True) -> 
                 ft.Text(
                     "A job is already running — Start unlocks when it finishes.",
                     size=FONT_XS,
-                    color="#8A92A0" if is_dark else "#6B7280",
+                    color=TEXT_MUTED_DARK if is_dark else TEXT_MUTED_LIGHT,
                 ),
             ],
             spacing=SPACE_SM,
@@ -57,7 +63,7 @@ def tool_job_row(job: Job, ctrl: ControllerMethods, *, is_dark: bool = True) -> 
         ),
         padding=SPACE_MD,
         border_radius=12,
-        bgcolor="#1A1D22" if is_dark else "#F3F4F6",
+        bgcolor=KIRI_DARK_2 if is_dark else KIRI_LIGHT_BG,
     )
 
 

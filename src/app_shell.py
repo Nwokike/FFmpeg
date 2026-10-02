@@ -1,4 +1,4 @@
-"""AppShell — single-view top-level shell (Sherlock pattern).
+"""AppShell — single-view top-level shell.
 
 One Flet ``View`` for the whole session; navigation is ``use_state``
 branching (``active_view`` + ``active_tab``), never a Router view stack.
@@ -197,7 +197,7 @@ def _should_show_onboarding(app_state: AppState) -> bool:
 def AppShell() -> ft.Control:
     """Top-level shell. Branches: onboarding, dashboard tabs, or a tool view.
 
-    Single-view shell (Sherlock pattern): the one root view's content swaps
+    Single-view shell: the one root view's content swaps
     by ``active_view``/``active_tab`` state. Tool views render full-screen
     (no nav bar); the dashboard renders the tabbed Home / Jobs / Settings
     with the nav bar synced onto the root view.
@@ -220,8 +220,8 @@ def AppShell() -> ft.Control:
     ft.use_effect(_adopt_global_view)
 
     # Single source of truth: global selected_tab (shared with main._select_tab
-    # and handle_system_back).  A local active_tab drifted from global and
-    # silently froze History/Settings (Sherlock never has a second tab state).
+    # and handle_system_back). A second local tab state drifted from global and
+    # silently froze History/Settings — there is exactly one tab state.
     active_tab = clamp_tab(app_state.selected_tab)
 
     def set_active_tab(idx: int) -> None:
@@ -229,8 +229,8 @@ def AppShell() -> ft.Control:
         app_state.selected_tab = idx
         state.selected_tab = idx  # keep both aliases in sync
 
-    # Inject view-local closures into the controller methods instance
-    # (Sherlock pattern — main.navigate() drives these). Both write GLOBAL
+    # Inject view-local closures into the controller methods instance.
+    # main.navigate() drives these. Both write GLOBAL
     # state.active_view AND the local mirror, so neither can strand the other.
     def _go_dashboard() -> None:
         state.active_view = "dashboard"

@@ -219,7 +219,7 @@ def CompressScreen() -> ft.Control:
                 padding=SPACE_MD,
                 is_dark=is_dark,
             ),
-            # Action button — gated on probe + encoders + kind like Convert.
+            # Action button — gated on probe + encoder-empty + kind (Convert parity).
             *(
                 [
                     ft.Row(

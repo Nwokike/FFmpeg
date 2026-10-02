@@ -436,7 +436,7 @@ def parse_command(
                 "container": out_ext.lstrip(".") or "mp4",
                 "transition": "cut",
             },
-            notes=[*notes, f"joining {len(inputs)} inputs (instant cut transition)"],
+            notes=[*notes, f"joining {len(inputs)} inputs (lossless cut transition)"],
         )
 
     src = inputs[0]
@@ -506,7 +506,7 @@ def parse_command(
     # Anything that forces pixels through the encoder — including the codec
     # itself, audio shaping, and every codec-carrying -vf node — means this
     # is a re-encode. Default is re-encode (like real ffmpeg); only an
-    # explicit `-c copy` with NO encode flags takes the instant path.
+    # explicit `-c copy` with NO encode flags takes the copy path.
     # NOTE: `-c:v copy` / `-c:a copy` request NO re-encode, so copy-valued
     # codec flags are excluded from the encode set (they gate remux below).
     def _codec_flag_requests_encode(name: str) -> bool:
@@ -547,7 +547,7 @@ def parse_command(
             start = 0.0
         if end <= start:
             _refuse(f"empty range: start {start}s >= end {end}s")
-        # Explicit `-c copy` with no encode flags: instant trim. Everything
+        # Explicit `-c copy` with no encode flags: lossless trim. Everything
         # else re-encodes (real ffmpeg's default) — and a -crf/-preset that
         # forced the re-encode is CARRIED into params, never dropped.
         copy = flags.get("-c", "") == "copy" and not has_encode_flags
@@ -565,7 +565,7 @@ def parse_command(
                 if key in params:
                     cut_params[key] = params[key]
         else:
-            notes.append("stream copy — instant, bit-exact trim")
+            notes.append("stream copy — lossless, bit-exact trim")
         return OpPlan(
             op="cut",
             input_path=src,
@@ -732,7 +732,7 @@ def help_text() -> str:
             "ffmpeg command mode — FFmpeg libraries via PyAV (no binary)",
             "",
             "inputs     -i <file>            (2+ inputs → join, flags refused)",
-            "trim       -ss <ts> [-t <dur> | -to <ts>]  (re-encodes; + -c copy = instant)",
+            "trim       -ss <ts> [-t <dur> | -to <ts>]  (re-encodes; + -c copy = lossless)",
             "convert    -c:v libx264|libx265 -crf 0-51 -preset <name>",
             "audio out  -vn / .mp3 .m4a .flac .opus .ogg .wav out",
             "             -b:a 128k -ar 44100 -ac 2",

@@ -133,21 +133,21 @@ def test_crossfade_gate_undersized_clip_falls_back(gray_pair, tmp_path, caplog):
     with caplog.at_level("WARNING"):
         EngineService.concat([a, short], out, transition="crossfade", fade_s=0.5)
 
-    assert any("falling back to instant" in r.message for r in caplog.records)
+    assert any("falling back to lossless" in r.message for r in caplog.records)
     info = EngineService.probe(out)
     expected = EngineService.probe(a).duration_s + EngineService.probe(short).duration_s
-    assert abs(info.duration_s - expected) < 0.3  # instant = sum, no overlap
+    assert abs(info.duration_s - expected) < 0.3  # lossless = sum, no overlap
 
 
 def test_crossfade_gate_missing_filters(monkeypatch, gray_pair, caplog):
-    """Filters absent → warn and still join via the instant path (no crash)."""
+    """Filters absent → warn and still join via the lossless path (no crash)."""
     a, b = gray_pair
     out = str(Path(a).parent / "nofilters.mp4")
     monkeypatch.setattr("services.engine_service.available_filters", lambda: {"fps"})
     with caplog.at_level("WARNING"):
         EngineService.concat([a, b], out, transition="crossfade", fade_s=0.5)
 
-    assert any("falling back to instant" in r.message for r in caplog.records)
+    assert any("falling back to lossless" in r.message for r in caplog.records)
     info = EngineService.probe(out)
     expected = EngineService.probe(a).duration_s + EngineService.probe(b).duration_s
     assert abs(info.duration_s - expected) < 0.3

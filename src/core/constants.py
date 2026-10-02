@@ -1,7 +1,7 @@
 """Runtime constants — single source of truth for the app.
 
-Mirrors the house pattern (sibling apps read identity/version/storage keys and
-the update manifest URL from here).
+Identity, version, storage keys, and the update manifest URL live here so no
+screen hardcodes them.
 """
 
 from __future__ import annotations
@@ -13,8 +13,8 @@ COMPANY = "Kiri Research Labs"
 ORG = "ng.kiri"
 BUNDLE_ID = "ng.kiri.ffmpeg"
 
-# Read from pyproject.toml at import time (house pattern: DDGS/Sherlock read
-# build_number this way so the update check compares against the real build).
+# Read from pyproject.toml at import time so the update check compares
+# against the real build (not a stale literal).
 APP_VERSION = "1.0.0"
 BUILD_NUMBER = 1
 
@@ -62,7 +62,7 @@ ADMOB_APP_ID_TEST = "ca-app-pub-3940256099942544~3347511713"
 ADMOB_BANNER_UNIT_TEST = "ca-app-pub-3940256099942544/9214589741"
 ADMOB_INTERSTITIAL_UNIT_TEST = "ca-app-pub-3940256099942544/1033173712"
 
-# Production units (blank = AdService falls back to the test IDs above).
+# Production units (all filled = prod ads live; blank any to fall back to test IDs).
 ADMOB_APP_ID_PROD = "ca-app-pub-5679949845754640~8554716742"
 ADMOB_BANNER_UNIT_PROD = "ca-app-pub-5679949845754640/3222499013"
 ADMOB_INTERSTITIAL_UNIT_PROD = "ca-app-pub-5679949845754640/5194056233"
@@ -72,14 +72,15 @@ STORAGE_DATA_ENV = "FLET_APP_STORAGE_DATA"
 STORAGE_CACHE_ENV = "FLET_APP_STORAGE_CACHE"
 STORAGE_TEMP_ENV = "FLET_APP_STORAGE_TEMP"
 
-# Deep-link scheme/host (matches [tool.flet.deep_linking]).
+# Deep-link scheme/host (matches [tool.flet.android.deep_linking] — Android
+# reads the ANDROID block only; a top-level [tool.flet.deep_linking] is ignored).
 DEEP_LINK_SCHEME = "ffmpeg"
 DEEP_LINK_HOST = "app"
 
 # ── Brand palette (single source of truth; pyproject [tool.flet] keys mirror it)
 # PRIMARY is the FFmpeg launcher glyph green — the app's primary color in both
-# light and dark themes (house rule: brand hue constant across themes, only
-# surfaces change — Sherlock/voicelm pattern). Dark surfaces = Kiri slate.
+# light and dark themes (brand hue constant across themes, only surfaces
+# change). Dark surfaces = Kiri slate.
 PRIMARY = "#3C8038"  # FFmpeg green (icon.svg glyph fill)
 PRIMARY_DARK = "#2E6B2A"  # darker shade for light-mode glyph tinting
 KIRI_DARK_BG = "#0F1114"  # launcher/splash dark background (icon_background)

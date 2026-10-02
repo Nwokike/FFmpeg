@@ -139,8 +139,8 @@ def StreamsScreen() -> ft.Control:
             label, color = "Network protocols unavailable", ACCENT_RED
         return ft.Chip(
             label=ft.Text(label, size=FONT_SM, color=color),
-            # Flet 1.0 Chip has no `avatar` prop — `leading` is the icon slot
-            # (avatar= raised TypeError at construction on every visit here).
+            # Chip has no `avatar` prop — `leading` is the icon slot
+            # (avatar= raises TypeError at construction).
             leading=ft.Icon(
                 ft.Icons.CELL_TOWER_ROUNDED,
                 size=16,

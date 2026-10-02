@@ -75,7 +75,7 @@ def HomeScreen() -> ft.Control:
         (
             "audio",
             "Audio Studio",
-            "Loudness EBU R128 & resample",
+            "Loudness presets & resample",
             ft.Icons.GRAPHIC_EQ_ROUNDED,
             PRIMARY,
         ),
@@ -110,7 +110,7 @@ def HomeScreen() -> ft.Control:
         (
             "engine_info",
             "Engine Info",
-            "FFmpeg 8 capability status",
+            "Capability status (probed live)",
             ft.Icons.INFO_OUTLINE_ROUNDED,
             muted,
         ),
@@ -151,11 +151,10 @@ def HomeScreen() -> ft.Control:
         )
 
     # Tool grid — single adaptive ResponsiveRow, not chunked fixed rows.
-    # col={"xs":12,"sm":6,"md":4,"lg":3,"xl":2} lets the framework flow
-    # 1-2-3-4-6 columns as the window widens (wide desktop shows 5-6,
-    # phone shows 1-2).
-    # This is the correct responsive pattern; the prior 3-per-row chunking
-    # forced "3" on every width and inserted banners as row separators.
+    # col={"xs":12,"sm":6,"md":4,"lg":3,"xl":2} flows 1-2-3-4-6 columns by
+    # 12/span math (never 5) as the window widens; phone shows 1-2.
+    # The prior 3-per-row chunking forced "3" on every width and inserted
+    # banners as row separators.
     tool_controls = [
         ft.Container(
             content=_build_tool_tile(k, n, d, ic, col),
@@ -163,8 +162,7 @@ def HomeScreen() -> ft.Control:
         )
         for k, n, d, ic, col in tools
     ]
-    # Home banners: one between tools and recent jobs, plus one below — the
-    # former "grid-row separator" banners are removed (they broke the grid).
+    # Home banner: one slot between tools and recent jobs.
     grid_rows: list[ft.Control] = [
         ft.ResponsiveRow(
             controls=tool_controls,
@@ -206,9 +204,8 @@ def HomeScreen() -> ft.Control:
                 is_dark=is_dark,
             ),
             ft.Column(controls=recent_controls, spacing=SPACE_MD),
-            # Nav-bar clearance INSIDE the scroll (sibling pattern): the old
-            # fixed outer inset fought the scroll view's constraints and still
-            # fell short on gesture-nav phones — the last item stayed buried.
+            # Nav-bar clearance INSIDE the scroll: without this the last card
+            # sits under the NavigationBar on gesture-nav phones.
             ft.Container(height=88),
         ],
         spacing=SPACE_LG,

@@ -1,12 +1,15 @@
-"""Capture helpers: permission mapping, WAV wrapping, RMS meter, platform gate."""
+"""Capture helpers: permission mapping and platform gate.
+
+The old PCM-streaming helpers (_write_wav/_pcm_rms) were deleted with the
+direct-file rewrite — streaming was never wired, so they were dead code with
+tests. What remains is the permission contract and the platform gate.
+"""
 
 from __future__ import annotations
 
-import struct
-from pathlib import Path
 from types import SimpleNamespace
 
-from screens.capture_screen import _can_capture, _pcm_rms, _write_wav, next_permission_action
+from screens.capture_screen import _can_capture, next_permission_action
 
 # ── Permission status → action mapping ───────────────────────────────────
 
@@ -33,56 +36,14 @@ def test_denied_first_asks_then_explains():
     assert next_permission_action("denied", just_requested=True) == "explain"
 
 
-def test_permanently_denied_and_restricted_go_to_settings():
+def test_permanently_denied_goes_to_settings():
     assert next_permission_action("permanentlyDenied") == "settings"
-    assert next_permission_action("restricted") == "settings"
 
 
-# ── WAV wrapper ──────────────────────────────────────────────────────────
-
-
-def test_write_wav_header(tmp_path: Path):
-    data = struct.pack("<4h", 0, 1000, -1000, 0)
-    out = tmp_path / "t.wav"
-    _write_wav(str(out), data, sample_rate=44100, channels=2)
-
-    raw = out.read_bytes()
-    assert raw[:4] == b"RIFF"
-    assert raw[8:12] == b"WAVE"
-    assert raw[12:16] == b"fmt "
-    riff_size = struct.unpack("<I", raw[4:8])[0]
-    assert riff_size == 36 + len(data)
-    channels, rate = struct.unpack("<H", raw[22:24])[0], struct.unpack("<I", raw[24:28])[0]
-    assert (channels, rate) == (2, 44100)
-    assert raw[36:40] == b"data"
-    data_len = struct.unpack("<I", raw[40:44])[0]
-    assert data_len == len(data)
-    assert raw[44:] == data
-
-
-def test_write_wav_mono_voice_preset(tmp_path: Path):
-    out = tmp_path / "v.wav"
-    _write_wav(str(out), b"\x00\x00" * 16, sample_rate=16000, channels=1)
-    raw = out.read_bytes()
-    assert struct.unpack("<H", raw[22:24])[0] == 1
-    assert struct.unpack("<I", raw[24:28])[0] == 16000
-
-
-# ── PCM RMS meter ────────────────────────────────────────────────────────
-
-
-def test_rms_of_silence_is_zero():
-    assert _pcm_rms(b"\x00\x00" * 512) == 0.0
-
-
-def test_rms_of_loud_signal_is_high():
-    loud = struct.pack("<h", 30000) * 512
-    assert _pcm_rms(loud) > 0.5
-
-
-def test_rms_of_empty_or_odd_chunk():
-    assert _pcm_rms(b"") == 0.0
-    assert _pcm_rms(b"\x00") == 0.0  # odd trailing byte is ignored
+def test_restricted_is_unavailable_not_settings():
+    # RESTRICTED (parental/MDM lock) forbids changes at OS level — a Settings
+    # trip cannot help, so it gets its own action, not "settings".
+    assert next_permission_action("restricted") == "unavailable"
 
 
 # ── Platform gate ────────────────────────────────────────────────────────

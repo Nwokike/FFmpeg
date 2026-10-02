@@ -6,11 +6,13 @@ from typing import Any
 
 import flet as ft
 
+from core.constants import KIRI_LIGHT_BG
 from core.theme import (
     BORDER_DARK,
     BORDER_LIGHT,
     KIRI_DARK_2,
     PRIMARY,
+    PRIMARY_CONTAINER_DARK,
     TEXT_MUTED_DARK,
     TEXT_MUTED_LIGHT,
 )
@@ -33,7 +35,7 @@ def card_container(
     border: bool = True,
 ) -> ft.Container:
     """Build a styled surface container card matching Kiri design language."""
-    bg_color = KIRI_DARK_2 if is_dark else "#FFFFFF"
+    bg_color = KIRI_DARK_2 if is_dark else KIRI_LIGHT_BG
     border_color = BORDER_DARK if is_dark else BORDER_LIGHT
     return ft.Container(
         content=content,
@@ -73,7 +75,7 @@ def section_header(
 def status_badge(
     text: str,
     text_color: str = PRIMARY,
-    bg_color: str = "#1E3E1C",
+    bg_color: str = PRIMARY_CONTAINER_DARK,
     icon: ft.IconData | None = None,
 ) -> ft.Container:
     """Pill badge for status indicators (e.g. Success, Pending, Codec name)."""

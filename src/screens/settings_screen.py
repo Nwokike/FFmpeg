@@ -34,6 +34,7 @@ from core.tokens import (
     SPACE_MD,
     SPACE_SM,
 )
+from core.versions import ffmpeg_version, pyav_major
 from state.controller_ctx import use_controller
 from state.service_ctx import use_services
 
@@ -62,10 +63,12 @@ def SettingsScreen() -> ft.Control:
     async def _load_engine_counts() -> None:
         # Capability probe off the UI loop; counts fill the subtitle live
         # instead of hardcoded numerals that would rot as the wheel changes.
+        # The PyAV numeral is derived from the installed wheel, same reason.
         try:
             p = await asyncio.to_thread(probe)
             set_engine_counts(
-                f"Inspect {p.codec_count} codecs, {p.filter_count} filters, and formats in PyAV 18"
+                f"Inspect {p.codec_count} codecs, {p.filter_count} filters, "
+                f"and formats in PyAV {pyav_major()}"
             )
             page.update()
         except Exception as exc:
@@ -236,7 +239,7 @@ def SettingsScreen() -> ft.Control:
                     on_click=_open_about_update,
                 ),
                 ft.Text(
-                    "On-device media studio powered by FFmpeg 8 via PyAV.",
+                    f"On-device media studio powered by FFmpeg {ffmpeg_version()} via PyAV.",
                     size=FONT_SM,
                     color=muted,
                     text_align=ft.TextAlign.CENTER,
@@ -438,8 +441,8 @@ def SettingsScreen() -> ft.Control:
                 border_radius=RADIUS_MD,
                 is_dark=is_dark,
             ),
-            # UMP is intentionally not a settings row: Sherlock-style consent
-            # appears at startup only when the regulated region requires it.
+            # UMP consent appears at startup only when the regulated region
+            # requires it — not a settings row.
             # Diagnostics & Engine
             section_header("Diagnostics", "Engine and runtime logs", is_dark=is_dark),
             card_container(
@@ -458,7 +461,8 @@ def SettingsScreen() -> ft.Control:
                             leading=ft.Icon(ft.Icons.INFO_OUTLINE_ROUNDED, color=ACCENT_BLUE),
                             title=ft.Text("Engine Capabilities", weight=ft.FontWeight.W_600),
                             subtitle=ft.Text(
-                                engine_counts or "Inspect codecs, filters, and formats in PyAV 18",
+                                engine_counts
+                                or f"Inspect codecs, filters, and formats in PyAV {pyav_major()}",
                                 color=muted,
                             ),
                             on_click=_open_engine_inspector,

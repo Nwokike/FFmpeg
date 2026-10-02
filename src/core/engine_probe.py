@@ -486,8 +486,8 @@ def _probe_protocol(proto: str) -> str:
             c.close()
         return "present"
     except Exception as exc:
-        # PyAV 18 exposes ProtocolNotFoundError; older wheels used
-        # ProtocolNotFound.  Resolve the names from the installed module
+        # The installed wheel exposes ProtocolNotFoundError; older wheels used
+        # ProtocolNotFound. Resolve the names from the installed module
         # instead of assuming either spelling exists.
         missing_types = tuple(
             error_type

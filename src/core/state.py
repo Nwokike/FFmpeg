@@ -195,11 +195,9 @@ class AppState:
         self.update_data: dict[str, Any] | None = None
         self.probe_info: EngineProbe | None = None
 
-        # Theme — whole-value observable writes ONLY (dict-item mutation of
-        # settings["theme_mode"] never published, so headers/tints stayed stale
-        # until an unrelated re-render — the "must change screen to finish the
-        # switch" bug). theme_revision bumps on toggle AND platform-brightness
-        # change so SYSTEM mode re-themes instantly (CollabShell pattern).
+        # Theme — whole-value writes (atomic snapshot, single notification).
+        # theme_revision bumps on toggle AND platform-brightness
+        # change so SYSTEM mode re-themes instantly.
         self.theme_mode: ft.ThemeMode = ft.ThemeMode.SYSTEM
         self.theme_revision: int = 0
 
@@ -222,9 +220,14 @@ class AppState:
     def set_setting(self, key: str, value: Any) -> None:
         """Write one settings key as a WHOLE-VALUE assignment.
 
-        A dict-item write (``self.settings[key] = v``) mutates in place and
-        never reaches the observable's ``__setattr__`` hook — subscribers kept
-        rendering the old value until an unrelated re-render.
+        Atomic snapshot, single notification. (Item writes through the
+        observable dict publish too — but N writes mean N notifications and no
+        snapshot; whole-value keeps subscribers to one coherent update.)
+
+        Nested rule that bites: mutating a Job INSIDE ``jobs`` (``job.progress
+        = x``) notifies the Job's subscribers, NOT AppState's — mirror with
+        ``state.jobs = list(state.jobs)`` (as the progress drain does) or the
+        list UI stays stale.
         """
         self.settings = {**self.settings, key: value}
 

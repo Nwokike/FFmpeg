@@ -9,7 +9,14 @@ import flet as ft
 
 from core.constants import op_title
 from core.state import Job, use_app_state
-from core.theme import ACCENT_RED, PRIMARY
+from core.theme import (
+    ACCENT_RED,
+    PRIMARY,
+    PRIMARY_CONTAINER_DARK,
+    PRIMARY_CONTAINER_LIGHT,
+    SURFACE_CARD_DARK,
+    SURFACE_CARD_LIGHT,
+)
 from core.tokens import FONT_SM, FONT_XS, ICON_SM, RADIUS_MD, SPACE_MD, SPACE_SM
 from state.controller_ctx import use_controller
 from state.service_ctx import use_services
@@ -125,14 +132,14 @@ def jobs_banner_view(active_job: Job | None, is_dark: bool = True) -> ft.Control
                     if not has_total
                     else max(0.0, min(float(active_job.progress or 0.0), 1.0)),
                     color=PRIMARY,
-                    bgcolor="#242930" if is_dark else "#E5E7EB",
+                    bgcolor=SURFACE_CARD_DARK if is_dark else SURFACE_CARD_LIGHT,
                 ),
             ],
             spacing=4,
             tight=True,
         ),
         padding=ft.Padding.symmetric(horizontal=SPACE_MD, vertical=SPACE_SM),
-        bgcolor="#1E3E1C" if is_dark else "#E2F4E0",
+        bgcolor=PRIMARY_CONTAINER_DARK if is_dark else PRIMARY_CONTAINER_LIGHT,
         border_radius=RADIUS_MD,
         margin=ft.Margin.symmetric(horizontal=SPACE_MD, vertical=4),
         on_click=lambda _: ctrl.select_tab(1),

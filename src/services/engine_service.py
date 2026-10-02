@@ -1192,7 +1192,7 @@ class EngineService:
             if in_audio:
                 chosen_acodec = _resolve_audio_codec(audio_codec)
                 out_audio = out.add_stream(chosen_acodec, rate=in_audio.rate or 44100)
-                # PyAV 18: channels is read-only; layout is the writable source of truth
+                # Installed wheel: channels is read-only; layout is the writable source of truth
                 n_ch = min(2, in_audio.channels or 2)
                 out_audio.layout = "stereo" if n_ch == 2 else "mono"
 
@@ -1552,7 +1552,7 @@ class EngineService:
         on_progress: Callable[[float, str], None] | None = None,
         cancel_event: Event | None = None,
     ) -> str:
-        """Trim/cut a segment from media. Supports instant lossless copy or frame-accurate re-encode."""
+        """Trim/cut a segment from media. Supports lossless stream copy or frame-accurate re-encode."""
         if stream_copy:
             return EngineService._cut_stream_copy(
                 input_path, output_path, start_seconds, end_seconds, on_progress, cancel_event
@@ -1614,7 +1614,7 @@ class EngineService:
                 logger.debug("Chapter copy skipped: %s", exc)
 
             # Seek to start timestamp
-            # Instant cuts must begin on a keyframe — snap and tell the user.
+            # Stream-copy cuts must begin on a keyframe — snap and tell the user.
             actual_start = start_s
             video_src = inp.streams.best("video")
             if video_src is not None:
@@ -1624,7 +1624,7 @@ class EngineService:
                     if on_progress:
                         on_progress(
                             0.0,
-                            f"Start snapped {start_s:.2f}s → {actual_start:.2f}s for instant cut",
+                            f"Start snapped {start_s:.2f}s → {actual_start:.2f}s for stream-copy cut",
                         )
 
             seek_target = int(actual_start * av.time_base)
@@ -1654,8 +1654,8 @@ class EngineService:
 
                 out_s = stream_map[packet.stream]
                 # Template streams normally share the input time base; rescale
-                # when they don't.  PyAV 18 exposes stream bases as Fraction
-                # but rescale_ts requires AVRational.
+                # when they don't. The installed wheel exposes stream bases as
+                # Fraction but rescale_ts requires AVRational.
                 if out_s.time_base is not None and packet.time_base != out_s.time_base:
                     packet.rescale_ts(_av_rational(out_s.time_base))
 
@@ -2423,7 +2423,7 @@ class EngineService:
     def keyframe_times(input_path: str, limit: int = 24) -> list[float]:
         """Keyframe timestamps in seconds (sampled to ``limit``), ascending.
 
-        Drives the Cut screen's instant-cut jump chips; empty list when the
+        Drives the Cut screen's keyframe jump chips; empty list when the
         container has no usable index (MPEG-TS etc.) — UI degrades gracefully.
         """
         try:
@@ -2571,7 +2571,9 @@ class EngineService:
                     on_progress,
                     cancel_event,
                 )
-            logger.warning("Crossfade unavailable (%s) — falling back to instant join", gate_reason)
+            logger.warning(
+                "Crossfade unavailable (%s) — falling back to lossless join", gate_reason
+            )
         elif transition != "cut":
             raise ValueError(f"Unsupported transition: {transition}")
 

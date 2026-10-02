@@ -17,6 +17,7 @@ from core.state import use_app_state
 from core.styles import card_container, section_header
 from core.theme import ACCENT_BLUE, TEXT_MUTED_DARK, TEXT_MUTED_LIGHT, is_dark_mode
 from core.tokens import FONT_LG, FONT_SM, RADIUS_LG, SPACE_MD, SPACE_SM
+from core.versions import ffmpeg_version
 from state.controller_ctx import use_controller
 
 logger = logging.getLogger(__name__)
@@ -65,7 +66,9 @@ def EngineInfoScreen() -> ft.Control:
                 spacing=SPACE_SM,
             ),
             section_header(
-                "FFmpeg 8 Capability Status", "Probed live on this device", is_dark=is_dark
+                f"FFmpeg {ffmpeg_version()} Capability Status",
+                "Probed live on this device",
+                is_dark=is_dark,
             ),
             card_container(
                 content=ft.Column(

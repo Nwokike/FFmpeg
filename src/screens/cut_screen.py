@@ -58,9 +58,10 @@ def CutScreen() -> ft.Control:
     end_s, set_end_s = ft.use_state(total_dur)
 
     # Keep the window clamped when the underlying media shrinks (file swap /
-    # re-pick).  The observable write that feeds `info` rebuilds the whole
+    # re-pick). The observable write that feeds `info` rebuilds the whole
     # screen, so a stale `end_s > total_dur` would otherwise feed a
-    # RangeSlider with `end_value > max` — a deterministic Dart range throw.
+    # RangeSlider with `end_value > max` — a Python-side V.le_field ValueError
+    # in before_update, before anything reaches Dart.
     def _clamp_window() -> None:
         cur = total_dur
         if start_s > cur:
@@ -93,8 +94,9 @@ def CutScreen() -> ft.Control:
         The scrub Video is created inside a ``use_effect`` and rendered on the
         following pass, so seeking/pausing/stopping during that window raised
         ``Control must be added to the page first`` on every interaction. The
-        gap is one frame, so the call is dropped rather than surfaced as an
-        error — the next interaction lands on a mounted control.
+        gap is an async effect gap (no frame guarantee), so the call is dropped
+        rather than surfaced as an error — the next interaction lands on a
+        mounted control.
 
         ``flet.controls.base_control.Control.page`` walks parents and **raises**
         RuntimeError instead of returning None, so ``getattr(ctrl, "page")``
@@ -223,7 +225,7 @@ def CutScreen() -> ft.Control:
                 bgcolor=ERROR,
             )
             return
-        _pause_scrub()  # the encode needs the CPU the preview would otherwise burn
+        _pause_scrub()  # free the preview's CPU for the encode (fire-and-forget)
 
         ext = Path(media_path).suffix or ".mp4"
         out_name = unique_temp_name(f"{Path(media_path).stem}_trimmed", ext)
@@ -391,8 +393,8 @@ def CutScreen() -> ft.Control:
                     round(float(e.control.end_value), 2),
                 ),
             ),
-            # Thumbnail strip + instant-cut keyframe jumps
-            section_header("Timeline", "Frames & instant-cut points", is_dark=is_dark),
+            # Thumbnail strip + keyframe jumps (stream-copy cuts snap here)
+            section_header("Timeline", "Frames & keyframe snap points", is_dark=is_dark),
             *(
                 [
                     ft.Row(
@@ -438,7 +440,7 @@ def CutScreen() -> ft.Control:
                         spacing=SPACE_SM,
                     ),
                     ft.Text(
-                        f"◆ {len(keyframes)} keyframes — instant (stream-copy) cuts snap to these",
+                        f"◆ {len(keyframes)} keyframes — stream-copy cuts snap to these",
                         size=FONT_XS,
                         color=muted,
                     ),
@@ -451,7 +453,7 @@ def CutScreen() -> ft.Control:
             ft.Row(
                 controls=[
                     ft.Chip(
-                        label=ft.Text("Stream Copy (Instant Lossless)"),
+                        label=ft.Text("Stream Copy (Lossless)"),
                         selected=stream_copy,
                         on_select=lambda _: set_stream_copy(True),
                     ),

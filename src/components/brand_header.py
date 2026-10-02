@@ -1,7 +1,6 @@
 """Brand header — icon + title | version/update chip, theme cycle, settings gear.
 
-The house AppHeader pattern (Sherlock/DDGS/spaninsight) ported to this app:
-persistent dashboard chrome with the icon tinted per theme (SRC-IN blend over
+Persistent dashboard chrome with the icon tinted per theme (SRC-IN blend over
 the adaptive SVG, same as onboarding), a version chip that flips to an Update
 action when the manifest is newer, the 3-way theme cycle, and a gear that
 jumps to Settings.

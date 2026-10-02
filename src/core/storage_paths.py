@@ -79,8 +79,9 @@ def cache_bytes(name: str, data: bytes) -> Path:
     Keyed by a 64-bit content digest plus the sanitized original name:
     identical bytes are written once (atomically — a crash mid-write can
     never leave a truncated file behind), and :func:`clear_cache` may
-    reclaim the file. Pass re-obtainable bytes only (re-pickable media,
-    re-picked watermark), never the only copy of user data.
+    reclaim the file. Caller contract (unenforced): pass re-obtainable
+    bytes only (re-pickable media, re-picked watermark), never the only
+    copy of user data.
     """
     digest = hashlib.sha256(data).hexdigest()[:_DIGEST_HEX_CHARS]
     safe = "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in Path(name).name)

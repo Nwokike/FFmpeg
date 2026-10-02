@@ -28,9 +28,8 @@ class ControllerMethods:
     navigate: Callable[[str], None] = lambda view: None
     select_tab: Callable[[int], None] = lambda tab: None
     handle_system_back: Callable[[], None] = lambda: None
-    # Injected by AppShell at mount (Sherlock pattern): swapping the single
-    # view's branch directly. Non-optional no-op so every caller path is one
-    # branch, not two.
+    # Injected by AppShell at mount: swapping the single view's branch
+    # directly. Non-optional no-op so every caller path is one branch, not two.
     show_view: Callable[[str], None] = lambda view: None
     # Written by AppShell alongside show_view; both flip GLOBAL active_view
     # plus the shell's local mirror, so back can never strand navigation.

@@ -13,7 +13,17 @@ from core.notify import ERROR, show_snack
 from core.state import Job
 from core.storage_paths import format_bytes
 from core.styles import card_container, status_badge
-from core.theme import ACCENT_AMBER, ACCENT_RED, PRIMARY, TEXT_MUTED_DARK, TEXT_MUTED_LIGHT
+from core.theme import (
+    ACCENT_AMBER,
+    ACCENT_RED,
+    PRIMARY,
+    PRIMARY_CONTAINER_DARK,
+    PRIMARY_CONTAINER_LIGHT,
+    SURFACE_CARD_DARK,
+    SURFACE_CARD_LIGHT,
+    TEXT_MUTED_DARK,
+    TEXT_MUTED_LIGHT,
+)
 from core.tokens import FONT_MD, FONT_SM, FONT_XS, ICON_MD, RADIUS_MD, SPACE_MD, SPACE_SM
 from state.controller_ctx import use_controller
 from state.service_ctx import use_services
@@ -34,7 +44,7 @@ def clamped_progress(progress: float | None) -> float:
 
 @ft.component
 def job_card_view(job: Job, is_dark: bool = True) -> ft.Control:
-    """Card displaying a media job with real-time progress bar or result metadata."""
+    """Card displaying a media job with live-updating progress bar or result metadata."""
     ctrl = use_controller()
     services = use_services()
     muted = TEXT_MUTED_DARK if is_dark else TEXT_MUTED_LIGHT
@@ -43,7 +53,7 @@ def job_card_view(job: Job, is_dark: bool = True) -> ft.Control:
     # Status color resolution
     if status == "completed":
         status_color = PRIMARY
-        bg_status = "#1E3E1C" if is_dark else "#E2F4E0"
+        bg_status = PRIMARY_CONTAINER_DARK if is_dark else PRIMARY_CONTAINER_LIGHT
     elif status == "running":
         status_color = ACCENT_AMBER
         bg_status = "#3D2E0B" if is_dark else "#FEF3C7"
@@ -52,7 +62,7 @@ def job_card_view(job: Job, is_dark: bool = True) -> ft.Control:
         bg_status = "#3E1C1C" if is_dark else "#FEE2E2"
     else:
         status_color = muted
-        bg_status = "#242930" if is_dark else "#E5E7EB"
+        bg_status = SURFACE_CARD_DARK if is_dark else SURFACE_CARD_LIGHT
 
     title = op_title(job.op)
     # Old history can carry None paths — guard before Path() or .title().

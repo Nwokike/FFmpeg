@@ -14,7 +14,15 @@ import flet as ft
 
 from core.assets import app_icon_svg
 from core.state import use_app_state
-from core.theme import PRIMARY, PRIMARY_DARK, TEXT_MUTED_DARK, TEXT_MUTED_LIGHT, is_dark_mode
+from core.theme import (
+    PRIMARY,
+    PRIMARY_CONTAINER_DARK,
+    PRIMARY_CONTAINER_LIGHT,
+    PRIMARY_DARK,
+    TEXT_MUTED_DARK,
+    TEXT_MUTED_LIGHT,
+    is_dark_mode,
+)
 from core.tokens import (
     FONT_2XL,
     FONT_MD,
@@ -40,7 +48,10 @@ class _Slide:
 _SLIDES = (
     _Slide(
         title="Welcome to FFmpeg",
-        description="The complete, uncompromised power of FFmpeg 8 running directly on your phone. Ultra-fast, on-device processing.",
+        description=(
+            "FFmpeg running on-device: convert, compress, trim, extract, "
+            "and normalize without uploading anything."
+        ),
         icon=None,
     ),
     _Slide(
@@ -132,7 +143,9 @@ def OnboardingScreen() -> ft.Control:
                                     content=hero_content,
                                     padding=SPACE_XL,
                                     border_radius=RADIUS_FULL,
-                                    bgcolor="#1E3E1C" if is_dark else "#E2F4E0",
+                                    bgcolor=PRIMARY_CONTAINER_DARK
+                                    if is_dark
+                                    else PRIMARY_CONTAINER_LIGHT,
                                 ),
                                 ft.Text(
                                     slide.title,
