@@ -88,13 +88,32 @@ jobs:
       - name: AdMob production ID guard
         run: |
           set -euo pipefail
-          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
-            if grep -q "3940256099942544" pyproject.toml; then
-              echo "::error::Google test AdMob IDs are forbidden on release tags. Put the production App ID in pyproject.toml (com.google.android.gms.ads.APPLICATION_ID) and keep the production unit IDs in src/core/constants.py."
-              exit 1
+          fail=0
+          # Manifest App ID must be prod (test IDs live in constants.py ONLY
+          # as the *_TEST fallback values — their presence there is by design).
+          if grep -q "3940256099942544" pyproject.toml 2>/dev/null; then
+            echo "::error::Google test AdMob App ID in pyproject.toml. Put the production App ID in [tool.flet.android.meta_data] (com.google.android.gms.ads.APPLICATION_ID)."
+            fail=1
+          fi
+          if grep -q "USE_TEST_IDS *= *True" src/services/ad_service.py 2>/dev/null; then
+            echo "::error::AdService.USE_TEST_IDS=True would serve test ads on a release tag."
+            fail=1
+          fi
+          # PROD units must be filled (blank = AdService falls back to test IDs).
+          for unit in ADMOB_APP_ID_PROD ADMOB_BANNER_UNIT_PROD ADMOB_INTERSTITIAL_UNIT_PROD; do
+            val=$(grep -oP "^${unit} *= *\"\K[^\"]+" src/core/constants.py || true)
+            if [ -z "$val" ]; then
+              echo "::error::$unit is blank in src/core/constants.py — prod ads cannot serve."
+              fail=1
             fi
-          elif grep -q "3940256099942544" pyproject.toml; then
-            echo "::warning::Test AdMob IDs in use (expected for PR builds)"
+            case "$val" in
+              *3940256099942544*) echo "::error::$unit holds a Google test ID."; fail=1;;
+            esac
+          done
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            exit $fail
+          elif [[ "$fail" == "1" ]]; then
+            echo "::warning::AdMob production-ID problem (expected for PR builds only if test IDs are in use)"
           fi
 
   # ─── 0. Create Release Tag & Placeholder ───────────────
@@ -239,6 +258,54 @@ jobs:
               exit 1
             fi
           done
+      - name: Inspect AAB manifest (minSdk/targetSdk/versionCode/AdMob)
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          artifacts=(build/aab/*.aab)
+          test "${#artifacts[@]}" -gt 0
+          aab="${artifacts[0]}"
+          rm -rf /tmp/aab_inspect && mkdir -p /tmp/aab_inspect
+          cd /tmp/aab_inspect
+          # bundletool ships on ubuntu-latest runners via Android cmdline-tools;
+          # fall back to aapt dump badging when it is absent (no new deps).
+          if command -v bundletool >/dev/null 2>&1; then
+            bundletool dump manifest --bundle "$GITHUB_WORKSPACE/$aab" --xpath /manifest > manifest.xml
+          else
+            "$ANDROID_HOME/build-tools/"*/aapt dump xmltree "$GITHUB_WORKSPACE/$aab" AndroidManifest.xml > manifest.txt
+          fi
+          echo "--- manifest head ---"
+          head -n 40 manifest.* | head -n 40
+          # minSdk floor: av's Android wheels are built at ABI 24.
+          if grep -q "minSdkVersion" manifest.*; then
+            minsdk=$(grep -o 'minSdkVersion[^0-9]*[0-9]\+' manifest.* | grep -o '[0-9]\+' | head -1)
+            if [ "${minsdk:-0}" -lt 24 ]; then echo "::error::minSdkVersion $minsdk < 24 (av ABI floor)"; exit 1; fi
+            echo "minSdkVersion=$minsdk OK"
+          else
+            echo "::warning::minSdkVersion not found in manifest dump — verify manually before upload"
+          fi
+          # versionCode must track the release build number.
+          if grep -q "versionCode" manifest.*; then
+            vcode=$(grep -o 'versionCode[^0-9]*[0-9]\+' manifest.* | grep -o '[0-9]\+' | head -1)
+            if [ "${vcode:-0}" != "${{ env.BUILD_NUMBER }}" ]; then echo "::error::versionCode $vcode != BUILD_NUMBER ${{ env.BUILD_NUMBER }}"; exit 1; fi
+            echo "versionCode=$vcode OK"
+          else
+            echo "::warning::versionCode not found in manifest dump — verify manually before upload"
+          fi
+          # Production AdMob App ID must be the merged manifest value.
+          if grep -q "5679949845754640~8554716742" manifest.*; then
+            echo "AdMob APPLICATION_ID (prod) OK"
+          else
+            echo "::error::Production AdMob App ID missing from merged manifest"
+            exit 1
+          fi
+          # usesCleartextTraffic is informational: http:// capture depends on
+          # the platform default, so record whatever the template produced.
+          if grep -q "usesCleartextTraffic" manifest.*; then
+            grep -o 'usesCleartextTraffic[^ ]*' manifest.* | head -1
+          else
+            echo "usesCleartextTraffic unset (platform default applies to http:// capture)"
+          fi
       - name: Upload directly to GitHub Release
         if: github.event_name != 'pull_request'
         uses: softprops/action-gh-release@v2

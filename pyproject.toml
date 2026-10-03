@@ -84,8 +84,8 @@ target_arch = ["arm64-v8a", "x86_64", "armeabi-v7a"]
 adaptive_icon_background = "#0f1114"
 
 [tool.flet.android.meta_data]
-# Google test App ID (matches AdService USE_TEST_IDS=True). Swap to the
-# production AdMob App ID at Play Store release.
+# Production AdMob App ID (matches ADMOB_APP_ID_PROD in src/core/constants.py
+# with AdService USE_TEST_IDS=False — live ads on every build including tags).
 "com.google.android.gms.ads.APPLICATION_ID" = "ca-app-pub-5679949845754640~8554716742"
 
 # Play-safe set: media INPUTS come from the SAF system picker (no permission),

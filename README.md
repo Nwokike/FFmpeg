@@ -59,16 +59,16 @@
 
 - **Measured Capability Engine** — Codecs, containers, filters, and formats are probed directly from the installed engine. The app only offers what your device can actually run.
 - **Convert & Transcode** — Switch containers, adjust CRF quality, and downscale resolution with available hardware or software encoders.
-- **Lossless Cut & Trim** — Instant stream-copy cuts without re-encoding, or frame-accurate re-encode with keyframe markers.
-- **Smart Joiner** — Merge multiple audio or video clips with instant stream-copy or crossfade transitions.
-- **Audio Studio** — Two-pass EBU R128 loudness mastering (YouTube, Podcast, Broadcast presets), channel routing, and resampling.
-- **Extract** — Extract audio tracks (AAC, M4A, FLAC, WAV), grab video frames, generate palette-optimized GIFs, or extract subtitle tracks (SRT, WebVTT, ASS).
+- **Lossless Cut & Trim** — Keyframe-snapped stream-copy cuts without re-encoding, or frame-accurate re-encode with keyframe markers.
+- **Smart Joiner** — Merge multiple audio or video clips with lossless stream-copy or crossfade transitions.
+- **Audio Studio** — Two-pass loudness mastering (YouTube, Podcast, Broadcast presets), channel routing, and resampling.
+- **Extract** — Extract audio tracks (AAC, M4A, FLAC, Opus, WAV), grab video frames, generate palette-optimized GIFs, or extract subtitle tracks (SRT, WebVTT, ASS).
 - **Filter Stack** — Crop, scale, rotate, change playback speed, boost volume, denoise, sharpen, and apply PNG watermarks.
 - **Live Stream Recording** — Capture live network streams directly to local media files.
 - **Media Dossier** — Inspect detailed stream layouts, bitrates, pixel formats, dispositions, and container metadata.
 - **In-App Capture** — Record camera video, snap photos, or record voice memos straight into processing pipelines.
-- **Serial Job Queue** — Background worker queue with real-time progress, pause, resume, and cancellation.
-- **Local-First Privacy** — All processing happens locally on your device. Your media is never uploaded to the cloud.
+- **Serial Job Queue** — Background worker queue with live-updating progress, pause, resume, and cancellation.
+- **Local-First Privacy** — All processing happens locally on your device. Your media is never uploaded to the cloud. Advertising (AdMob, consent-gated via UMP) is the only network use besides update checks and the streams you ask to record — see the data-safety notes in `docs/release-runbook.md`.
 
 ---
 
