@@ -37,13 +37,24 @@ logger = logging.getLogger(__name__)
 
 _DISPOSITION_LABELS = {
     "default": "Default",
+    "dub": "Dub",
+    "original": "Original",
+    "comment": "Comment",
+    "lyrics": "Lyrics",
+    "karaoke": "Karaoke",
     "forced": "Forced",
     "hearing_impaired": "SDH",
     "visual_impaired": "VI",
-    "original": "Original",
-    "comment": "Comment",
+    "clean_effects": "Clean effects",
     "attached_pic": "Cover",
+    "timed_thumbnails": "Thumbnails",
+    "non_diegetic": "Non-diegetic",
     "captions": "Captions",
+    "descriptions": "Descriptions",
+    "metadata": "Metadata",
+    "dependent": "Dependent",
+    "still_image": "Still image",
+    "multilayer": "Multilayer",
 }
 
 
@@ -201,7 +212,7 @@ def ProbeScreen() -> ft.Control:
                 ft.Row(
                     controls=[
                         status_badge(
-                            _DISPOSITION_LABELS.get(flag, flag.title()),
+                            _DISPOSITION_LABELS.get(flag, flag.replace("_", " ").title()),
                             text_color=color,
                             bg_color=f"{color}22",
                         )

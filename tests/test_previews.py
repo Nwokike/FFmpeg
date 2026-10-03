@@ -113,3 +113,45 @@ def test_reencode_cut_is_not_snapped(synthetic_media):
     assert not any("snapped" in m for m in events), events
     dur = EngineService.probe(out).duration_s
     assert dur < 1.0, f"re-encode must keep exact start, got {dur:.3f}s"
+
+
+def test_cut_player_carries_title_and_playlist_mode():
+    import flet_video as ftv
+
+    src = "C:/x/in.mp4"
+    player = ftv.Video(
+        playlist=[ftv.VideoMedia(src)],
+        autoplay=False,
+        title="Trim preview: in.mp4",
+        controls=None,
+        playlist_mode=ftv.PlaylistMode.NONE,
+    )
+    assert player.title == "Trim preview: in.mp4"
+    assert player.playlist_mode == ftv.PlaylistMode.NONE
+    assert len(player.playlist) == 1
+
+
+def test_result_player_title_and_subtitle_track():
+    import flet_video as ftv
+
+    player = ftv.Video(
+        playlist=[ftv.VideoMedia("C:/x/out.mp4")],
+        autoplay=False,
+        title="Result: out.mp4",
+        playlist_mode=ftv.PlaylistMode.NONE,
+        subtitle_track=ftv.VideoSubtitleTrack(src="C:/x/out.srt", title="out.srt", language="en"),
+    )
+    assert player.title == "Result: out.mp4"
+    assert player.subtitle_track is not None
+
+
+def test_audio_loop_and_balance_fields_exist():
+    from flet_audio import Audio, ReleaseMode
+
+    player = Audio(src="C:/x/out.mp3", release_mode=ReleaseMode.STOP)
+    player.release_mode = ReleaseMode.LOOP
+    assert player.release_mode == ReleaseMode.LOOP
+    player.balance = -1.0
+    assert player.balance == -1.0
+    player.playback_rate = 1.5
+    assert player.playback_rate == 1.5

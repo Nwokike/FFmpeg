@@ -156,10 +156,27 @@ class AdService:
             return ft.Container(height=0, width=0)
 
         try:
+            # Reaching construction means UMP consent granted (fail-closed
+            # otherwise), so personalized ads with content keywords. If a
+            # reduced-consent tier ever lands, flip non_personalized_ads here.
+            request = fta.AdRequest(
+                non_personalized_ads=False,
+                keywords=["video", "editor", "converter"],
+            )
             banner = fta.BannerAd(
                 unit_id=self.banner_unit_id,
                 width=320,
                 height=50,
+                request=request,
+                on_load=lambda e: logger.info("Banner %r loaded", slot),
+                on_error=lambda e: logger.warning(
+                    "Banner %r error: %s", slot, getattr(e, "data", e)
+                ),
+                on_open=lambda e: logger.info("Banner %r opened", slot),
+                on_impression=lambda e: logger.info("Banner %r impression", slot),
+                on_click=lambda e: logger.info("Banner %r clicked", slot),
+                on_paid=lambda e: logger.info("Banner %r paid: %s", slot, getattr(e, "data", e)),
+                on_will_dismiss=lambda e: logger.info("Banner %r will dismiss", slot),
             )
             wrapper = ft.Container(
                 content=banner,
@@ -193,12 +210,28 @@ class AdService:
             self.interstitial = None
             self._interstitial_ready = False
 
+        def _on_open(_e) -> None:
+            logger.info("Interstitial ad opened")
+
+        def _on_impression(_e) -> None:
+            logger.info("Interstitial impression")
+
+        def _on_click(e) -> None:
+            logger.info("Interstitial clicked: %s", getattr(e, "data", e))
+
         try:
             self._interstitial_ready = False
             ad = fta.InterstitialAd(
                 unit_id=self.interstitial_unit_id,
+                request=fta.AdRequest(
+                    non_personalized_ads=False,
+                    keywords=["video", "editor", "converter"],
+                ),
                 on_load=_on_load,
                 on_error=_on_error,
+                on_open=_on_open,
+                on_impression=_on_impression,
+                on_click=_on_click,
             )
             self.interstitial = ad
             if not any(s is ad for s in self.page.services):

@@ -85,6 +85,7 @@ def ResultScreen() -> ft.Control:
     pos_ms, set_pos_ms = ft.use_state(0)
     dur_ms, set_dur_ms = ft.use_state(0)
     players_ready, set_players_ready = ft.use_state(False)
+    loop_mode, set_loop_mode = ft.use_state(False)  # top-level: branches must not own hooks
     video_ref = ft.use_ref(None)
     audio_ref = ft.use_ref(None)
     dragging_ref = ft.use_ref(False)  # slider drag in flight — ignore position events
@@ -184,12 +185,17 @@ def ResultScreen() -> ft.Control:
             # Keep the slider truthful when the native player reaches its end;
             # the next tap must start a fresh take rather than call resume().
             set_pos_ms(dur_ms)
+        elif next_state in (AudioState.PAUSED, AudioState.STOPPED, AudioState.DISPOSED):
+            # Distinct terminal/rest states (not just "not playing"): the toggle
+            # shows Resume for PAUSED, fresh Play for STOPPED/DISPOSED.
+            set_playing(False)
 
     def _mount_players():
         # Job changed: clear the previous job's preview flags first so a stale
         # A/B choice, playing state or position can't leak into the new result.
         set_compare("output")
         set_playing(False)
+        set_loop_mode(False)
         audio_state_ref.current = AudioState.STOPPED
         set_pos_ms(0)
         set_dur_ms(0)
@@ -208,16 +214,37 @@ def ResultScreen() -> ft.Control:
                 playlist = [ftv.VideoMedia(str(out_p))]
                 if job.input_path and Path(job.input_path).exists():
                     playlist.append(ftv.VideoMedia(job.input_path))
+                # Sidecar subtitles preview inline when this job emitted them
+                # (SRT/VTT only — no libass dependency).
+                subtitle_track = None
+                if job.op == "extract_subtitles":
+                    sidecar = out_p.with_suffix(".srt")
+                    if not sidecar.is_file():
+                        sidecar = out_p.with_suffix(".vtt")
+                    if sidecar.is_file():
+                        subtitle_track = ftv.VideoSubtitleTrack(
+                            src=str(sidecar),
+                            title=sidecar.name,
+                            language="en",
+                        )
                 video_ref.current = ftv.Video(
                     playlist=playlist,
                     autoplay=False,
+                    title=f"Result: {out_p.name}",
                     filter_quality=ft.FilterQuality.MEDIUM,
+                    playlist_mode=ftv.PlaylistMode.NONE,
+                    subtitle_track=subtitle_track,
+                    on_load=lambda _: set_players_ready(True),
+                    on_enter_fullscreen=lambda _: set_playing(True),
+                    on_exit_fullscreen=lambda _: set_playing(False),
                     on_error=lambda e: logger.warning("Preview error: %s", getattr(e, "data", e)),
                 )
             except Exception as exc:
                 logger.warning("Preview construction failed: %s", exc)
+                set_players_ready(True)
 
-        if suffix in _AUDIO_EXTS and _HAS_AUDIO_PLAYER and audio_ref.current is None:
+        audio_wanted = suffix in _AUDIO_EXTS and _HAS_AUDIO_PLAYER
+        if audio_wanted and audio_ref.current is None:
             try:
                 player = Audio(
                     src=str(out_p),
@@ -225,6 +252,7 @@ def ResultScreen() -> ft.Control:
                     # e.state is an AudioState ENUM — compare the enum and keep
                     # the terminal COMPLETED state for replay decisions.
                     on_state_change=_on_audio_state,
+                    on_loaded=lambda _: set_players_ready(True),
                     on_position_change=lambda e: (
                         set_pos_ms(int(getattr(e, "position", 0) or 0))
                         if not dragging_ref.current
@@ -235,13 +263,22 @@ def ResultScreen() -> ft.Control:
                         if getattr(e, "duration", None) is not None
                         else None
                     ),
+                    on_error=lambda e: logger.warning(
+                        "Preview audio error: %s", getattr(e, "data", e)
+                    ),
                 )
                 page.services.append(player)
                 audio_ref.current = player
             except Exception as exc:
                 logger.warning("Audio player construction failed: %s", exc)
+                set_players_ready(True)
 
-        set_players_ready(True)
+        video_wanted = suffix in _VIDEO_EXTS and _HAS_VIDEO
+        if not video_wanted and not audio_wanted:
+            # Image outputs and missing-player installs render static content
+            # with no load event to wait for — release the spinner at once.
+            set_players_ready(True)
+
         return None
 
     ft.use_effect(
@@ -329,6 +366,23 @@ def ResultScreen() -> ft.Control:
     export_icon = _EXPORT_ICONS.get(job.op, ft.Icons.AUDIOTRACK_ROUNDED)
     if is_video and _HAS_VIDEO:
         video_control = video_ref.current
+
+        def _go_fullscreen(_e=None) -> None:
+            v = video_ref.current
+            if v is None or not _is_mounted(v):
+                return
+
+            async def _full():
+                try:
+                    v.fullscreen = True
+                except Exception as exc:
+                    logger.warning("Fullscreen failed: %s", exc)
+
+            try:
+                page.run_task(_full)
+            except Exception as exc:
+                logger.debug("Fullscreen skipped (page gone): %s", exc)
+
         preview_control = ft.Container(
             content=ft.Column(
                 controls=[
@@ -365,23 +419,44 @@ def ResultScreen() -> ft.Control:
                     ),
                     *(
                         [
-                            ft.SegmentedButton(
-                                selected=[compare],
-                                allow_empty_selection=False,
-                                show_selected_icon=False,
-                                segments=[
-                                    ft.Segment(value="output", label=ft.Text("Output")),
-                                    ft.Segment(value="original", label=ft.Text("Original")),
+                            ft.Row(
+                                controls=[
+                                    ft.SegmentedButton(
+                                        selected=[compare],
+                                        allow_empty_selection=False,
+                                        show_selected_icon=False,
+                                        segments=[
+                                            ft.Segment(value="output", label=ft.Text("Output")),
+                                            ft.Segment(value="original", label=ft.Text("Original")),
+                                        ],
+                                        on_change=lambda e: (
+                                            _set_compare(next(iter(e.control.selected), compare))
+                                            if getattr(e.control, "selected", None)
+                                            else None
+                                        ),
+                                    ),
+                                    ft.IconButton(
+                                        icon=ft.Icons.FULLSCREEN_ROUNDED,
+                                        tooltip="Fullscreen preview",
+                                        on_click=_go_fullscreen,
+                                    ),
                                 ],
-                                on_change=lambda e: (
-                                    _set_compare(next(iter(e.control.selected), compare))
-                                    if getattr(e.control, "selected", None)
-                                    else None
-                                ),
+                                alignment=ft.MainAxisAlignment.CENTER,
+                                spacing=SPACE_SM,
                             )
                         ]
                         if has_orig  # single-item playlist: Original would doom jump_to(1)
-                        else []
+                        else (
+                            [
+                                ft.IconButton(
+                                    icon=ft.Icons.FULLSCREEN_ROUNDED,
+                                    tooltip="Fullscreen preview",
+                                    on_click=_go_fullscreen,
+                                )
+                            ]
+                            if video_control is not None
+                            else []
+                        )
                     ),
                 ],
                 horizontal_alignment=ft.CrossAxisAlignment.CENTER,
@@ -443,18 +518,43 @@ def ResultScreen() -> ft.Control:
             def _toggle_play(_e):
                 async def _t():
                     try:
+                        state_now = audio_state_ref.current
                         if playing:
                             await player.pause()
-                        elif audio_state_ref.current == AudioState.COMPLETED:
+                        elif state_now == AudioState.COMPLETED or (
+                            state_now not in (AudioState.PAUSED,) and pos_ms <= 0
+                        ):
                             await player.play()
-                        elif pos_ms > 0:
-                            await player.resume()
                         else:
-                            await player.play()
+                            await player.resume()
                     except Exception as exc:
                         logger.warning("Playback control failed: %s", exc)
 
                 _safe_run_task(_t)
+
+            def _toggle_loop(_e):
+                # LOOP retains the buffer (memory) for replay; STOP
+                # (default) frees on completion. Recreate is unnecessary —
+                # release_mode is a plain field, flushed on next update.
+                set_loop_mode(not loop_mode)
+                try:
+                    player.release_mode = ReleaseMode.LOOP if not loop_mode else ReleaseMode.STOP
+                    page.update()
+                except Exception as exc:
+                    logger.warning("Loop toggle failed: %s", exc)
+                    set_loop_mode(loop_mode)
+
+            def _pull_duration(_e=None):
+                # Push events can lag on remote/buffered files — pull as fallback.
+                async def _get():
+                    try:
+                        got = await player.get_duration()
+                        if got is not None:
+                            set_dur_ms(int(got.in_milliseconds))
+                    except Exception as exc:
+                        logger.debug("Duration pull failed: %s", exc)
+
+                _safe_run_task(_get)
 
             def _drag(e):
                 # Thumb only: no set_pos_ms per tick (a rebuild mid-gesture can
@@ -485,6 +585,12 @@ def ResultScreen() -> ft.Control:
                             on_click=_toggle_play,
                             tooltip="Play" if not playing else "Pause",
                         ),
+                        ft.IconButton(
+                            icon=ft.Icons.REPEAT_ROUNDED,
+                            icon_size=20,
+                            tooltip="Loop replay" if not loop_mode else "Loop on",
+                            on_click=_toggle_loop,
+                        ),
                         # Until duration arrives, a 0..1 slider mis-seeks to 0
                         (
                             ft.Slider(
@@ -496,7 +602,10 @@ def ResultScreen() -> ft.Control:
                                 on_change_end=_seek_player,
                             )
                             if dur_ms > 0
-                            else ft.Container(expand=True)
+                            else ft.TextButton(
+                                "Load duration",
+                                on_click=_pull_duration,
+                            )
                         ),
                     ],
                     spacing=SPACE_SM,

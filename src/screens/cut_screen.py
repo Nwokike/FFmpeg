@@ -10,6 +10,7 @@ from pathlib import Path
 import flet as ft
 
 from components.tool_job_status import tool_job_row
+from core.notify import ERROR, show_snack
 from core.state import Job, use_app_state
 from core.storage_paths import format_bytes, get_temp_dir, unique_temp_name
 from core.styles import card_container, section_header
@@ -155,6 +156,36 @@ def CutScreen() -> ft.Control:
 
         page.run_task(_pause)
 
+    def _verify_frame() -> None:
+        v = scrub_ref.current
+        if not _is_mounted(v) or not media_path:
+            return
+
+        async def _grab() -> None:
+            try:
+                shot = await v.take_screenshot("image/jpeg")
+            except Exception as exc:
+                logger.warning("Frame verify unavailable (DRM/hw frame?): %s", exc)
+                show_snack(page, "Player frame couldn't be read on this device", bgcolor=ERROR)
+                return
+            if not shot:
+                show_snack(page, "Player frame came back empty", bgcolor=ERROR)
+                return
+            try:
+                cand = get_temp_dir() / unique_temp_name("verify_frame", ".jpg")
+                await asyncio.to_thread(cand.write_bytes, bytes(shot))
+                info = await asyncio.to_thread(EngineService.probe, str(cand))
+                vs = info.video_stream
+                show_snack(
+                    page,
+                    f"Frame OK — {vs.width}x{vs.height} decodes" if vs else "Frame grabbed",
+                )
+            except Exception as exc:
+                logger.warning("Frame verify probe failed: %s", exc)
+                show_snack(page, "Grabbed frame couldn't be decoded", bgcolor=ERROR)
+
+        page.run_task(_grab)
+
     def _mount_scrub():
         if not media_path or not _HAS_VIDEO or scrub_ref.current is not None:
             return None
@@ -162,12 +193,14 @@ def CutScreen() -> ft.Control:
             scrub_ref.current = ftv.Video(
                 playlist=[ftv.VideoMedia(media_path)],
                 autoplay=False,
+                title=f"Trim preview: {Path(media_path).name}",
                 # No chrome on a 160px scrubber — default controls cover the frame
                 controls=None,
                 filter_quality=ft.FilterQuality.MEDIUM,
+                playlist_mode=ftv.PlaylistMode.NONE,
+                on_load=lambda _: set_scrub_ready(True),
                 on_error=lambda e: logger.warning("Scrub preview error: %s", getattr(e, "data", e)),
             )
-            set_scrub_ready(True)
         except Exception as exc:
             logger.warning("Scrub preview unavailable: %s", exc)
         return None
@@ -374,6 +407,17 @@ def CutScreen() -> ft.Control:
                 border_radius=RADIUS_LG,
                 clip_behavior=ft.ClipBehavior.ANTI_ALIAS,
                 bgcolor="#000000",
+            ),
+            ft.Row(
+                controls=[
+                    ft.TextButton(
+                        "Verify frame",
+                        icon=ft.Icons.VERIFIED_OUTLINED,
+                        tooltip="Grab the player frame and check it decodes",
+                        on_click=lambda _: _verify_frame(),
+                    ),
+                ],
+                alignment=ft.MainAxisAlignment.END,
             ),
             # Trim range — one RangeSlider keeps start <= end by construction
             # (the old interlinked Slider pair misbehaved on sub-second clips)

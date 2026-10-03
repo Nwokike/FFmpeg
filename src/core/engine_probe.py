@@ -8,6 +8,7 @@ assumptions — every result is a measured value from this exact wheel.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import time
@@ -139,6 +140,20 @@ class EngineProbe:
     video_codec_formats: dict[str, list[str]] = field(default_factory=dict)
     audio_codec_formats: dict[str, list[str]] = field(default_factory=dict)
     encoder_options: dict[str, list[str]] = field(default_factory=dict)
+    # Per-muxer defaults from the wheel (no guessing in screens): muxer name
+    # (no dot) → default codec or "" when the wheel names none.
+    muxer_default_video: dict[str, str] = field(default_factory=dict)
+    muxer_default_audio: dict[str, str] = field(default_factory=dict)
+    muxer_default_subtitle: dict[str, str] = field(default_factory=dict)
+    # Per-muxer supported codec sets (empty = wheel names none).
+    muxer_video_codecs: dict[str, list[str]] = field(default_factory=dict)
+    muxer_audio_codecs: dict[str, list[str]] = field(default_factory=dict)
+    # Encoder capability facts: name → supported rates / formats / flags.
+    encoder_frame_rates: dict[str, list[str]] = field(default_factory=dict)
+    encoder_audio_rates: dict[str, list[int]] = field(default_factory=dict)
+    encoder_audio_formats: dict[str, list[str]] = field(default_factory=dict)
+    encoder_intra_only: list[str] = field(default_factory=list)
+    encoder_lossless: list[str] = field(default_factory=list)
     library_versions: str = ""
     protocol_probe: dict[str, str] = field(default_factory=dict)
     video_encoder_picks: list[str] = field(default_factory=list)
@@ -423,6 +438,24 @@ def _measure() -> EngineProbe:
             p.video_codec_formats[name] = [str(fmt.name) for fmt in codec.video_formats]
         if codec.audio_formats:
             p.audio_codec_formats[name] = [str(fmt.name) for fmt in codec.audio_formats]
+        # Rates/formats are plain attributes (None when the codec declares
+        # none — e.g. frame_rates on mpeg4); properties is an int bitmask,
+        # so intra_only/lossless come from the direct bool attributes.
+        for rates in getattr(codec, "frame_rates", None) or []:
+            p.encoder_frame_rates.setdefault(name, []).append(str(rates))
+        arates = getattr(codec, "audio_rates", None) or []
+        if arates:
+            p.encoder_audio_rates[name] = [int(r) for r in arates]
+        aforms = getattr(codec, "audio_formats", None) or []
+        if aforms:
+            p.encoder_audio_formats[name] = [str(getattr(f, "name", f)) for f in aforms]
+        try:
+            if bool(getattr(codec, "intra_only", False)):
+                p.encoder_intra_only.append(name)
+            if bool(getattr(codec, "lossless", False)):
+                p.encoder_lossless.append(name)
+        except Exception:
+            pass
         for hw in codec.hardware_configs or []:
             device = getattr(hw, "device_type", "unknown")
             fmt = getattr(hw, "format", None)
@@ -434,6 +467,42 @@ def _measure() -> EngineProbe:
             )
         except Exception as exc:
             logger.debug("Encoder option probe failed for %s: %s", name, exc)
+
+    # Per-muxer defaults + encode-capable sets from the wheel (metadata only —
+    # opening an output container names no streams and writes nothing until
+    # muxed; the probe file is removed right after). supported_codecs mixes
+    # decoders, hwaccel wrappers, and encoders, so membership is filtered to
+    # mode="w"-verified names classified by Codec.type (video vs audio).
+    for muxer in ("mp4", "mov", "mkv", "webm", "avi", "mp3", "m4a", "ogg", "opus", "flac", "wav"):
+        probe_file = Path(f"probe_probe.{muxer}")
+        try:
+            out = av.open(str(probe_file), "w")
+        except Exception:
+            continue
+        try:
+            p.muxer_default_video[muxer] = str(getattr(out, "default_video_codec", "") or "")
+            p.muxer_default_audio[muxer] = str(getattr(out, "default_audio_codec", "") or "")
+            p.muxer_default_subtitle[muxer] = str(getattr(out, "default_subtitle_codec", "") or "")
+            video_set: list[str] = []
+            audio_set: list[str] = []
+            for cand in {str(c) for c in (getattr(out, "supported_codecs", None) or set())}:
+                if not _codec_mode_available(cand, "w"):
+                    continue
+                try:
+                    kind = str(av.Codec(cand, "w").type or "")
+                except Exception:
+                    continue
+                if kind == "video":
+                    video_set.append(cand)
+                elif kind == "audio":
+                    audio_set.append(cand)
+            p.muxer_video_codecs[muxer] = sorted(video_set)
+            p.muxer_audio_codecs[muxer] = sorted(audio_set)
+        finally:
+            with contextlib.suppress(Exception):
+                out.close()
+            with contextlib.suppress(OSError):
+                probe_file.unlink(missing_ok=True)
 
     # Keep FFmpeg's native diagnostics visible in the app log instead of the
     # wheel's default discard callback.

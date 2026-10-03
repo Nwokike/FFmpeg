@@ -19,6 +19,7 @@ import flet as ft
 
 from components.empty_state import empty_state_view
 from core.notify import ERROR, SUCCESS, show_snack
+from core.permissions import next_permission_action  # re-exported: tests import it from here
 from core.state import use_app_state
 from core.storage_paths import format_bytes, get_temp_dir
 from core.styles import card_container, section_header
@@ -69,28 +70,6 @@ def _status_value(status) -> str:
     return str(getattr(status, "value", status) or "").lower()
 
 
-def next_permission_action(status, just_requested: bool = False) -> str:
-    """Map a permission status to the next UI action.
-
-    Returns one of: ``ok`` | ``ask`` | ``explain`` | ``settings`` |
-    ``unavailable``. ``explain`` = a just-made request was denied → show
-    rationale with retry; ``settings`` = permanent denial, only the OS
-    Settings page can help; ``unavailable`` = RESTRICTED (parental/MDM lock):
-    the OS forbids changes, so neither retry nor Settings helps.
-    """
-    val = _status_value(status)
-    if val in ("granted", "limited", "provisional"):
-        return "ok"
-    if val in ("permanentlydenied",):
-        return "settings"
-    if val in ("restricted",):
-        return "unavailable"
-    if val in ("denied",):
-        return "explain" if just_requested else "ask"
-    # None/unknown → ask
-    return "explain" if just_requested else "ask"
-
-
 def _can_capture(page: ft.Page) -> bool:
     """Camera requires web/mobile (desktop raises in flet-camera's guard)."""
     try:
@@ -133,7 +112,21 @@ def CaptureScreen() -> ft.Control:
     rec_paused, set_rec_paused = ft.use_state(False)
     elapsed, set_elapsed = ft.use_state(0)
     pcm_preset, set_pcm_preset = ft.use_state("studio")  # "studio" | "voice"
-    mic_codec, set_mic_codec = ft.use_state("pcm16")  # "pcm16" | "opus" | "aac"
+    mic_codec, set_mic_codec = ft.use_state("pcm16")  # "pcm16" | "opus" | "aac" | "flac"
+    # Recorder DSP (best-effort: OEMs may ignore — never gated, never promised).
+    dsp_noise, set_dsp_noise = ft.use_state(False)
+    dsp_echo, set_dsp_echo = ft.use_state(False)
+    dsp_gain, set_dsp_gain = ft.use_state(False)
+    mic_device, set_mic_device = ft.use_state(None)  # InputDevice id or None = default
+    mic_devices, set_mic_devices = ft.use_state([])
+    # Camera extras (all runtime-probed, hidden when unsupported).
+    torch_on, set_torch_on = ft.use_state(False)
+    front_lens, set_front_lens = ft.use_state(False)
+    zoom_level, set_zoom_level = ft.use_state(1.0)
+    zoom_range, set_zoom_range = ft.use_state(None)  # (min, max) or None = unsupported
+    cam_quality, set_cam_quality = ft.use_state("HIGH")  # HIGH | MEDIUM | LOW
+    preview_aspect, set_preview_aspect = ft.use_state(None)
+    lock_orientation, set_lock_orientation = ft.use_state(False)
     captured_path, set_captured_path = ft.use_state(None)
     captured_info, set_captured_info = ft.use_state(None)
     busy, set_busy = ft.use_state(False)
@@ -305,9 +298,21 @@ def CaptureScreen() -> ft.Control:
             )
         )
 
-    async def _permission_ok(perm) -> bool:
+    async def _permission_ok(perm, *, mic_fallback: bool = False) -> bool:
         ph = services.permission_handler
         if ph is None or Permission is None:
+            # Linux/macOS have no handler: the mic path falls back to the
+            # recorder's own check instead of hard-blocking (Windows/Web keep
+            # the handler path above).
+            if mic_fallback:
+                rec = services.audio_recorder
+                if rec is None:
+                    return False
+                try:
+                    return bool(await rec.has_permission())
+                except Exception:
+                    logger.exception("Recorder permission fallback failed")
+                    return False
             show_snack(page, "Permissions are unavailable on this platform", bgcolor=ERROR)
             return False
         try:
@@ -338,6 +343,26 @@ def CaptureScreen() -> ft.Control:
         set_recording(is_recording)
         recording_ref.current = is_recording
         set_rec_paused(bool(getattr(e, "is_recording_paused", False)))
+        # Native busy flags are the truth for the shutter — the manual
+        # taking_ref used to lag the hardware.
+        if getattr(e, "is_taking_picture", False):
+            taking_ref.current = True
+        elif not is_recording:
+            taking_ref.current = False
+        # Flash state reflects the hardware (OEMs can override our request).
+        flash_mode = getattr(e, "flash_mode", None)
+        if flash_mode is not None:
+            with contextlib.suppress(Exception):
+                set_torch_on(str(getattr(flash_mode, "value", flash_mode)).lower() == "torch")
+        # Size the preview from the hardware, not the fixed 300px box.
+        preview_size = getattr(e, "preview_size", None)
+        if preview_size is not None:
+            try:
+                w, h = float(preview_size.width), float(preview_size.height)
+                if w > 0 and h > 0:
+                    set_preview_aspect(w / h)
+            except Exception:
+                pass
         # The native state event is the truth for "camera is live" — the local
         # flag used to go stale when init completed on a different render pass.
         if getattr(e, "is_initialized", False):
@@ -390,24 +415,62 @@ def CaptureScreen() -> ft.Control:
             if not cameras:
                 show_snack(page, "No camera found on this device", bgcolor=ERROR)
                 return
-            # Prefer the back lens — cameras[0] is often the selfie.
+            # Lens flip without destroy: set_description on the enumerated
+            # sibling beats the full reconfigure path (kept as fallback).
+            want_front = front_lens
             target = next(
                 (
                     c
                     for c in cameras
-                    if getattr(c, "lens_direction", None) == ftc.CameraLensDirection.BACK
+                    if (
+                        getattr(c, "lens_direction", None)
+                        == (
+                            ftc.CameraLensDirection.FRONT
+                            if want_front
+                            else ftc.CameraLensDirection.BACK
+                        )
+                    )
                 ),
-                cameras[0],
+                next(
+                    (
+                        c
+                        for c in cameras
+                        if getattr(c, "lens_direction", None) == ftc.CameraLensDirection.BACK
+                    ),
+                    cameras[0],
+                ),
             )
             # Video is the ONLY consumer of the mic; asking for audio in photo
             # mode risks silent video / OEM throws when MIC is denied.
             enable_audio = mode == "video"
             last_err: Exception | None = None
-            for preset in (ftc.ResolutionPreset.HIGH, ftc.ResolutionPreset.MEDIUM):
+            presets = {
+                "HIGH": (ftc.ResolutionPreset.HIGH, ftc.ResolutionPreset.MEDIUM),
+                "MEDIUM": (ftc.ResolutionPreset.MEDIUM, ftc.ResolutionPreset.LOW),
+                "LOW": (ftc.ResolutionPreset.LOW,),
+            }.get(cam_quality, (ftc.ResolutionPreset.HIGH, ftc.ResolutionPreset.MEDIUM))
+            init_kwargs: dict = {}
+            if mode == "video":
+                # Conservative caps: huge bitrates therm-throttle phones.
+                init_kwargs = {"fps": 30, "video_bitrate": 8_000_000, "audio_bitrate": 128_000}
+            for preset in presets:
                 try:
-                    await cam.initialize(target, preset, enable_audio=enable_audio)
+                    await cam.initialize(target, preset, enable_audio=enable_audio, **init_kwargs)
                     camera_inited_ref.current = True
                     camera_audio_mode_ref.current = enable_audio
+                    # Zoom range is hardware truth — clamp every later set to it.
+                    try:
+                        lo = await cam.get_min_zoom_level()
+                        hi = await cam.get_max_zoom_level()
+                        if hi is not None and hi > (lo or 1.0):
+                            set_zoom_range((float(lo or 1.0), float(hi)))
+                    except Exception:
+                        pass
+                    if lock_orientation and mode == "video":
+                        try:
+                            await cam.lock_capture_orientation()
+                        except Exception as exc:
+                            logger.debug("Orientation lock unsupported: %s", exc)
                     return
                 except Exception as exc:
                     last_err = exc
@@ -525,6 +588,65 @@ def CaptureScreen() -> ft.Control:
             return
         show_snack(page, "Capture ready — pick a tool or save it", bgcolor=SUCCESS)
 
+    # ── Camera extras (all runtime-probed) ────────────────────────────────
+
+    async def _toggle_torch() -> None:
+        cam = camera_ref.current
+        if cam is None or not _is_mounted(cam):
+            return
+        try:
+            await cam.set_flash_mode(ftc.FlashMode.TORCH if not torch_on else ftc.FlashMode.OFF)
+            set_torch_on(not torch_on)
+        except Exception as exc:
+            logger.warning("Torch toggle failed (unsupported?): %s", exc)
+
+    async def _flip_lens() -> None:
+        cam = camera_ref.current
+        if cam is None:
+            return
+        try:
+            cameras = await cam.get_available_cameras()
+        except Exception as exc:
+            logger.warning("Lens list failed: %s", exc)
+            return
+        want = ftc.CameraLensDirection.FRONT if not front_lens else ftc.CameraLensDirection.BACK
+        target = next((c for c in cameras if getattr(c, "lens_direction", None) == want), None)
+        if target is None:
+            show_snack(page, "No second lens on this device", bgcolor=ERROR)
+            return
+        # Hot-switch without destroy; fall back to full reconfigure.
+        try:
+            await cam.set_description(target)
+            set_front_lens(not front_lens)
+        except Exception as exc:
+            logger.warning("Hot lens switch failed, reconfiguring: %s", exc)
+            set_front_lens(not front_lens)
+            camera_inited_ref.current = False
+            camera_audio_mode_ref.current = None
+            set_camera_ready(False)
+            await _prepare_camera()
+
+    async def _apply_zoom(value: float) -> None:
+        cam = camera_ref.current
+        if cam is None or not _is_mounted(cam) or zoom_range is None:
+            return
+        lo, hi = zoom_range
+        clamped = max(lo, min(float(value), hi))
+        set_zoom_level(clamped)
+        try:
+            await cam.set_zoom_level(clamped)
+        except Exception as exc:
+            logger.warning("Zoom set failed: %s", exc)
+
+    async def _resume_preview_safe() -> None:
+        cam = camera_ref.current
+        if cam is None or not _is_mounted(cam):
+            return
+        try:
+            await cam.resume_preview()
+        except Exception as exc:
+            logger.debug("Preview resume skipped: %s", exc)
+
     # ── Photo ───────────────────────────────────────────────────────────────
 
     async def _take_photo() -> None:
@@ -579,6 +701,11 @@ def CaptureScreen() -> ft.Control:
             recording_ref.current = False
             set_recording(False)
             set_busy(False)
+            if lock_orientation:
+                try:
+                    await cam.unlock_capture_orientation()
+                except Exception as exc:
+                    logger.debug("Orientation unlock skipped: %s", exc)
 
     async def _toggle_video() -> None:
         cam = camera_ref.current
@@ -625,6 +752,18 @@ def CaptureScreen() -> ft.Control:
             logger.warning("Pause toggle failed: %s", exc)
             show_snack(page, f"Pause failed: {exc}", bgcolor=ERROR)
 
+    async def _reconfigure_for_quality() -> None:
+        """Quality chips re-init the controller at the new preset."""
+        camera_inited_ref.current = False
+        camera_audio_mode_ref.current = None
+        cam = camera_ref.current
+        if cam is not None and _is_mounted(cam):
+            try:
+                await cam.pause_preview()
+            except Exception as exc:
+                logger.debug("Preview pause for quality switch skipped: %s", exc)
+        await _init_camera()
+
     # ── Mic (direct file mode: the native plugin writes the file) ─────────
 
     def _codec_for(mic_codec_name: str):
@@ -632,7 +771,22 @@ def CaptureScreen() -> ft.Control:
             "pcm16": AudioEncoder.WAV,
             "opus": AudioEncoder.OPUS,
             "aac": AudioEncoder.AACLC,
+            "flac": AudioEncoder.FLAC,
         }.get(mic_codec_name, AudioEncoder.WAV)
+
+    async def _load_mic_devices() -> None:
+        rec = services.audio_recorder
+        if rec is None:
+            return
+        try:
+            devices = await rec.get_input_devices()
+        except Exception as exc:
+            logger.debug("Mic device list unavailable: %s", exc)
+            return
+        try:
+            set_mic_devices([(str(d.id), str(getattr(d, "label", d.id) or d.id)) for d in devices])
+        except Exception as exc:
+            logger.debug("Mic device parse failed: %s", exc)
 
     async def _finish_mic() -> None:
         rec = services.audio_recorder
@@ -665,7 +819,7 @@ def CaptureScreen() -> ft.Control:
         if recording:
             await _finish_mic()
             return
-        if not await _permission_ok(Permission.MICROPHONE):
+        if not await _permission_ok(Permission.MICROPHONE, mic_fallback=True):
             return
         try:
             # Revoked mid-session surfaces as a generic start refusal without
@@ -698,6 +852,8 @@ def CaptureScreen() -> ft.Control:
             ext, bit_rate = "wav", 128000
         elif codec_name == "opus":
             rate, ch, ext, bit_rate = 48000, 2, "opus", 96000
+        elif codec_name == "flac":
+            rate, ch, ext, bit_rate = 44100, 2, "flac", 0
         else:
             rate, ch, ext, bit_rate = 44100, 2, "m4a", 128000
 
@@ -707,9 +863,49 @@ def CaptureScreen() -> ft.Control:
 
         mic_codec_ref.current = codec_name
         mic_preset_ref.current = pcm_preset
-        cfg = AudioRecorderConfiguration(
-            encoder=enc, channels=ch, sample_rate=rate, bit_rate=bit_rate
-        )
+        cfg_kwargs: dict = {
+            "encoder": enc,
+            "channels": ch,
+            "sample_rate": rate,
+            "bit_rate": bit_rate,
+            # DSP is best-effort (OEMs may ignore) — passed, never gated.
+            "suppress_noise": bool(dsp_noise),
+            "cancel_echo": bool(dsp_echo),
+            "auto_gain": bool(dsp_gain),
+        }
+        if mic_device:
+            cfg_kwargs["device"] = mic_device
+        # Voice preset favors speech recognition tuning where the platform
+        # offers distinct audio sources; studio keeps the default path.
+        try:
+            from flet_audio_recorder import AndroidRecorderConfiguration  # type: ignore
+            from flet_audio_recorder.types import AndroidAudioSource  # type: ignore
+
+            if mic_preset_ref.current == "voice":
+                cfg_kwargs["android_configuration"] = AndroidRecorderConfiguration(
+                    audio_source=AndroidAudioSource.VOICE_RECOGNITION
+                )
+        except Exception:
+            pass
+        try:
+            from flet_audio_recorder import IosRecorderConfiguration  # type: ignore
+            from flet_audio_recorder.types import IosAudioCategoryOption  # type: ignore
+
+            cfg_kwargs["ios_configuration"] = IosRecorderConfiguration(
+                options=[
+                    IosAudioCategoryOption.ALLOW_BLUETOOTH,
+                    IosAudioCategoryOption.DEFAULT_TO_SPEAKER,
+                ]
+            )
+        except Exception:
+            pass
+        try:
+            cfg = AudioRecorderConfiguration(**cfg_kwargs)
+        except TypeError:
+            # Older plugin builds may not accept newer kwargs — retry bare.
+            cfg = AudioRecorderConfiguration(
+                encoder=enc, channels=ch, sample_rate=rate, bit_rate=bit_rate
+            )
         # The recorder's Dart side resolves output_path against its own app-local
         # recordings directory. Feeding it our absolute sandbox path produced
         # `<assets>/data/user/0/.../cache/rec_….wav` and an ENOENT crash. Give it
@@ -782,11 +978,14 @@ def CaptureScreen() -> ft.Control:
         set_captured_info(None)
         set_elapsed(0)
         elapsed_ref.current = 0
+        page.run_task(_resume_preview_safe)
 
     def _set_mode(m: str) -> None:
         if recording or busy:
             return
         set_mode(m)
+        if m == "mic":
+            page.run_task(_load_mic_devices)
 
     # ── Render ──────────────────────────────────────────────────────────────
 
@@ -877,7 +1076,8 @@ def CaptureScreen() -> ft.Control:
         )
         preview = ft.Container(
             content=inner,
-            height=300,
+            height=300 if preview_aspect is None else None,
+            aspect_ratio=preview_aspect,
             border_radius=RADIUS_LG,
             clip_behavior=ft.ClipBehavior.ANTI_ALIAS,
             bgcolor="#000000",
@@ -945,6 +1145,64 @@ def CaptureScreen() -> ft.Control:
     cam_live = camera_ready and camera_inited_ref.current
     controls: list[ft.Control] = []
     if not captured_path:
+        if mode in ("photo", "video"):
+            # Camera extras — every control hides when the hardware says no.
+            extras: list[ft.Control] = [
+                ft.IconButton(
+                    icon=ft.Icons.FLASHLIGHT_ON_ROUNDED
+                    if not torch_on
+                    else ft.Icons.FLASHLIGHT_OFF_ROUNDED,
+                    tooltip="Torch on" if not torch_on else "Torch off",
+                    on_click=lambda _: page.run_task(_toggle_torch),
+                ),
+                ft.IconButton(
+                    icon=ft.Icons.CAMERASWITCH_ROUNDED,
+                    tooltip="Front/back lens",
+                    on_click=lambda _: page.run_task(_flip_lens),
+                ),
+            ]
+            if zoom_range is not None:
+                lo, hi = zoom_range
+                extras.append(
+                    ft.Slider(
+                        value=float(min(max(zoom_level, lo), hi)),
+                        min=float(lo),
+                        max=float(hi),
+                        expand=True,
+                        tooltip="Zoom",
+                        on_change=lambda e: page.run_task(_apply_zoom, float(e.control.value)),
+                    )
+                )
+            controls.append(ft.Row(controls=extras, spacing=SPACE_SM))
+            controls.append(
+                ft.Row(
+                    controls=[
+                        *[
+                            ft.Chip(
+                                label=ft.Text(label),
+                                selected=cam_quality == key,
+                                on_click=lambda _, k=key: (
+                                    set_cam_quality(k),
+                                    page.run_task(_reconfigure_for_quality),
+                                ),
+                            )
+                            for key, label in (
+                                ("HIGH", "HD"),
+                                ("MEDIUM", "SD"),
+                                ("LOW", "Low"),
+                            )
+                        ],
+                        ft.Chip(
+                            label=ft.Text("Lock rotation" if not lock_orientation else "Locked"),
+                            selected=lock_orientation,
+                            on_click=lambda _: set_lock_orientation(not lock_orientation),
+                            tooltip="Lock capture orientation during video",
+                        ),
+                    ],
+                    wrap=True,
+                    spacing=SPACE_SM,
+                )
+            )
         if mode == "photo":
             controls.append(
                 ft.FilledButton(
@@ -1054,11 +1312,66 @@ def CaptureScreen() -> ft.Control:
                                 selected=mic_codec == "aac",
                                 on_select=lambda _: set_mic_codec("aac"),
                             ),
+                            ft.Chip(
+                                label=ft.Text("FLAC"),
+                                selected=mic_codec == "flac",
+                                on_select=lambda _: set_mic_codec("flac"),
+                            ),
                         ],
                         wrap=True,
                         spacing=SPACE_SM,
                     )
                 )
+                # DSP is best-effort (OEMs may ignore) — chips, never gates.
+                controls.append(
+                    ft.Row(
+                        controls=[
+                            ft.Chip(
+                                label=ft.Text("Denoise"),
+                                selected=dsp_noise,
+                                on_select=lambda _: set_dsp_noise(not dsp_noise),
+                                tooltip="Suppress background noise (device-dependent)",
+                            ),
+                            ft.Chip(
+                                label=ft.Text("No echo"),
+                                selected=dsp_echo,
+                                on_select=lambda _: set_dsp_echo(not dsp_echo),
+                                tooltip="Cancel echo (device-dependent)",
+                            ),
+                            ft.Chip(
+                                label=ft.Text("Auto gain"),
+                                selected=dsp_gain,
+                                on_select=lambda _: set_dsp_gain(not dsp_gain),
+                                tooltip="Auto level (device-dependent)",
+                            ),
+                        ],
+                        wrap=True,
+                        spacing=SPACE_SM,
+                    )
+                )
+                # Input devices (multi-mic phones; default when empty).
+                if mic_devices:
+                    controls.append(
+                        ft.Row(
+                            controls=[
+                                ft.Chip(
+                                    label=ft.Text("Default mic"),
+                                    selected=mic_device is None,
+                                    on_select=lambda _: set_mic_device(None),
+                                ),
+                                *[
+                                    ft.Chip(
+                                        label=ft.Text(label),
+                                        selected=mic_device == dev_id,
+                                        on_select=lambda _, d=dev_id: set_mic_device(d),
+                                    )
+                                    for dev_id, label in mic_devices
+                                ],
+                            ],
+                            wrap=True,
+                            spacing=SPACE_SM,
+                        )
+                    )
                 controls.append(
                     ft.FilledButton(
                         "Start Recording",

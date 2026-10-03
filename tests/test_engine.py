@@ -150,3 +150,82 @@ def test_synthetic_transcode_and_probe():
         assert info.video_stream.width == 320
         assert info.video_stream.height == 180
         assert len(info.streams) >= 1
+
+
+def test_probe_records_muxer_defaults_and_sets():
+    from core.engine_probe import probe
+
+    p = probe()
+    assert p.muxer_default_video.get("mp4"), "wheel names an mp4 video default"
+    assert p.muxer_default_audio.get("mp4"), "wheel names an mp4 audio default"
+    assert "mpeg4" in p.muxer_video_codecs.get("mp4", [])
+    assert "aac" in p.muxer_audio_codecs.get("mp4", [])
+    assert "libvpx-vp9" in p.muxer_video_codecs.get(
+        "webm", []
+    ) or "vp9" in p.muxer_video_codecs.get("webm", [])
+
+
+def test_probe_records_encoder_facts():
+    from core.engine_probe import probe
+
+    p = probe()
+    assert p.encoder_audio_rates.get("aac"), "aac declares sample rates"
+    assert "mjpeg" in p.encoder_intra_only
+    assert "mpeg4" in p.video_codec_formats
+
+
+def test_check_params_validates_fps_and_pix_fmt():
+    from services.engine_service import check_params
+
+    assert check_params() is None
+    assert check_params(video_codec="mpeg4", fps=30) is None
+    assert "pixel format" in (check_params(video_codec="mpeg4", pix_fmt="nope") or "")
+    assert (
+        "Sample rate" in (check_params(sample_rate=12345) or "")
+        or check_params(sample_rate=44100) is None
+    )
+
+
+def test_optional_knobs_validate_ranges():
+    from services.engine_service import _optional_encoder_knobs
+
+    assert _optional_encoder_knobs(gop_size=30, profile="high") == {"g": "30", "profile": "high"}
+    assert _optional_encoder_knobs(gop_size=-1, qmin=0, profile="  ") == {}
+    assert _optional_encoder_knobs(thread_count="x") == {}
+
+
+def test_exact_rate_preserves_ntsc():
+    from fractions import Fraction
+
+    from services.engine_service import _exact_rate
+
+    assert _exact_rate(Fraction(30000, 1001)) == Fraction(30000, 1001)
+    assert _exact_rate(30) == 30
+    assert _exact_rate(None) == 30
+    assert _exact_rate("nope") == 30
+
+
+def test_rotation_write_round_trips_without_reencode(synthetic_media, tmp_path):
+    from services.engine_service import EngineService
+
+    out = str(tmp_path / "rotated.mkv")
+    EngineService.remux(synthetic_media.path, out, rotation=90)
+    info = EngineService.probe(out)
+    assert info.video_stream is not None
+    assert info.video_stream.rotation == 90
+
+
+def test_filter_description_comes_from_wheel():
+    from services.engine_service import filter_description
+
+    assert "framerate" in filter_description("fps").lower()
+    assert filter_description("no_such_filter_xyz") == ""
+
+
+def test_typed_error_branches():
+    import av
+
+    from services.engine_service import friendly_job_error
+
+    assert "timed out" in friendly_job_error(av.error.TimeoutError("x", "t")).lower()
+    assert "damaged" in friendly_job_error(av.error.InvalidDataError("x", "bad")).lower()

@@ -20,7 +20,7 @@ from core.storage_paths import cache_bytes, format_bytes, get_temp_dir, unique_t
 from core.styles import card_container, section_header
 from core.theme import ACCENT_PURPLE, TEXT_MUTED_DARK, TEXT_MUTED_LIGHT, is_dark_mode
 from core.tokens import FONT_LG, FONT_MD, FONT_SM, FONT_XS, RADIUS_LG, SPACE_MD, SPACE_SM
-from services.engine_service import available_filters
+from services.engine_service import available_filters, filter_description
 from services.media_io import picker_files
 from state.controller_ctx import use_controller
 from state.service_ctx import use_services
@@ -470,7 +470,16 @@ def FiltersScreen() -> ft.Control:
             # Denoise (gated: hqdn3d > nlmeans > atadenoise)
             section_header(
                 "Denoise",
-                f"Backend: {_denoise_backend()}" if avail is not None else "Checking filters…",
+                (
+                    f"Backend: {_denoise_backend()}"
+                    + (
+                        f" — {filter_description(_denoise_backend())}"
+                        if filter_description(_denoise_backend())
+                        else ""
+                    )
+                    if avail is not None and _denoise_backend() != "unavailable"
+                    else ("Checking filters…" if avail is None else "No denoise filter in build")
+                ),
                 is_dark=is_dark,
             ),
             *(

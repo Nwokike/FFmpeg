@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 import flet as ft
@@ -12,8 +13,17 @@ from core.state import Job, use_app_state
 from core.storage_paths import format_bytes, get_temp_dir, unique_temp_name
 from core.styles import card_container, section_header
 from core.theme import PRIMARY, TEXT_MUTED_DARK, TEXT_MUTED_LIGHT, is_dark_mode
-from core.tokens import FONT_LG, FONT_MD, FONT_SM, RADIUS_LG, SPACE_MD, SPACE_SM
+from core.tokens import FONT_LG, FONT_MD, FONT_SM, FONT_XS, RADIUS_LG, SPACE_MD, SPACE_SM
 from state.controller_ctx import use_controller
+
+try:
+    from flet_audio import Audio
+
+    _HAS_AUDIO_PLAYER = True
+except ImportError:  # pragma: no cover — package is in the dev tree
+    _HAS_AUDIO_PLAYER = False
+
+logger = logging.getLogger(__name__)
 
 _LOUDNESS_CHOICES = (
     ("off", "Off (passthrough)", None),
@@ -83,6 +93,120 @@ def AudioScreen() -> ft.Control:
     bitrate_kbps = next((v for k, v in _BITRATE_CHOICES if k == bitrate_key), 192)
 
     rates = [48000, 44100, 32000]
+
+    def _toggle_audition(_=None) -> None:
+        player = audition_ref.current
+        if player is None:
+            return
+
+        async def _t():
+            try:
+                if audition_playing:
+                    await player.pause()
+                else:
+                    await player.play()
+            except Exception as exc:
+                logger.warning("Audition toggle failed: %s", exc)
+
+        try:
+            page.run_task(_t)
+        except Exception as exc:
+            logger.debug("Audition skipped (page gone): %s", exc)
+
+    def _set_audition_rate(value: float) -> None:
+        set_audition_rate(value)
+        player = audition_ref.current
+        if player is None:
+            return
+
+        async def _r():
+            try:
+                player.playback_rate = float(value)
+            except Exception as exc:
+                logger.warning("Audition rate failed: %s", exc)
+
+        try:
+            page.run_task(_r)
+        except Exception as exc:
+            logger.debug("Audition rate skipped: %s", exc)
+
+    def _set_audition_pan(value: float) -> None:
+        # -1 left-only … 0 center … 1 right-only. Auditioning one side tells
+        # you whether the mono downmix will lose anything important.
+        set_audition_pan_state(value)
+        player = audition_ref.current
+        if player is None:
+            return
+
+        async def _p():
+            try:
+                player.balance = float(value)
+            except Exception as exc:
+                logger.warning("Audition pan failed: %s", exc)
+
+        try:
+            page.run_task(_p)
+        except Exception as exc:
+            logger.debug("Audition pan skipped: %s", exc)
+
+    # Audition player: hear pan/tempo WITHOUT re-encoding. Mounted on the
+    # source file (service lifecycle like result: append on mount effect,
+    # release on cleanup). Player-side only — zero wheel risk.
+    audition_ref = ft.use_ref(None)
+    audition_ready, set_audition_ready = ft.use_state(False)
+    audition_playing, set_audition_playing = ft.use_state(False)
+    audition_rate, set_audition_rate = ft.use_state(1.0)
+    audition_pan, set_audition_pan_state = ft.use_state(0.0)
+
+    def _mount_audition():
+        if not _HAS_AUDIO_PLAYER or not media_path or audition_ref.current is not None:
+            return None
+        try:
+            player = Audio(
+                src=media_path,
+                on_state_change=lambda e: set_audition_playing(
+                    getattr(e, "state", None) is not None
+                    and str(getattr(e.state, "value", e.state)) == "playing"
+                ),
+                on_loaded=lambda _: set_audition_ready(True),
+                on_error=lambda e: logger.warning("Audition error: %s", getattr(e, "data", e)),
+            )
+            page.services.append(player)
+            audition_ref.current = player
+        except Exception as exc:
+            logger.warning("Audition player unavailable: %s", exc)
+        return None
+
+    def _release_audition() -> None:
+        player, audition_ref.current = audition_ref.current, None
+        set_audition_playing(False)
+        set_audition_ready(False)
+        if player is None:
+            return
+
+        async def _release():
+            try:
+                await player.release()
+            except Exception as exc:
+                logger.debug("Audition release failed: %s", exc)
+            finally:
+                try:
+                    if any(s is player for s in page.services):
+                        page.services.remove(player)
+                        page.update()
+                except Exception as exc:
+                    logger.debug("Audition removal skipped: %s", exc)
+
+        try:
+            page.run_task(_release)
+        except Exception as exc:
+            logger.debug("Audition teardown skipped: %s", exc)
+
+    ft.use_effect(
+        _mount_audition,
+        [media_path or ""],
+        cleanup=lambda: (_release_audition(),),
+    )
 
     def _start_audio_studio(_):
         if not media_path or busy or not audio_ok:
@@ -168,6 +292,96 @@ def AudioScreen() -> ft.Control:
                     )
                 ]
                 if media_path and not audio_ok
+                else []
+            ),
+            # Audition (preview pan/tempo without encoding).
+            section_header(
+                "Audition",
+                "Hear the source before you encode (no re-encode)",
+                is_dark=is_dark,
+            ),
+            *(
+                [
+                    card_container(
+                        content=ft.Column(
+                            controls=[
+                                ft.Row(
+                                    controls=[
+                                        ft.IconButton(
+                                            icon=ft.Icons.PLAY_ARROW_ROUNDED
+                                            if not audition_playing
+                                            else ft.Icons.PAUSE_ROUNDED,
+                                            icon_size=32,
+                                            tooltip="Preview source audio",
+                                            on_click=lambda _: _toggle_audition(),
+                                        ),
+                                        ft.Column(
+                                            controls=[
+                                                ft.Text(
+                                                    "Preview tempo",
+                                                    size=FONT_SM,
+                                                    color=muted,
+                                                ),
+                                                ft.Slider(
+                                                    value=float(audition_rate),
+                                                    min=0.5,
+                                                    max=2.0,
+                                                    divisions=15,
+                                                    on_change=lambda e: _set_audition_rate(
+                                                        round(float(e.control.value), 2)
+                                                    ),
+                                                ),
+                                            ],
+                                            expand=True,
+                                            spacing=2,
+                                        ),
+                                        ft.Text(
+                                            f"{audition_rate:.2f}x",
+                                            size=FONT_SM,
+                                            weight=ft.FontWeight.W_600,
+                                        ),
+                                    ],
+                                    spacing=SPACE_SM,
+                                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                                ),
+                                ft.Text(
+                                    (
+                                        "Pan one side to check what the mono downmix "
+                                        "keeps; tempo previews without touching "
+                                        "the encode below."
+                                        if audition_ready
+                                        else "Loading preview…"
+                                    ),
+                                    size=FONT_XS,
+                                    color=muted,
+                                ),
+                                ft.Row(
+                                    controls=[
+                                        ft.Text("Pan", size=FONT_SM, color=muted),
+                                        *[
+                                            ft.Chip(
+                                                label=ft.Text(label),
+                                                selected=audition_pan == value,
+                                                on_click=lambda _, v=value: _set_audition_pan(v),
+                                            )
+                                            for label, value in (
+                                                ("L", -1.0),
+                                                ("C", 0.0),
+                                                ("R", 1.0),
+                                            )
+                                        ],
+                                    ],
+                                    spacing=SPACE_SM,
+                                ),
+                            ],
+                            spacing=SPACE_SM,
+                        ),
+                        padding=SPACE_MD,
+                        border_radius=RADIUS_LG,
+                        is_dark=is_dark,
+                    )
+                ]
+                if media_path and audio_ok and _HAS_AUDIO_PLAYER
                 else []
             ),
             # Loudness Normalization Presets (Off = single-pass, no loudnorm

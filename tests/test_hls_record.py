@@ -416,3 +416,58 @@ def test_estimate_hls_segments_none_when_length_missing(monkeypatch):
     )
     assert len(segs) == 2
     assert total is None
+
+
+def test_segment_retry_succeeds_after_transient_failure():
+    """One ReadError must not abort the playlist (bounded retries)."""
+    import httpx
+
+    attempts: list[str] = []
+
+    class Resp:
+        def __init__(self, payload: bytes):
+            self._p = payload
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def raise_for_status(self):
+            pass
+
+        def iter_bytes(self, chunk_size=None):
+            yield self._p
+
+    class FakeClient:
+        def stream(self, method, url, timeout=None):
+            attempts.append(url)
+            if len([a for a in attempts if a == url]) == 1:
+                raise httpx.ReadError("transient", request=None)
+            return Resp(b"X" * (64 * 1024))
+
+    out = EngineService._hls_download_segment(
+        FakeClient(), "https://x.example.com/s.ts", 1, lambda: None
+    )
+    assert len(out) == 64 * 1024
+    assert len(attempts) == 2
+
+
+def test_segment_retry_gives_up_loud():
+    import httpx
+
+    class FakeClient:
+        def stream(self, method, url, timeout=None):
+            raise httpx.ConnectError("down", request=None)
+
+    import pytest as _pytest
+
+    with _pytest.raises(ValueError, match="after retries"):
+        EngineService._hls_download_segment(
+            FakeClient(), "https://x.example.com/s.ts", 1, lambda: None
+        )
+
+
+def test_hls_timeout_is_four_phase():
+    assert EngineService._HLS_TIMEOUT == (10.0, 30.0, 30.0, 10.0)

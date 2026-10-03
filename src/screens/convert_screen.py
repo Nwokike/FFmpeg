@@ -57,8 +57,19 @@ _AUDIO_CODEC_CHOICES = (
     ("mp3", "MP3"),
     ("flac", "FLAC"),
     ("opus", "Opus"),
+    ("vorbis", "Vorbis"),
     ("wav", "WAV"),
 )
+
+# Display codec → probe encoder names it may resolve to (engine aliases).
+_AUDIO_CHOICE_ENCODERS: dict[str, tuple[str, ...]] = {
+    "aac": ("aac",),
+    "mp3": ("libmp3lame", "mp3"),
+    "flac": ("flac",),
+    "opus": ("libopus", "opus"),
+    "vorbis": ("vorbis",),
+    "wav": ("pcm_s16le", "pcm_s24le"),
+}
 
 
 @ft.component
@@ -84,9 +95,12 @@ def ConvertScreen() -> ft.Control:
     # add_stream() and crash on Android's LGPL build with UnknownCodecError.
     # Alias-aware: an h264-only wheel (no libx264 entry) still offers H.264 —
     # the engine resolves libx264↔h264 itself.
-    available_video = (
-        list(app_state.probe_info.video_encoder_picks or []) if app_state.probe_info else []
-    )
+    probe_info = app_state.probe_info
+    available_video = list(probe_info.video_encoder_picks or []) if probe_info else []
+    # Wheel-measured audio encoders (the video list above is curated∩verified;
+    # audio comes straight from the probe — the old static tuple never met the
+    # wheel and let AAC-in-.mp3-class mismatches through to mux time).
+    available_audio = list(probe_info.audio_encoder_picks or []) if probe_info else []
 
     def _video_visible(key: str) -> bool:
         if key in available_video:
@@ -127,6 +141,29 @@ def ConvertScreen() -> ft.Control:
     # default (libx264) is meaningless on a wheel that only ships LGPL codecs.
     # The clamp is DERIVED (not written back): the UI always shows the
     # effective value, so stale state can never silently resurrect.
+    # Wheel-measured audio shortlist, shared by every kind branch below.
+    visible_audio = [
+        key
+        for key, encs in _AUDIO_CHOICE_ENCODERS.items()
+        if any(e in available_audio for e in encs)
+    ]
+
+    def _pick_audio() -> str | None:
+        # Wheel default for the container wins (opus-for-webm-class cases),
+        # then the user's pick if the wheel encodes it, else first verified.
+        wheel_default = (
+            (probe_info.muxer_default_audio.get(chosen_container, "") or "") if probe_info else ""
+        )
+        default_choice = next(
+            (key for key, encs in _AUDIO_CHOICE_ENCODERS.items() if wheel_default in encs),
+            "aac",
+        )
+        if a_codec in visible_audio:
+            return a_codec
+        if default_choice in visible_audio:
+            return default_choice
+        return visible_audio[0] if visible_audio else a_codec
+
     if media_kind == "image":
         still_choices = [c for c in ("png", "mjpeg", "libwebp", "gif") if c in available_video]
         chosen_video = (
@@ -137,14 +174,14 @@ def ConvertScreen() -> ft.Control:
         chosen_audio = None
     elif media_kind == "audio":
         chosen_video = None
-        chosen_audio = a_codec
+        chosen_audio = _pick_audio()
     else:
         chosen_video = (
             v_codec
             if _video_visible(v_codec)
             else (visible_video[0][0] if visible_video else v_codec)
         )
-        chosen_audio = a_codec
+        chosen_audio = _pick_audio()
 
     # Probe state: None until the boot capability probe lands.  Starting a
     # job before that means guessing the encoder — the phone log showed
@@ -239,7 +276,11 @@ def ConvertScreen() -> ft.Control:
         for key in allowed_containers
     ]
 
-    audio_options = [ft.DropdownOption(key=key, text=label) for key, label in _AUDIO_CODEC_CHOICES]
+    audio_options = [
+        ft.DropdownOption(key=key, text=label)
+        for key, label in _AUDIO_CODEC_CHOICES
+        if key in visible_audio
+    ]
 
     return ft.ListView(
         controls=[

@@ -48,12 +48,60 @@ logger = logging.getLogger("EngineService")
 # damaged SD card cannot freeze the serial worker indefinitely.
 _INPUT_TIMEOUT = (5.0, 15.0)
 
+# Corrupt packets are dropped at demux (same outcome as the _decode_packet
+# InvalidDataError skip, less noise). Harmless when ignored by the build.
+_INPUT_OPTIONS = {"fflags": "+discardcorrupt"}
+
 # PyAV defaults to discarding native FFmpeg diagnostics. Keep warnings/errors
 # flowing into the app's logging bridge so a failed encode explains itself.
 try:
     av.logging.set_level(av.logging.WARNING)
 except Exception:  # pragma: no cover - depends on the linked FFmpeg build
     logger.debug("PyAV native logging could not be configured", exc_info=True)
+
+
+def _native_log_scope():
+    """Capture native FFmpeg diagnostics for one job body.
+
+    On exception, the last captured native line is attached as ``_native_log``
+    (read by :func:`friendly_job_error`), so a failed encode carries the
+    muxer/decoder's own words instead of only the Python traceback. Yields
+    nothing; use as ``with _native_log_scope():`` around a job body.
+    Thread-local by default, so concurrent jobs don't mix lines.
+    """
+    import contextlib as _contextlib
+
+    @_contextlib.contextmanager
+    def _scope():
+        try:
+            with av.logging.Capture() as logs:
+                yield
+        except BaseException as exc:
+            if getattr(exc, "_native_log", "") == "":
+                with contextlib.suppress(Exception):
+                    lines = [str(getattr(entry, "message", entry)).strip() for entry in logs]
+                    lines = [ln for ln in lines if ln]
+                    if lines:
+                        exc._native_log = lines[-1][:300]
+            raise
+
+    return _scope()
+
+
+def _with_native_logs(fn):
+    """Decorator: run a job body inside :func:`_native_log_scope`.
+
+    Zero indentation churn vs wrapping every body by hand; the scope
+    attaches the last native line to any escaping exception.
+    """
+    import functools
+
+    @functools.wraps(fn)
+    def _wrapped(*args, **kwargs):
+        with _native_log_scope():
+            return fn(*args, **kwargs)
+
+    return _wrapped
 
 
 def _av_rational(value) -> av.AVRational:
@@ -306,6 +354,63 @@ def check_pair(container: str, video_codec: str | None, audio_codec: str | None)
     return None
 
 
+def check_params(
+    video_codec: str | None = None,
+    fps: float | int | None = None,
+    sample_rate: int | None = None,
+    pix_fmt: str | None = None,
+) -> str | None:
+    """None when the encode params fit the wheel; else the refusal reason.
+
+    Validates fps against the encoder's declared frame rates (when declared),
+    sample_rate against audio rates, and pix_fmt against video formats — so a
+    120fps request to a 30fps-max encoder refuses before Start, not mid-job.
+    Undeclared capabilities fail OPEN (None): absence of data is not proof of
+    absence of support.
+    """
+    from core.engine_probe import probe as _probe
+
+    try:
+        caps = _probe()
+    except Exception:
+        return None
+    if video_codec and fps:
+        try:
+            want = float(fps)
+        except (TypeError, ValueError):
+            return f"Frame rate {fps!r} is not a number"
+        for cand in (video_codec,):
+            rates = caps.encoder_frame_rates.get(cand, [])
+            nums: list[float] = []
+            for r in rates:
+                try:
+                    num, _, den = str(r).partition("/")
+                    nums.append(float(num) / float(den or 1))
+                except (TypeError, ValueError, ZeroDivisionError):
+                    continue
+            if nums and max(nums) > 0 and want > max(nums) * 1.01:
+                return (
+                    f"{want:g} fps exceeds what {video_codec} declares "
+                    f"(max {max(nums):g} fps on this build)"
+                )
+    if sample_rate:
+        try:
+            want_rate = int(sample_rate)
+        except (TypeError, ValueError):
+            return f"Sample rate {sample_rate!r} is not a number"
+        known_rates: set[int] = set()
+        for rates in caps.encoder_audio_rates.values():
+            known_rates.update(rates)
+        if known_rates and want_rate not in known_rates:
+            nearest = min(known_rates, key=lambda r: abs(r - want_rate))
+            return f"{want_rate} Hz is unusual — nearest declared rate is {nearest} Hz"
+    if video_codec and pix_fmt:
+        forms = caps.video_codec_formats.get(video_codec, [])
+        if forms and pix_fmt not in forms:
+            return f"{pix_fmt} is not a declared pixel format for {video_codec}"
+    return None
+
+
 def available_video_encoders() -> list[str]:
     """Verified mode='w' video encoders this build ships, preference order."""
     return list(probe().video_encoder_picks)
@@ -390,6 +495,29 @@ def friendly_job_error(exc: BaseException) -> str:
     if isinstance(exc, OSError) and getattr(exc, "errno", None) in (28, 122):
         return "Not enough storage space to finish this job. Free some space and retry."
 
+    if isinstance(exc, av.error.TimeoutError):
+        return "Connection timed out — check the URL and your network."
+    if isinstance(exc, av.error.InvalidDataError):
+        return f"This file looks damaged or truncated: {exc}"
+    http_errors = tuple(
+        error_type
+        for name in (
+            "HTTPError",
+            "HTTPClientError",
+            "HTTPBadRequest",
+            "Unauthorized",
+            "Forbidden",
+            "NotFound",
+            "ServerError",
+        )
+        if isinstance(error_type := getattr(av.error, name, None), type)
+    )
+    if http_errors and isinstance(exc, http_errors):
+        return f"The server refused the stream: {exc}"
+
+    native = getattr(exc, "_native_log", "")
+    if native:
+        return f"{exc} — native log: {native}"
     return str(exc)
 
 
@@ -418,6 +546,24 @@ def _pick_video_encoder(preferred: str = "libx264", fallback: str = "h264") -> s
     return _resolve_video_codec(fallback if not _codec_supports_mode(preferred, "w") else preferred)
 
 
+def _exact_rate(value, default: int = 30):
+    """Frame rate preserving fractional NTSC rates (30000/1001, not 29).
+
+    ``int(average_rate)`` truncated 29.97→29, declaring the wrong encoder
+    timeline. ``add_stream(rate=Fraction)`` keeps average_rate exact; ints
+    pass through unchanged. Clamped to 1..120 downstream as before.
+    """
+    if value is None:
+        return default
+    try:
+        rate = Fraction(value).limit_denominator(1001)
+    except (TypeError, ValueError, ZeroDivisionError):
+        return default
+    if rate <= 0:
+        return default
+    return rate
+
+
 def _supported_encoder_options(codec_name: str, requested: dict[str, str]) -> dict[str, str]:
     """Keep only options advertised by this wheel's encoder context."""
     try:
@@ -430,6 +576,47 @@ def _supported_encoder_options(codec_name: str, requested: dict[str, str]) -> di
     if dropped:
         logger.info("Dropping unsupported %s encoder options: %s", codec_name, ", ".join(dropped))
     return {key: value for key, value in requested.items() if key in valid}
+
+
+def _optional_encoder_knobs(
+    *,
+    gop_size: int | None = None,
+    max_b_frames: int | None = None,
+    qmin: int | None = None,
+    qmax: int | None = None,
+    thread_count: int | None = None,
+    profile: str | None = None,
+    level: str | None = None,
+) -> dict[str, str]:
+    """Translate optional knob params to encoder option dict (unset = absent).
+
+    Values are validated to sane ranges here (positive ints, non-empty
+    strings); unknown-to-the-wheel keys still drop later in
+    :func:`_supported_encoder_options`, so a GPL-only key can never break an
+    LGPL encode — it vanishes with an info line.
+    """
+    knobs: dict[str, str] = {}
+    for key, value in (
+        ("g", gop_size),
+        ("bf", max_b_frames),
+        ("qmin", qmin),
+        ("qmax", qmax),
+        ("threads", thread_count),
+    ):
+        if value is None:
+            continue
+        try:
+            number = int(value)
+        except (TypeError, ValueError):
+            continue
+        if number > 0:
+            knobs[key] = str(number)
+    for key, value in (("profile", profile), ("level", level)):
+        if value:
+            text = str(value).strip()
+            if text:
+                knobs[key] = text
+    return knobs
 
 
 class _MuxClamp:
@@ -483,16 +670,29 @@ def _unknown_codec_error_type() -> type | None:
         return getattr(av.codec, "UnknownCodecError", None)
 
 
-# Stream disposition flags surfaced in the dossier (av.stream.Disposition names)
+# Stream disposition flags surfaced in the dossier (av.stream.Disposition names).
+# Measured against the installed wheel (30 members incl. IntFlag helpers) —
+# only real track flags are listed; helpers like bit_count/numerator are not.
 _DISPOSITION_FLAG_NAMES = (
     "default",
+    "dub",
     "original",
     "comment",
+    "lyrics",
+    "karaoke",
     "forced",
     "hearing_impaired",
     "visual_impaired",
+    "clean_effects",
     "attached_pic",
+    "timed_thumbnails",
+    "non_diegetic",
     "captions",
+    "descriptions",
+    "metadata",
+    "dependent",
+    "still_image",
+    "multilayer",
 )
 
 
@@ -876,6 +1076,25 @@ def available_filters() -> set[str]:
     return _FILTERS_AVAIL
 
 
+_FILTER_DESCRIPTIONS: dict[str, str] = {}
+
+
+def filter_description(name: str) -> str:
+    """One-line purpose of a filter from the wheel itself ("" when absent).
+
+    Powers in-UI help subtitles: the text comes from the installed build, so
+    it can never describe a filter this wheel doesn't ship.
+    """
+    if name in _FILTER_DESCRIPTIONS:
+        return _FILTER_DESCRIPTIONS[name]
+    try:
+        text = str(av.filter.Filter(name).description or "").strip().splitlines()[0]
+    except Exception:
+        text = ""
+    _FILTER_DESCRIPTIONS[name] = text
+    return text
+
+
 def _crop_dims(width: int, height: int, aspect: str) -> tuple[int, int]:
     """Center-crop dimensions for an aspect chip ("16:9", "1:1", "4:5").
 
@@ -1080,6 +1299,7 @@ class EngineService:
         )
 
     @staticmethod
+    @_with_native_logs
     def convert(
         input_path: str,
         output_path: str,
@@ -1099,10 +1319,23 @@ class EngineService:
         sharpen: int | None = None,
         watermark: dict | None = None,
         hardware_accel: bool = False,
+        gop_size: int | None = None,
+        max_b_frames: int | None = None,
+        qmin: int | None = None,
+        qmax: int | None = None,
+        thread_count: int | None = None,
+        profile: str | None = None,
+        level: str | None = None,
         on_progress: Callable[[float, str], None] | None = None,
         cancel_event: Event | None = None,
     ) -> str:
-        """Transcode video/audio with quality, scaling, filters, and transforms."""
+        """Transcode video/audio with quality, scaling, filters, and transforms.
+
+        ``gop_size/max_b_frames/qmin/qmax/thread_count/profile/level`` are
+        optional encoder knobs: each flows through
+        :func:`_supported_encoder_options`, so keys the wheel's encoder lacks
+        drop with an info line instead of failing the job.
+        """
         hwaccel = _hardware_decode(hardware_accel)
         inp = av.open(input_path, "r", timeout=_INPUT_TIMEOUT, hwaccel=hwaccel)
         try:
@@ -1138,8 +1371,8 @@ class EngineService:
 
             out_video = None
             if in_video:
-                # Video stream setup
-                target_fps = fps or int(in_video.average_rate or 30)
+                # Video stream setup (exact rate: 29.97 stays 30000/1001, not 29)
+                target_fps = fps if fps else _exact_rate(in_video.average_rate)
                 out_fps = max(1, min(target_fps, 60))
 
                 # Resolve against the wheel's verified encoder set so a mobile
@@ -1185,7 +1418,17 @@ class EngineService:
                 out_video.time_base = _FINE_VIDEO_TB if need_vfilter else Fraction(1, out_fps)
                 out_video.options = _supported_encoder_options(
                     chosen_vcodec,
-                    {"crf": str(crf), "preset": preset} | ({"bf": "0"} if need_vfilter else {}),
+                    {"crf": str(crf), "preset": preset}
+                    | ({"bf": "0"} if need_vfilter else {})
+                    | _optional_encoder_knobs(
+                        gop_size=gop_size,
+                        max_b_frames=max_b_frames,
+                        qmin=qmin,
+                        qmax=qmax,
+                        thread_count=thread_count,
+                        profile=profile,
+                        level=level,
+                    ),
                 )
 
             out_audio = None
@@ -1380,6 +1623,7 @@ class EngineService:
         return output_path
 
     @staticmethod
+    @_with_native_logs
     def compress_to_target(
         input_path: str,
         output_path: str,
@@ -1410,7 +1654,7 @@ class EngineService:
                     scale_h = int(1280 * (v_stream.height / v_stream.width))
 
         # Perform 1-pass constrained transcode with target bitrate
-        inp = av.open(input_path, "r", timeout=_INPUT_TIMEOUT)
+        inp = av.open(input_path, "r", timeout=_INPUT_TIMEOUT, options=_INPUT_OPTIONS)
         try:
             out = av.open(output_path, "w")
         except Exception:
@@ -1593,7 +1837,7 @@ class EngineService:
         on_progress: Callable[[float, str], None] | None = None,
         cancel_event: Event | None = None,
     ) -> str:
-        inp = av.open(input_path, "r", timeout=_INPUT_TIMEOUT)
+        inp = av.open(input_path, "r", timeout=_INPUT_TIMEOUT, options=_INPUT_OPTIONS)
         try:
             out = av.open(output_path, "w")
         except Exception:
@@ -1694,6 +1938,7 @@ class EngineService:
         return output_path
 
     @staticmethod
+    @_with_native_logs
     def _cut_reencode(
         input_path: str,
         output_path: str,
@@ -1702,7 +1947,7 @@ class EngineService:
         on_progress: Callable[[float, str], None] | None = None,
         cancel_event: Event | None = None,
     ) -> str:
-        inp = av.open(input_path, "r", timeout=_INPUT_TIMEOUT)
+        inp = av.open(input_path, "r", timeout=_INPUT_TIMEOUT, options=_INPUT_OPTIONS)
         try:
             out = av.open(output_path, "w")
         except Exception:
@@ -1826,7 +2071,7 @@ class EngineService:
         is given (it NULLs the Python wrapper's handle before the C pass), so this
         container is intentionally never closed — closing would double-free.
         """
-        stats_container = av.open(input_path, "r", timeout=_INPUT_TIMEOUT)
+        stats_container = av.open(input_path, "r", timeout=_INPUT_TIMEOUT, options=_INPUT_OPTIONS)
         audio_streams = stats_container.streams.audio
         if not audio_streams:
             stats_container.close()
@@ -1841,6 +2086,7 @@ class EngineService:
             return {}
 
     @staticmethod
+    @_with_native_logs
     def extract_audio(
         input_path: str,
         output_path: str,
@@ -1882,7 +2128,7 @@ class EngineService:
             else None
         )
 
-        inp = av.open(input_path, "r", timeout=_INPUT_TIMEOUT)
+        inp = av.open(input_path, "r", timeout=_INPUT_TIMEOUT, options=_INPUT_OPTIONS)
         try:
             out = av.open(output_path, "w")
         except Exception:
@@ -2078,7 +2324,7 @@ class EngineService:
         total = len(timestamps)
         idx = 0
 
-        inp = av.open(input_path, "r", timeout=_INPUT_TIMEOUT)
+        inp = av.open(input_path, "r", timeout=_INPUT_TIMEOUT, options=_INPUT_OPTIONS)
         try:
             v_stream = inp.streams.best("video")
             if not v_stream:
@@ -2126,6 +2372,7 @@ class EngineService:
         return out_paths
 
     @staticmethod
+    @_with_native_logs
     def create_gif(
         input_path: str,
         output_path: str,
@@ -2142,7 +2389,7 @@ class EngineService:
         so every frame is dithered against the segment-wide palette; falls back to
         a direct rgb8 encode if the palette filters are unavailable on this build.
         """
-        inp = av.open(input_path, "r", timeout=_INPUT_TIMEOUT)
+        inp = av.open(input_path, "r", timeout=_INPUT_TIMEOUT, options=_INPUT_OPTIONS)
         try:
             out = av.open(output_path, "w", format="gif")
         except Exception:
@@ -2283,7 +2530,7 @@ class EngineService:
         if writer is None:
             raise ValueError(f"Unsupported subtitle format: {format_name}")
 
-        inp = av.open(input_path, "r", timeout=_INPUT_TIMEOUT)
+        inp = av.open(input_path, "r", timeout=_INPUT_TIMEOUT, options=_INPUT_OPTIONS)
         try:
             subs = inp.streams.subtitles
             if not subs:
@@ -2383,7 +2630,7 @@ class EngineService:
             cache_dir = None
         order = sorted(range(len(times)), key=lambda i: times[i])
         results: dict[int, bytes] = {}
-        inp = av.open(input_path, "r", timeout=_INPUT_TIMEOUT)
+        inp = av.open(input_path, "r", timeout=_INPUT_TIMEOUT, options=_INPUT_OPTIONS)
         try:
             v = inp.streams.best("video")
             if not v:
@@ -2427,7 +2674,7 @@ class EngineService:
         container has no usable index (MPEG-TS etc.) — UI degrades gracefully.
         """
         try:
-            with av.open(input_path, "r", timeout=_INPUT_TIMEOUT) as inp:
+            with av.open(input_path, "r", timeout=_INPUT_TIMEOUT, options=_INPUT_OPTIONS) as inp:
                 v = inp.streams.best("video")
                 if v is None:
                     return []
@@ -2450,6 +2697,8 @@ class EngineService:
         input_path: str,
         output_path: str,
         drop_indices: list[int] | None = None,
+        rotation: int | None = None,
+        chapters: list[dict] | None = None,
         on_progress: Callable[[float, str], None] | None = None,
         cancel_event: Event | None = None,
     ) -> str:
@@ -2459,9 +2708,16 @@ class EngineService:
         audio track). ``add_stream_from_template`` already carries codecpar,
         metadata (incl. language) and dispositions across — chapters are
         copied explicitly. Cancel follows the M1 pattern: remove + InterruptedError.
+
+        ``rotation`` (90/180/270) rewrites the video display matrix WITHOUT
+        re-encoding — orientation fix for phone footage with no encode wait.
+        ``chapters``
+        (list of {title, start_s, end_s}) replaces the chapter set; None keeps
+        the source chapters. Chapter writes are matroska/mov-gated by the
+        caller (other muxers ignore them).
         """
         drop = set(drop_indices or [])
-        inp = av.open(input_path, "r", timeout=_INPUT_TIMEOUT)
+        inp = av.open(input_path, "r", timeout=_INPUT_TIMEOUT, options=_INPUT_OPTIONS)
         try:
             out = av.open(output_path, "w", format="matroska")
         except Exception:
@@ -2505,10 +2761,36 @@ class EngineService:
             if not stream_map and not kept_attachments:
                 raise ValueError("Nothing to keep — every stream was excluded")
 
-            try:
-                out.set_chapters(inp.chapters())
-            except Exception as exc:
-                logger.warning("Chapter copy skipped: %s", exc)
+            if rotation in (90, 180, 270):
+                # Display-matrix rotation: players honor it, pixels untouched.
+                for s, out_s in stream_map.items():
+                    if s.type == "video":
+                        try:
+                            out_s.set_display_rotation(rotation)
+                        except Exception as exc:
+                            logger.warning("Rotation write skipped: %s", exc)
+
+            if chapters is not None:
+                try:
+                    out.set_chapters(
+                        [
+                            {
+                                "id": i,
+                                "start": int(c.get("start_s", 0) * 1000),
+                                "end": int(c.get("end_s", 0) * 1000),
+                                "time_base": Fraction(1, 1000),
+                                "metadata": {"title": str(c.get("title") or f"Chapter {i + 1}")},
+                            }
+                            for i, c in enumerate(chapters)
+                        ]
+                    )
+                except Exception as exc:
+                    logger.warning("Chapter write skipped: %s", exc)
+            else:
+                try:
+                    out.set_chapters(inp.chapters())
+                except Exception as exc:
+                    logger.warning("Chapter copy skipped: %s", exc)
 
             total_s = (float(inp.duration or 0) / float(av.time_base)) if inp.duration else 0.0
             last_report = 0.0
@@ -2766,6 +3048,7 @@ class EngineService:
         return output_path
 
     @staticmethod
+    @_with_native_logs
     def _concat_reencode(
         paths: list[str],
         infos: list[MediaInfo],
@@ -3353,18 +3636,54 @@ class EngineService:
             return [variants[0][1]], True, key_error
         return segs, False, key_error
 
+    # Network timeouts: 4-phase like the update service (connect/read/write/
+    # pool) instead of the old bare (connect, read) tuple that left write/pool
+    # unbounded. Import httpx lazily is unnecessary — module already imports it.
+    _HLS_TIMEOUT = (10.0, 30.0, 30.0, 10.0)
+
+    # Per-segment retry: one transient ReadError must not abort a playlist.
+    _HLS_SEGMENT_RETRIES = 3
+
     @staticmethod
     def _hls_fetch_text(client, url: str) -> str:
         """GET a playlist URL, raising a loud error on failure."""
-        resp = client.get(url, timeout=(10.0, 30.0))
+        resp = client.get(url, timeout=EngineService._HLS_TIMEOUT)
         resp.raise_for_status()
         return resp.text
 
     @staticmethod
     def _hls_download_segment(client, seg: str, chunk_size: int, on_cancel) -> bytes:
-        """Download one media segment, rejecting HTML/text error pages."""
+        """Download one media segment, rejecting HTML/text error pages.
+
+        Transient network errors retry with backoff (bounded); error pages
+        and HTTP statuses fail immediately — retrying a 403 is pointless.
+        """
+        import time as _time
+
+        last_err: Exception | None = None
+        for attempt in range(EngineService._HLS_SEGMENT_RETRIES):
+            try:
+                return EngineService._hls_download_segment_once(client, seg, chunk_size, on_cancel)
+            except ValueError:
+                raise
+            except (httpx.TimeoutException, httpx.NetworkError) as exc:
+                last_err = exc
+                logger.warning(
+                    "Segment retry %d/%d for %s: %s",
+                    attempt + 1,
+                    EngineService._HLS_SEGMENT_RETRIES,
+                    seg[:80],
+                    exc,
+                )
+                on_cancel()
+                _time.sleep(min(2.0**attempt, 4.0))
+        raise ValueError(f"Segment failed after retries ({seg[:80]}…): {last_err}")
+
+    @staticmethod
+    def _hls_download_segment_once(client, seg: str, chunk_size: int, on_cancel) -> bytes:
+        """Single attempt of a segment download (see _hls_download_segment)."""
         parts: list[bytes] = []
-        with client.stream("GET", seg, timeout=(10.0, 30.0)) as resp:
+        with client.stream("GET", seg, timeout=EngineService._HLS_TIMEOUT) as resp:
             resp.raise_for_status()
             first = True
             for chunk in resp.iter_bytes(chunk_size=chunk_size):
@@ -3436,7 +3755,7 @@ class EngineService:
         total: int | None = 0
         for seg in segments:
             try:
-                head = client.head(seg, timeout=(10.0, 30.0))
+                head = client.head(seg, timeout=EngineService._HLS_TIMEOUT)
                 head.raise_for_status()
                 length = head.headers.get("content-length")
                 if length is None:
@@ -3533,7 +3852,7 @@ class EngineService:
 
         try:
             with httpx.Client(follow_redirects=True) as client:
-                with client.stream("GET", url, timeout=(10.0, 30.0)) as first:
+                with client.stream("GET", url, timeout=EngineService._HLS_TIMEOUT) as first:
                     first.raise_for_status()
                     head = next(first.iter_bytes(chunk_size=512), b"")
                     is_hls = ".m3u8" in url.lower() or head.lstrip().startswith(b"#EXTM3U")
@@ -3649,6 +3968,12 @@ class EngineService:
             raise ValueError(
                 f"The server refused the stream: HTTP {exc.response.status_code}"
             ) from exc
+        except httpx.NetworkError as exc:
+            raise ValueError(f"Network failed mid-download — retry: {exc}") from exc
+        except httpx.TooManyRedirects as exc:
+            raise ValueError(f"Too many redirects — check the URL: {exc}") from exc
+        except httpx.DecodingError as exc:
+            raise ValueError(f"Response couldn't be decoded: {exc}") from exc
         except httpx.HTTPError as exc:
             raise ValueError(f"Couldn't download that stream: {exc}") from exc
         except av.error.FFmpegError as exc:

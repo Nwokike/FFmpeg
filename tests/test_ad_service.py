@@ -143,3 +143,51 @@ def test_gather_consent_off_mobile_publishes_closed_gate(monkeypatch):
     assert service._can_request_ads is False
     assert state.ads_ready is False
     state.ads_ready = False
+
+
+def test_banner_carries_request_and_lifecycle_callbacks(monkeypatch):
+    seen = {}
+
+    class Banner:
+        def __init__(self, **kwargs):
+            seen.update(kwargs)
+
+    monkeypatch.setattr(ad_module, "_HAS_ADS", True)
+    monkeypatch.setattr(ad_module.fta, "BannerAd", Banner)
+    page = _Page()
+    service = AdService(page)
+    service._can_request_ads = True
+
+    ctrl = service.get_banner_control("slot-x")
+
+    assert seen["unit_id"] == service.banner_unit_id
+    assert seen["request"].non_personalized_ads is False
+    assert "video" in seen["request"].keywords
+    for cb in ("on_load", "on_error", "on_open", "on_impression", "on_click", "on_paid"):
+        assert callable(seen[cb]), f"banner missing {cb}"
+    assert ctrl is not None
+
+
+def test_interstitial_carries_request_and_lifecycle_callbacks(monkeypatch):
+    seen = {}
+
+    class Interstitial:
+        def __init__(self, **kwargs):
+            seen.update(kwargs)
+            kwargs["on_load"](None)
+
+    monkeypatch.setattr(ad_module, "_HAS_ADS", True)
+    monkeypatch.setattr(ad_module.fta, "InterstitialAd", Interstitial)
+    page = _Page()
+    service = AdService(page)
+    service._can_request_ads = True
+    monkeypatch.setattr(state, "is_online", True)
+
+    import asyncio as _asyncio
+
+    _asyncio.run(service.preload_interstitial())
+
+    assert seen["request"].non_personalized_ads is False
+    for cb in ("on_open", "on_impression", "on_click"):
+        assert callable(seen[cb]), f"interstitial missing {cb}"
+    assert service._interstitial_ready is True

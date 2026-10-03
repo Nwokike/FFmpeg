@@ -145,6 +145,18 @@ def SettingsScreen() -> ft.Control:
             return
         page.run_task(services.url_launcher.launch_url, url)
 
+    async def _open_privacy_options() -> None:
+        # EEA/UK re-consent without reinstalling. No-ops off-mobile or when
+        # the region doesn't require it (service guards internally).
+        if services.ads is None:
+            show_snack(page, "Ads service unavailable on this platform", bgcolor=ERROR)
+            return
+        try:
+            await services.ads.show_privacy_options()
+        except Exception as exc:
+            logger.warning("Privacy options failed: %s", exc)
+            show_snack(page, "Privacy choices unavailable right now", bgcolor=ERROR)
+
     def _open_activity_terminal(_):
         logs = MemoryLogHandler.get_logs(limit=100)
         log_text = "\n".join(logs) if logs != ["No logs recorded yet."] else "No logs yet."
@@ -441,8 +453,8 @@ def SettingsScreen() -> ft.Control:
                 border_radius=RADIUS_MD,
                 is_dark=is_dark,
             ),
-            # UMP consent appears at startup only when the regulated region
-            # requires it — not a settings row.
+            # UMP consent appears at startup when the regulated region requires
+            # it — AND here, so EEA users can re-consent without reinstalling.
             # Diagnostics & Engine
             section_header("Diagnostics", "Engine and runtime logs", is_dark=is_dark),
             card_container(
@@ -455,6 +467,16 @@ def SettingsScreen() -> ft.Control:
                                 "View live in-memory execution logs and errors", color=muted
                             ),
                             on_click=_open_activity_terminal,
+                        ),
+                        ft.Divider(height=1),
+                        ft.ListTile(
+                            leading=ft.Icon(ft.Icons.PRIVACY_TIP_OUTLINED, color=ACCENT_BLUE),
+                            title=ft.Text("Ad Privacy Choices", weight=ft.FontWeight.W_600),
+                            subtitle=ft.Text(
+                                "Review or withdraw ad consent (EEA/UK)",
+                                color=muted,
+                            ),
+                            on_click=lambda _: page.run_task(_open_privacy_options),
                         ),
                         ft.Divider(height=1),
                         ft.ListTile(
