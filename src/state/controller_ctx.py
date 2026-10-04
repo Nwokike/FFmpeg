@@ -36,7 +36,9 @@ class ControllerMethods:
     go_home: Callable[[], None] = lambda: None
     back: Callable[[], None] = lambda: None
     pick_media_for: FireAndForget = lambda target: None
-    start_job: Callable[[Job], None] = lambda job: None
+    # return_to keeps the caller on screen (live Streams watches while the
+    # record job runs); everything else lands on the dashboard.
+    start_job: Callable[[Job], None] = lambda job, return_to=None: None
     cancel_job: Callable[[str], None] = lambda job_id: None
     # Per-job pause (queue holds the id at head / engine hook holds inside).
     toggle_pause_job: Callable[[str], None] = lambda job_id: None

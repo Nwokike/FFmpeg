@@ -18,10 +18,11 @@ from pathlib import Path
 import flet as ft
 
 from components.empty_state import empty_state_view
+from core.constants import kind_allowed, kind_refusal
 from core.notify import ERROR, SUCCESS, show_snack
 from core.permissions import next_permission_action  # re-exported: tests import it from here
 from core.state import use_app_state
-from core.storage_paths import format_bytes, get_temp_dir
+from core.storage_paths import format_bytes, get_temp_dir, unique_temp_name
 from core.styles import card_container, section_header
 from core.theme import ACCENT_RED, PRIMARY, TEXT_MUTED_DARK, TEXT_MUTED_LIGHT, is_dark_mode
 from core.tokens import (
@@ -561,6 +562,13 @@ def CaptureScreen() -> ft.Control:
 
     # ── Capture finalize (shared by photo/video/mic) ────────────────────────
 
+    def _kind_gate(target: str, kind: str) -> bool:
+        """A take never enters a tool that cannot process its kind."""
+        if kind_allowed(target, kind):
+            return True
+        show_snack(page, kind_refusal(target, kind), bgcolor=ERROR)
+        return False
+
     async def _finalize_capture(path: str) -> None:
         """Probe the take, stage it as current media, show the after-capture card."""
         from services.engine_service import EngineService
@@ -578,11 +586,14 @@ def CaptureScreen() -> ft.Control:
         set_captured_path(path)
         set_captured_info(info)
         # If a tool sent us here, return the take to that tool rather than
-        # dead-ending on the after-capture card.
+        # dead-ending on the after-capture card — but only if the tool can
+        # process this kind; a refused take stays on the card for a valid tool.
         target = app_state.pending_media_target
         if target:
             app_state.pending_media_target = None
             app_state.pending_capture_mode = None
+            if not _kind_gate(target, info.kind):
+                return
             show_snack(page, "Capture loaded", bgcolor=SUCCESS)
             ctrl.navigate(target)
             return
@@ -664,7 +675,9 @@ def CaptureScreen() -> ft.Control:
         set_busy(True)
         try:
             data = await cam.take_picture()
-            out = get_temp_dir() / f"photo_{int(time.time())}.jpg"
+            # Second-resolution timestamps collided on burst taps (same path
+            # overwrote the previous shot) — unique names per take.
+            out = get_temp_dir() / unique_temp_name("photo", ".jpg")
             out.write_bytes(data)
             await _finalize_capture(str(out))
         except Exception as exc:
@@ -691,7 +704,7 @@ def CaptureScreen() -> ft.Control:
             ext = ftc.detect_video_extension(data) if _HAS_CAMERA else "mp4"
             if ext == "bin":
                 ext = "mp4"  # container sniff failed — probe validates below
-            out = get_temp_dir() / f"video_{int(time.time())}.{ext}"
+            out = get_temp_dir() / unique_temp_name("video", f".{ext}")
             out.write_bytes(data)
             await _finalize_capture(str(out))
         except Exception as exc:
@@ -910,7 +923,9 @@ def CaptureScreen() -> ft.Control:
         # recordings directory. Feeding it our absolute sandbox path produced
         # `<assets>/data/user/0/.../cache/rec_….wav` and an ENOENT crash. Give it
         # a bare filename and use whatever path it returns in _finish_mic.
-        recording_name = f"rec_{int(time.time())}.{ext}"
+        # Unique per take: two recordings in one second shared one Dart-side
+        # path and the second overwrote the first.
+        recording_name = unique_temp_name("rec", f".{ext}")
         out_path = str(get_temp_dir() / recording_name)
         mic_out_ref.current = out_path
         try:
@@ -959,6 +974,8 @@ def CaptureScreen() -> ft.Control:
 
     def _use_in(tool: str) -> None:
         if not captured_path or captured_info is None:
+            return
+        if not _kind_gate(tool, captured_info.kind):
             return
         app_state.current_media_path = captured_path
         app_state.current_media_info = captured_info

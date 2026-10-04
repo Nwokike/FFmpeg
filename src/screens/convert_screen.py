@@ -190,11 +190,20 @@ def ConvertScreen() -> ft.Control:
 
     # Container↔codec matrix: pairs the wheel's muxers reject (vp9+mp4,
     # aac-in-.mp3…) refuse BEFORE Start, not after a full encode.
+    # check_params validates pix_fmt/fps against declared encoder facts.
+    from services.engine_service import check_params as _check_params
+
     pair_reason = (
         check_pair(chosen_container, chosen_video, chosen_audio)
         if not probing and media_path
         else None
     )
+    params_reason = (
+        _check_params(video_codec=chosen_video, pix_fmt="yuv420p")
+        if not probing and media_path and media_kind == "video" and chosen_video
+        else None
+    )
+    start_blocked_reason = pair_reason or params_reason
 
     # Live pipeline: derived from the queue, never a stuck local flag.
     running_job = (
@@ -217,8 +226,8 @@ def ConvertScreen() -> ft.Control:
         if probing or not available_video:
             show_snack_needs_probe()
             return
-        if pair_reason is not None:
-            show_snack(page, pair_reason, bgcolor=ERROR)
+        if start_blocked_reason is not None:
+            show_snack(page, start_blocked_reason, bgcolor=ERROR)
             return
 
         # Aspect-correct scale: width-only scaling squished 3840x2160 into
@@ -441,16 +450,16 @@ def ConvertScreen() -> ft.Control:
                 if media_kind in ("video", "image")
                 else []
             ),
-            # Pair-matrix refusal (before Start, not after an encode).
+            # Pair-matrix / param refusal (before Start, not after an encode).
             *(
                 [
                     ft.Text(
-                        pair_reason,
+                        start_blocked_reason,
                         size=FONT_SM,
                         color="#EF4444",
                     )
                 ]
-                if pair_reason is not None
+                if start_blocked_reason is not None
                 else []
             ),
             # Action Button — gated on the probe so Start can never fire with
@@ -481,7 +490,7 @@ def ConvertScreen() -> ft.Control:
                 or busy
                 or probing
                 or not available_video
-                or pair_reason is not None,
+                or start_blocked_reason is not None,
                 on_click=_start_conversion,
             ),
         ],

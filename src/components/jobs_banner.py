@@ -77,20 +77,21 @@ def jobs_banner_view(active_job: Job | None, is_dark: bool = True) -> ft.Control
                         ft.Row(
                             controls=[
                                 ft.ProgressRing(width=16, height=16, stroke_width=2, color=PRIMARY),
-                                ft.Text(
-                                    ("Paused — " if paused else "Processing ")
-                                    + f"{op_title(active_job.op)}: {name}",
-                                    size=FONT_SM,
-                                    weight=ft.FontWeight.W_600,
-                                    max_lines=1,
-                                    overflow=ft.TextOverflow.ELLIPSIS,
-                                    expand=True,
-                                    tooltip=f"{op_title(active_job.op)}: {name}",
+                                ft.TextButton(
+                                    content=ft.Text(
+                                        ("Paused — " if paused else "Processing ")
+                                        + f"{op_title(active_job.op)}: {name}",
+                                        size=FONT_SM,
+                                        weight=ft.FontWeight.W_600,
+                                        max_lines=1,
+                                        overflow=ft.TextOverflow.ELLIPSIS,
+                                    ),
+                                    tooltip=f"Open Jobs tab — {op_title(active_job.op)}: {name}",
+                                    on_click=lambda _: ctrl.select_tab(1),
                                 ),
                             ],
                             spacing=SPACE_SM,
                             expand=True,
-                            on_click=lambda _: ctrl.select_tab(1),
                         ),
                         *(
                             [
@@ -108,20 +109,30 @@ def jobs_banner_view(active_job: Job | None, is_dark: bool = True) -> ft.Control
                             weight=ft.FontWeight.BOLD,
                             color=ACCENT_RED if not has_total else PRIMARY,
                         ),
-                        ft.IconButton(
-                            icon=ft.Icons.PAUSE_ROUNDED
-                            if not paused
-                            else ft.Icons.PLAY_ARROW_ROUNDED,
-                            icon_size=ICON_SM,
-                            icon_color=PRIMARY,
-                            tooltip="Pause Job" if not paused else "Resume Job",
-                            on_click=lambda _: ctrl.toggle_pause_job(active_job.id),
+                        *(
+                            [
+                                ft.IconButton(
+                                    icon=ft.Icons.PAUSE_ROUNDED
+                                    if not paused
+                                    else ft.Icons.PLAY_ARROW_ROUNDED,
+                                    icon_size=ICON_SM,
+                                    icon_color=PRIMARY,
+                                    tooltip="Pause Job" if not paused else "Resume Job",
+                                    on_click=lambda _: ctrl.toggle_pause_job(active_job.id),
+                                )
+                            ]
+                            # Pausing a live recording freezes the take
+                            # mid-stream — the REC flow offers Stop only.
+                            if active_job.op != "record"
+                            else []
                         ),
                         ft.IconButton(
                             icon=ft.Icons.CLOSE_ROUNDED,
                             icon_size=ICON_SM,
                             icon_color=ACCENT_RED,
-                            tooltip="Cancel Job",
+                            tooltip="Stop & keep recording"
+                            if active_job.op == "record"
+                            else "Cancel Job",
                             on_click=lambda _: ctrl.cancel_job(active_job.id),
                         ),
                     ],

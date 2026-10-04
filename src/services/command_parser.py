@@ -208,19 +208,24 @@ def _parse_vf(vf: str, params: dict, notes: list[str]) -> None:
                 "instead; use the Filters screen or -vf scale=W:H"
             )
         elif name == "transpose":
-            # ffmpeg transpose: 0 = 90deg CCW, 1 = 90deg CW, 2 = 90deg CCW + flip,
-            # 3 = 90deg CW + flip; clock/cclock are the named equivalents. The
-            # engine rotates by right angles only (flips need the Filters
-            # screen), so 2/3 map to their rotation with an honest note.
+            # ffmpeg transpose (ffmpeg-filters docs, transpose section): 0 = 90deg
+            # CCW + vertical flip, 1 = 90deg CW, 2 = 90deg CCW, 3 = 90deg CW +
+            # vertical flip; clock/cclock are the named equivalents of 1/2. The
+            # engine rotates by right angles only and has no flip — 0/3 carry a
+            # flip the engine cannot honour, so they are refused with a pointer
+            # instead of returning a video facing the wrong way.
             raw = (arg_list[0].split(";")[0] if arg_list else "").strip().lower()
             named = {"clock": 90, "cclock": 270}
-            deg = named[raw] if raw in named else {"0": 270, "1": 90, "2": 270, "3": 90}.get(raw)
+            deg = named[raw] if raw in named else {"1": 90, "2": 270}.get(raw)
             if deg is None:
+                if raw in ("0", "3", "cclock_flip", "clock_flip"):
+                    _refuse(
+                        f"-vf transpose={raw} carries a flip the engine cannot "
+                        "reproduce (right-angle rotation only) — use 1/clock or "
+                        "2/cclock instead"
+                    )
                 _refuse(f"-vf transpose expects 0-3 (or clock/cclock), got {part!r}")
             params["rotation"] = (params.get("rotation", 0) + deg) % 360
-            notes.append(
-                "transpose approximated as rotation (flip component needs the Filters screen)"
-            )
         elif name in ("hflip", "vflip"):
             _refuse(f"-vf {name} is not available in command mode — use the Filters screen")
         elif name == "atempo":
@@ -284,13 +289,21 @@ def _parse_af(af: str, params: dict, notes: list[str]) -> None:
 
 
 def _map_video_codec(raw: str, params: dict, notes: list[str]) -> None:
+    # Copy-valued codecs set NOTHING here: whether "-c:v copy" means remux
+    # (no time range) or re-encode-with-note (cut/convert) is decided by the
+    # branch below. Emitting the "re-encoded" note here would also land it on
+    # the remux plan — that contradiction is why the note lives at the two
+    # transcode sites instead.
     if raw == "copy":
-        notes.append("-c:v copy inside a transcode is not possible — video re-encoded")
         return
     codec = {"h264": "libx264", "x264": "libx264", "hevc": "libx265", "x265": "libx265"}.get(
         raw, raw
     )
     params["video_codec"] = codec
+
+
+#: Flags whose copy value requests a remux rather than a transcode.
+_COPY_VIDEO_FLAGS = ("-c:v", "-vcodec")
 
 
 def parse_command(
@@ -406,7 +419,9 @@ def parse_command(
     # ── multi-input → concat ─────────────────────────────────────────────
     if len(inputs) > 1:
         # A join takes paths + container only. Anything else on the line
-        # (-ss/-vf/-crf/-c…) would be silently discarded, so refuse loudly.
+        # (-ss/-vf/-crf/-c…/-vn/-an/-sn) would be silently discarded, so
+        # refuse loudly. stream_flags is checked too: -vn/-an/-sn bypass the
+        # flags dict (Set B) but would be equally ignored by the join.
         shaping = sorted(
             name
             for name in flags
@@ -422,6 +437,7 @@ def parse_command(
                 "-nostdin",
             )
         )
+        shaping += sorted(f for f in ("-vn", "-an", "-sn") if f in stream_flags)
         if shaping:
             _refuse(
                 f"joining {len(inputs)} inputs takes no per-clip flags — "
@@ -440,6 +456,24 @@ def parse_command(
         )
 
     src = inputs[0]
+
+    # -an/-sn have no engine slot: convert/cut always carry the best audio
+    # track (engine convert demuxes [in_video, in_audio]; _cut_reencode the
+    # same), and subtitle copying only happens on stream-copy cuts. Accepting
+    # them here would hand back audio/subs the user asked to drop — refuse
+    # with the screen that CAN drop tracks (Dossier track switches → remux).
+    if "-an" in stream_flags:
+        _refuse(
+            "-an drops the audio track — command mode cannot drop tracks "
+            "(convert/cut always carry audio); use the Dossier screen's "
+            "track switches and save a streams copy instead"
+        )
+    if "-sn" in stream_flags:
+        _refuse(
+            "-sn drops the subtitle track — command mode cannot drop tracks; "
+            "use the Dossier screen's track switches and save a streams "
+            "copy instead"
+        )
 
     # ── filter flags → convert params ────────────────────────────────────
     if "-vf" in flags:
@@ -510,6 +544,14 @@ def parse_command(
     # NOTE: `-c:v copy` / `-c:a copy` request NO re-encode, so copy-valued
     # codec flags are excluded from the encode set (they gate remux below).
     def _codec_flag_requests_encode(name: str) -> bool:
+        # Bare `-c` is the video codec when it reaches the transcode path
+        # (see _map_video_codec at the default branch) — a bare `-c copy`
+        # still means NO re-encode. `-b:v` is parsed but only approximated
+        # (see the "-b:v" block above), never a muxer bitrate — treating it
+        # as an encode trigger would take the copy path away for a flag the
+        # engine cannot even honour, so it stays informational.
+        if name == "-c":
+            return flags.get(name) != "copy"
         return name in ("-c:v", "-vcodec", "-c:a", "-acodec") and flags.get(name) != "copy"
 
     _ENCODE_VF_NODES = ("transpose", "eq", "hqdn3d", "unsharp")
@@ -561,6 +603,11 @@ def parse_command(
         }
         if not copy:
             notes.append("frame-accurate re-encode trim")
+            if any(flags.get(name) == "copy" for name in _COPY_VIDEO_FLAGS):
+                notes.append(
+                    "-c:v copy inside a trim is not possible — video re-encoded "
+                    "(drop -ss/-t for a lossless remux)"
+                )
             for key in ("crf", "preset"):
                 if key in params:
                     cut_params[key] = params[key]
@@ -682,6 +729,8 @@ def parse_command(
 
     # ── GIF ──────────────────────────────────────────────────────────────
     if out_ext == ".gif":
+        if start is not None and end is not None and end < start:
+            _refuse(f"empty GIF range: start {start}s is past end {end}s")
         gif_params = {
             "fps": params.get("fps", 15),
             "width": params.get("scale_width", 480),
@@ -714,6 +763,8 @@ def parse_command(
         # A bare `-c <codec>` that survived the cut branch (no time range):
         # treat it as the video codec rather than dropping it.
         _map_video_codec(flags["-c"], params, notes)
+    if any(flags.get(name) == "copy" for name in _COPY_VIDEO_FLAGS):
+        notes.append("-c:v copy inside a transcode is not possible — video re-encoded")
     if drop_video and out_ext in VIDEO_EXTS:
         _refuse("-vn with a video output extension — name an audio extension instead")
     return OpPlan(

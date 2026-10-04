@@ -71,7 +71,7 @@ def synthetic_media(tmp_path_factory: pytest.TempPathFactory) -> SimpleNamespace
 
 
 class FakePage:
-    """Minimal Page stand-in for component/controller tests (Sherlock pattern)."""
+    """Minimal Page stand-in for component/controller tests."""
 
     def __init__(self) -> None:
         self.route = "/"

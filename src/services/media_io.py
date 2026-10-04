@@ -175,15 +175,19 @@ class MediaIOService:
                 return picked
             missing_data = [f for f in files if not _has_local_path(f) and not f.bytes]
             if missing_data:
-                # One retry with data for the mobile-URI entries only.
+                # One retry with data for the mobile-URI entries only. Matched
+                # by POSITION, not name: two folders can hold the same
+                # filename (IMG_001.mp4 twice), and a name-keyed dict would
+                # attach one folder's bytes to the other's entry.
                 res = await self.file_picker.pick_files(
                     dialog_title="Select Media Files to Join",
                     file_type=ft.FilePickerFileType.MEDIA,
                     allow_multiple=True,
                     with_data=True,
                 )
-                retry = {f.name: f for f in picker_files(res)}
-                files = [retry.get(f.name, f) for f in files]
+                retried = picker_files(res)
+                if len(retried) == len(files):
+                    files = retried
             for f in files:
                 self._local_or_cached(f, picked, single=False)
         except Exception as exc:

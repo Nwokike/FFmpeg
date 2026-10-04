@@ -127,9 +127,14 @@ class JobQueue:
         return self.set_paused(not self._global_paused)
 
     def is_job_paused(self, job_id: str) -> bool:
-        """True when this job (or the whole queue) is holding."""
+        """True when this job (or the whole queue) is holding.
+
+        The shared ``pause_event`` is deliberately EXCLUDED: it is set whenever
+        ANY job holds the engine hook, so including it marked every card paused
+        when only the running job was. Per-card state is ids + global only.
+        """
         with self._cond:
-            return self._global_paused or self.pause_event.is_set() or job_id in self._paused_ids
+            return self._global_paused or job_id in self._paused_ids
 
     def set_job_paused(self, job_id: str, value: bool) -> bool:
         """Pause/resume one job by id; False when the job is unknown.

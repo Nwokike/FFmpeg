@@ -115,3 +115,43 @@ def op_title(op: str | None) -> str:
 
 
 PYTHON_VERSION = f"{sys.version_info.major}.{sys.version_info.minor}"
+
+
+# ── Per-tool media kinds (single source of truth for load-time gating) ──
+# Derived from engine truth: which MediaInfo.kind each tool's op actually
+# processes. The load gate (main._load_path_into, capture handoff) refuses a
+# wrong-kind file BEFORE the screen opens — the Join screen's add-time
+# reject, applied everywhere. None = kind-agnostic (the dossier's job).
+TOOL_MEDIA_KINDS: dict[str, frozenset[str] | None] = {
+    "convert": frozenset({"video", "audio", "image"}),
+    "compress": frozenset({"video"}),
+    "cut": frozenset({"video", "audio"}),
+    "extract": frozenset({"video", "audio"}),
+    "filters": frozenset({"video"}),
+    "audio": frozenset({"video", "audio"}),
+    "probe": None,  # dossier: any probed media
+    "join": frozenset({"video"}),  # add-flow probe-then-skip keeps this
+}
+
+KIND_LABELS: dict[str, str] = {
+    "video": "a video",
+    "audio": "an audio file",
+    "image": "an image",
+    "unknown": "an unrecognized file",
+}
+
+
+def kind_allowed(target_view: str, kind: str) -> bool:
+    """True when a tool accepts this media kind (None = kind-agnostic tool)."""
+    allowed = TOOL_MEDIA_KINDS.get(target_view)
+    return allowed is None or kind in allowed
+
+
+def kind_refusal(target_view: str, kind: str) -> str:
+    """Human message for a refused load; caller decides dialog vs snack."""
+    allowed = TOOL_MEDIA_KINDS.get(target_view)
+    want = ", ".join(sorted(allowed)) if allowed else "media"
+    return (
+        f"{op_title(target_view)} works on {want} — this file is "
+        f"{KIND_LABELS.get(kind, kind)}. Pick a different file or a different tool."
+    )

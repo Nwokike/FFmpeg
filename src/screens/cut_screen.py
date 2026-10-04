@@ -244,14 +244,18 @@ def CutScreen() -> ft.Control:
     def _start_cut(_):
         if not media_path or cut_duration <= 0.05:
             return
+        # Render has no early return here (slider layout), so the closure is
+        # the kind gate: image/unknown files never reach the engine.
+        kind_at_tap = info.kind if info is not None else "video"
+        if kind_at_tap not in ("video", "audio"):
+            show_snack(page, "Trimming needs a video or audio file", bgcolor=ERROR)
+            return
         running = app_state.active_job is not None and app_state.active_job.is_running
         if running:
             return
         # Frame-accurate re-encode needs a verified encoder; stream-copy
         # needs none.  Gate only the re-encode path on the probe.
         if not stream_copy and app_state.probe_info is None:
-            from core.notify import ERROR, show_snack
-
             show_snack(
                 page,
                 "Still probing engine capabilities — try again in a moment.",
@@ -276,6 +280,81 @@ def CutScreen() -> ft.Control:
             original_size_bytes=Path(media_path).stat().st_size if Path(media_path).exists() else 0,
         )
         ctrl.start_job(job)
+
+    if not kind_ok:
+        # A still image has no timeline to trim — say so instead of rendering
+        # sliders, thumbnails and keyframe chips that mean nothing here.
+        kind_label = {"image": "an image", "unknown": "an unrecognized file"}.get(
+            media_kind, "this file"
+        )
+        return ft.ListView(
+            controls=[
+                ft.Row(
+                    controls=[
+                        ft.IconButton(
+                            icon=ft.Icons.ARROW_BACK_ROUNDED,
+                            on_click=lambda _: ctrl.navigate("dashboard"),
+                            tooltip="Back to Dashboard",
+                        ),
+                        ft.Text("Trim & Cut Segment", size=FONT_LG, weight=ft.FontWeight.BOLD),
+                    ],
+                    spacing=SPACE_SM,
+                ),
+                card_container(
+                    content=ft.Row(
+                        controls=[
+                            ft.Icon(ft.Icons.CONTENT_CUT_ROUNDED, size=32, color=ACCENT_AMBER),
+                            ft.Column(
+                                controls=[
+                                    ft.Text(file_name, size=FONT_MD, weight=ft.FontWeight.BOLD),
+                                    ft.Text(f"Size: {file_size_str}", size=FONT_SM, color=muted),
+                                ],
+                                spacing=2,
+                                expand=True,
+                            ),
+                            ft.OutlinedButton(
+                                "Change", on_click=lambda _: ctrl.pick_media_for("cut")
+                            ),
+                        ],
+                        alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                    ),
+                    padding=SPACE_MD,
+                    border_radius=RADIUS_LG,
+                    is_dark=is_dark,
+                ),
+                card_container(
+                    content=ft.Column(
+                        controls=[
+                            ft.Icon(ft.Icons.INFO_OUTLINE_ROUNDED, size=28, color=muted),
+                            ft.Text(
+                                "Trimming isn't available here",
+                                size=FONT_MD,
+                                weight=ft.FontWeight.W_600,
+                            ),
+                            ft.Text(
+                                f"{kind_label.capitalize()} has no timeline to trim. "
+                                "Pick a video or audio file.",
+                                size=FONT_SM,
+                                color=muted,
+                            ),
+                        ],
+                        horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                        spacing=SPACE_SM,
+                    ),
+                    padding=SPACE_MD,
+                    border_radius=RADIUS_LG,
+                    is_dark=is_dark,
+                ),
+                ft.FilledButton(
+                    "Pick a video instead",
+                    icon=ft.Icons.VIDEO_LIBRARY_OUTLINED,
+                    height=48,
+                    on_click=lambda _: ctrl.pick_media_for("cut"),
+                ),
+            ],
+            spacing=SPACE_MD,
+            expand=True,
+        )
 
     return ft.ListView(
         controls=[

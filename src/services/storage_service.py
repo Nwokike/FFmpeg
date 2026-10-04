@@ -54,8 +54,14 @@ class StorageService:
             json.dumps(value)
         except (TypeError, ValueError) as exc:
             raise TypeError(f"value for {key!r} is not JSON-serializable: {exc}") from exc
+        # Deepcopy IN (mirrors get): the caller keeps owning their object —
+        # post-set mutations must not rewrite the cache or the debounced flush.
+        try:
+            stored = copy.deepcopy(value)
+        except Exception:
+            stored = value
         with self._lock:
-            self._cache[key] = value
+            self._cache[key] = stored
         self._schedule_flush()
 
     def remove(self, key: str) -> None:

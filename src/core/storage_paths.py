@@ -308,11 +308,13 @@ def _tree_size(path: Path) -> int:
 
 
 def unique_temp_name(stem: str, ext: str) -> str:
-    """Collision-proof temp output name: repeat runs never overwrite.
+    """Collision-resistant temp output name: repeat runs never overwrite.
 
     ``{stem}_{6-hex}{ext}`` — the old ``{stem}_converted.mp4`` / ``int(ts)``
     patterns silently overwrote the previous take (and two taps in one
-    second shared a path). Callers join it onto ``get_temp_dir()``.
+    second shared a path). Six hex digits make accidental collision
+    negligible for temp takes (not a uniqueness proof). Callers join it
+    onto ``get_temp_dir()``.
     """
     from uuid import uuid4
 

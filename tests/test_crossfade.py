@@ -14,11 +14,11 @@ from services.engine_service import EngineService
 
 
 def _gray_clip(path: str, gray: int, frames: int = 60, fps: int = 30) -> None:
-    """Solid-gray clip (crf 0 keeps pixel values near-lossless for probes)."""
+    """Solid-gray clip (mpeg4 is in the LGPL wheel's encoder set, so the
+    fixture builds on every target — libx264 is desktop-only)."""
     o = av.open(path, "w")
-    vs = o.add_stream("libx264", rate=fps)
+    vs = o.add_stream("mpeg4", rate=fps)
     vs.width, vs.height, vs.pix_fmt = 96, 64, "yuv420p"
-    vs.options = {"crf": "0", "preset": "ultrafast"}
     asr = o.add_stream("aac", rate=44100)
     asr.layout = "stereo"
 

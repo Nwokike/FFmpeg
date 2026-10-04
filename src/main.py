@@ -17,7 +17,7 @@ import flet as ft
 
 from app_shell import ACTIVE_VIEWS, AppShell
 from components.update_dialog import build_update_dialog
-from core.constants import APP_NAME, APP_VERSION
+from core.constants import APP_NAME, APP_VERSION, kind_allowed, kind_refusal
 from core.engine_probe import probe as engine_probe
 from core.logger_handler import MemoryLogHandler
 from core.notify import ERROR, SUCCESS, show_snack
@@ -447,9 +447,6 @@ async def main(page: ft.Page) -> None:
         try:
             # Sync PyAV probe off the UI loop — large files janked the UI here
             info = await asyncio.to_thread(engine.probe, path)
-            state.current_media_path = path
-            state.current_media_info = info
-            navigate(target_view)
         except Exception as exc:
             logger.exception("Media probe failed")
             page.show_dialog(
@@ -459,6 +456,24 @@ async def main(page: ft.Page) -> None:
                     actions=[ft.TextButton("OK", on_click=lambda _: page.pop_dialog())],
                 )
             )
+            return
+        # Kind gate: a tool never opens on media it cannot process. Join's
+        # add-time reject, applied at the one place every pick flows through.
+        if not kind_allowed(target_view, info.kind):
+            logger.info(
+                "Kind gate refused %s for %s (is %s)", Path(path).name, target_view, info.kind
+            )
+            page.show_dialog(
+                ft.AlertDialog(
+                    title=ft.Text("Wrong file type"),
+                    content=ft.Text(kind_refusal(target_view, info.kind)),
+                    actions=[ft.TextButton("OK", on_click=lambda _: page.pop_dialog())],
+                )
+            )
+            return
+        state.current_media_path = path
+        state.current_media_info = info
+        navigate(target_view)
 
     async def _pick_file_for(target_view: str) -> None:
         await _load_path_into(target_view, await media_io.pick_media_file())
@@ -821,26 +836,30 @@ async def main(page: ft.Page) -> None:
     # exists as an op) — listing the view name skipped the gate for joins.
     HIGH_VALUE_JOB_OPS = frozenset({"concat", "convert", "compress", "cut", "record"})
 
-    def start_job(job: Job) -> None:
+    def start_job(job: Job, return_to: str | None = None) -> None:
+        """Enqueue (after the high-value interstitial) and land somewhere useful.
+
+        ``return_to`` keeps the caller's screen in front — the live Streams
+        player must keep watching while a record job runs, not bounce to the
+        dashboard. Everything else lands on the dashboard as before.
+        """
+
+        def _enqueue() -> None:
+            state.jobs.insert(0, job)
+            queue.enqueue(job)
+            navigate(return_to or "dashboard")
+
+        async def _action_ad() -> None:
+            try:
+                await ads.show_interstitial(on_close=_enqueue)
+            except Exception:
+                logger.exception("Interstitial on %s submit failed", job.op)
+                _enqueue()
+
         if job.op in HIGH_VALUE_JOB_OPS:
-
-            def _enqueue() -> None:
-                state.jobs.insert(0, job)
-                queue.enqueue(job)
-                navigate("dashboard")
-
-            async def _action_ad() -> None:
-                try:
-                    await ads.show_interstitial(on_close=_enqueue)
-                except Exception:
-                    logger.exception("Interstitial on %s submit failed", job.op)
-                    _enqueue()
-
             page.run_task(_action_ad)
             return
-        state.jobs.insert(0, job)
-        queue.enqueue(job)
-        navigate("dashboard")
+        _enqueue()
 
     def retry_job(job: Job) -> None:
         # Fresh Job (new id/status) so the original history entry stays intact
@@ -895,7 +914,10 @@ async def main(page: ft.Page) -> None:
     def restore_all(jobs: list) -> None:
         """Undo target for the Clear-All SnackBar — restores the snapshot."""
         existing = {j.id for j in state.history}
-        state.history = list(state.history) + [j for j in jobs if j.id not in existing]
+        # Snapshot order first (original positions), then anything that
+        # arrived after the clear — appending the snapshot would strand
+        # restored records below newer ones.
+        state.history = [j for j in jobs if j.id not in existing] + list(state.history)
         _persist_history()
         page.update()
 
@@ -1042,7 +1064,7 @@ async def main(page: ft.Page) -> None:
         select_tab=select_tab,
         handle_system_back=lambda: handle_system_back(),
         pick_media_for=lambda t: page.run_task(pick_media_for, t),
-        start_job=start_job,
+        start_job=lambda job, return_to=None: start_job(job, return_to),
         cancel_job=cancel_job,
         toggle_pause_job=toggle_pause_job,
         retry_job=retry_job,

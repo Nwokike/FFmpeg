@@ -123,21 +123,23 @@ def job_card_view(job: Job, is_dark: bool = True) -> ft.Control:
     action_btns: list[ft.Control] = []
     if job.is_running:
         paused = _is_paused()
-        action_btns.append(
-            ft.IconButton(
-                icon=ft.Icons.PAUSE_ROUNDED if not paused else ft.Icons.PLAY_ARROW_ROUNDED,
-                icon_color=PRIMARY,
-                icon_size=ICON_MD,
-                tooltip="Pause Job" if not paused else "Resume Job",
-                on_click=lambda _: ctrl.toggle_pause_job(job.id),
+        # A live recording can't pause meaningfully — Stop keeps the take.
+        if job.op != "record":
+            action_btns.append(
+                ft.IconButton(
+                    icon=ft.Icons.PAUSE_ROUNDED if not paused else ft.Icons.PLAY_ARROW_ROUNDED,
+                    icon_color=PRIMARY,
+                    icon_size=ICON_MD,
+                    tooltip="Pause Job" if not paused else "Resume Job",
+                    on_click=lambda _: ctrl.toggle_pause_job(job.id),
+                )
             )
-        )
         action_btns.append(
             ft.IconButton(
                 icon=ft.Icons.STOP_CIRCLE_OUTLINED,
                 icon_color=ACCENT_RED,
                 icon_size=ICON_MD,
-                tooltip="Cancel Job",
+                tooltip="Stop & keep recording" if job.op == "record" else "Cancel Job",
                 on_click=lambda _: ctrl.cancel_job(job.id),
             )
         )

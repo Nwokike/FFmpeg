@@ -154,6 +154,13 @@ def FiltersScreen() -> ft.Control:
     def _start_filters(_):
         if not media_path or busy:
             return
+        # Render returns early for non-video, but the closure outlives the
+        # branch: re-check kind here so a stale Start can never fire a
+        # video-only convert on an image or audio file.
+        kind_at_tap = info.kind if info is not None else "video"
+        if kind_at_tap != "video":
+            show_snack(page, "Pick a video file — filters need video frames", bgcolor=ERROR)
+            return
 
         stem = Path(media_path).stem
         ext = Path(media_path).suffix or ".mp4"

@@ -258,6 +258,15 @@ jobs:
               exit 1
             fi
           done
+      - name: Install bundletool (AAB manifest inspection)
+        run: |
+          set -euo pipefail
+          if command -v bundletool >/dev/null 2>&1; then
+            bundletool version
+            exit 0
+          fi
+          sudo apt-get update -qq && sudo apt-get install -y -qq bundletool
+          bundletool version
       - name: Inspect AAB manifest (minSdk/targetSdk/versionCode/AdMob)
         run: |
           set -euo pipefail
@@ -267,13 +276,9 @@ jobs:
           aab="${artifacts[0]}"
           rm -rf /tmp/aab_inspect && mkdir -p /tmp/aab_inspect
           cd /tmp/aab_inspect
-          # bundletool ships on ubuntu-latest runners via Android cmdline-tools;
-          # fall back to aapt dump badging when it is absent (no new deps).
-          if command -v bundletool >/dev/null 2>&1; then
-            bundletool dump manifest --bundle "$GITHUB_WORKSPACE/$aab" --xpath /manifest > manifest.xml
-          else
-            "$ANDROID_HOME/build-tools/"*/aapt dump xmltree "$GITHUB_WORKSPACE/$aab" AndroidManifest.xml > manifest.txt
-          fi
+          # bundletool installed by the previous step (apt); no aapt fallback —
+          # an AAB needs `bundletool dump manifest`, aapt can't read the bundle.
+          bundletool dump manifest --bundle "$GITHUB_WORKSPACE/$aab" --xpath /manifest > manifest.xml
           echo "--- manifest head ---"
           head -n 40 manifest.* | head -n 40
           # minSdk floor: av's Android wheels are built at ABI 24.

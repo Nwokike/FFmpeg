@@ -63,7 +63,7 @@ def test_old_dead_engine_info_name_not_active():
 
 
 def test_app_shell_source_uses_no_router_or_back_stack():
-    """The shell must not import Router or back_stack (single-view, Sherlock)."""
+    """The shell must not import Router or back_stack (single-view only)."""
     source = (Path(__file__).resolve().parents[1] / "src" / "app_shell.py").read_text(
         encoding="utf-8"
     )

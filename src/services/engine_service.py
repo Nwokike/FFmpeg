@@ -251,6 +251,41 @@ def _friendly_codec(requested: str, kind: str) -> str:
     return labels.get(requested) or requested
 
 
+def _encoder_pix_fmt(codec_name: str) -> str:
+    """A pixel format the encoder actually accepts.
+
+    Video transcodes default to yuv420p; still-image codecs (png = rgb24/rgba/
+    pal8/gray only) reject it with av.error.ArgumentError at the first encode
+    — real crash from the E2E pass. Falls back to the encoder's first declared
+    format when none of the usual candidates match.
+    """
+    preferred = ("yuv420p", "yuvj420p", "rgb24", "rgba", "rgb8")
+    try:
+        codec = av.codec.Codec(codec_name, "w")
+        declared = [f.name for f in codec.video_formats or []]
+    except Exception:
+        return "yuv420p"
+    if not declared:
+        return "yuv420p"
+    for name in preferred:
+        if name in declared:
+            return name
+    return declared[0]
+
+
+def _encoder_open_kwargs(codec_name: str) -> dict:
+    """Extra ``add_stream`` kwargs an audio encoder needs to actually open.
+
+    Vorbis is an experimental encoder on this FFmpeg build (avcodec_open2
+    refuses without strict -2); the terse ``{}`` in the native log is the
+    fingerprint. Callers that resolve user-chosen audio codecs must spread
+    this — resolving is not opening (see the E2E vorbis crash).
+    """
+    if codec_name == "vorbis":
+        return {"options": {"strict": "-2"}}
+    return {}
+
+
 # Container ↔ codec pairs the wheel's muxers actually accept. Keyed by
 # container extension (no dot); values are (video codecs, audio codecs)
 # using RESOLVED encoder names as the engine emits them. Anything outside a
@@ -356,7 +391,7 @@ def check_pair(container: str, video_codec: str | None, audio_codec: str | None)
 
 def check_params(
     video_codec: str | None = None,
-    fps: float | int | None = None,
+    fps: float | int | str | None = None,
     sample_rate: int | None = None,
     pix_fmt: str | None = None,
 ) -> str | None:
@@ -368,6 +403,8 @@ def check_params(
     Undeclared capabilities fail OPEN (None): absence of data is not proof of
     absence of support.
     """
+    from fractions import Fraction
+
     from core.engine_probe import probe as _probe
 
     try:
@@ -376,16 +413,15 @@ def check_params(
         return None
     if video_codec and fps:
         try:
-            want = float(fps)
-        except (TypeError, ValueError):
+            want = float(Fraction(str(fps)))
+        except (TypeError, ValueError, ZeroDivisionError):
             return f"Frame rate {fps!r} is not a number"
         for cand in (video_codec,):
             rates = caps.encoder_frame_rates.get(cand, [])
             nums: list[float] = []
             for r in rates:
                 try:
-                    num, _, den = str(r).partition("/")
-                    nums.append(float(num) / float(den or 1))
+                    nums.append(float(Fraction(str(r))))
                 except (TypeError, ValueError, ZeroDivisionError):
                     continue
             if nums and max(nums) > 0 and want > max(nums) * 1.01:
@@ -504,11 +540,12 @@ def friendly_job_error(exc: BaseException) -> str:
         for name in (
             "HTTPError",
             "HTTPClientError",
-            "HTTPBadRequest",
-            "Unauthorized",
-            "Forbidden",
-            "NotFound",
-            "ServerError",
+            "HTTPBadRequestError",
+            "HTTPUnauthorizedError",
+            "HTTPForbiddenError",
+            "HTTPNotFoundError",
+            "HTTPTooManyRequestsError",
+            "HTTPServerError",
         )
         if isinstance(error_type := getattr(av.error, name, None), type)
     )
@@ -668,6 +705,21 @@ def _unknown_codec_error_type() -> type | None:
         return UnknownCodecError
     except Exception:
         return getattr(av.codec, "UnknownCodecError", None)
+
+
+def _safe_seek(container: av.container.InputContainer, ts: int, *, backward: bool = True) -> None:
+    """Seek, or decode from the start when the container's index can't.
+
+    Rebasing a stream-copy cut to 0 leaves some mp4s whose index refuses
+    seeks before their first entry (``av.error.PermissionError`` /
+    "Cannot find an index entry before timestamp: 0"). Every caller demuxes
+    with a time filter afterwards, so skipping the seek changes speed, never
+    output. The failure is logged, not silenced.
+    """
+    try:
+        container.seek(ts, backward=backward)
+    except av.error.FFmpegError as exc:
+        logger.warning("Seek unavailable (%s) — decoding from start; output unaffected", exc)
 
 
 # Stream disposition flags surfaced in the dossier (av.stream.Disposition names).
@@ -1411,7 +1463,9 @@ class EngineService:
 
                 out_video.width = target_w
                 out_video.height = target_h
-                out_video.pix_fmt = "yuv420p"
+                # Encoder-fitted pixel format: still codecs (png) reject yuv420p.
+                enc_pix_fmt = _encoder_pix_fmt(chosen_vcodec)
+                out_video.pix_fmt = enc_pix_fmt
                 # With the filter graph active, timestamps arrive on the fine
                 # 1/90000 tb with speed-warped spacing; bf=0 makes dts==pts so the
                 # muxer sees the same strict sequence the graph produced.
@@ -1434,7 +1488,14 @@ class EngineService:
             out_audio = None
             if in_audio:
                 chosen_acodec = _resolve_audio_codec(audio_codec)
-                out_audio = out.add_stream(chosen_acodec, rate=in_audio.rate or 44100)
+                # Opus is 48k-native; the stream resamples fed frames itself
+                # (verified: 44.1k frames into a 48k stream encode cleanly).
+                a_rate = 48000 if chosen_acodec in ("opus", "libopus") else (in_audio.rate or 44100)
+                out_audio = out.add_stream(
+                    chosen_acodec,
+                    rate=a_rate,
+                    **_encoder_open_kwargs(chosen_acodec),
+                )
                 # Installed wheel: channels is read-only; layout is the writable source of truth
                 n_ch = min(2, in_audio.channels or 2)
                 out_audio.layout = "stereo" if n_ch == 2 else "mono"
@@ -1533,13 +1594,13 @@ class EngineService:
                             if out_video and (
                                 frame.width != out_video.width
                                 or frame.height != out_video.height
-                                or frame.format.name != "yuv420p"
+                                or frame.format.name != enc_pix_fmt
                             ):
                                 frame = video_reformatter.reformat(
                                     frame,
                                     width=out_video.width,
                                     height=out_video.height,
-                                    format="yuv420p",
+                                    format=enc_pix_fmt,
                                 )
 
                             if out_video:
@@ -1872,7 +1933,7 @@ class EngineService:
                         )
 
             seek_target = int(actual_start * av.time_base)
-            inp.seek(seek_target, backward=True)
+            _safe_seek(inp, seek_target)
 
             duration = max(0.1, end_s - actual_start)
             last_report = 0.0
@@ -1916,6 +1977,13 @@ class EngineService:
                     packet.pts = max(0, packet.pts - start_pts_map[stream_idx])
                 if packet.dts is not None:
                     packet.dts = max(0, packet.dts - start_dts_map[stream_idx])
+                # Post-seek packets can carry an inverted pts/dts pair (the
+                # per-clock rebase above preserves each clock but not their
+                # relationship — measured pts(1) < dts(1001) on a real mp4).
+                # Presentation can never precede decode — carry PTS up to DTS
+                # (a sub-frame nudge, same rule as the concat-copy path).
+                if packet.dts is not None and packet.pts is not None and packet.dts > packet.pts:
+                    packet.pts = packet.dts
                 packet.stream = out_s
                 mux_clamp.mux(out, packet)
 
@@ -2006,7 +2074,7 @@ class EngineService:
                 last_audio_pts = candidate
 
             # Seek close to start
-            inp.seek(int(max(0.0, start_s - 2.0) * av.time_base), backward=True)
+            _safe_seek(inp, int(max(0.0, start_s - 2.0) * av.time_base))
             duration = max(0.1, end_s - start_s)
             last_report = 0.0
             mux_clamp = _MuxClamp()
@@ -2149,7 +2217,14 @@ class EngineService:
                 n_ch = min(2, in_audio.channels or 2)
                 target_layout = "stereo" if n_ch == 2 else "mono"
 
-            out_audio = out.add_stream(chosen_codec, rate=out_rate)
+            # Opus is 48k-native (44100 fails avcodec_open2) — the resampler
+            # below already bridges any source rate. Vorbis strictness rides
+            # in _encoder_open_kwargs (experimental encoder on this build).
+            if chosen_codec in ("opus", "libopus"):
+                out_rate = 48000
+            out_audio = out.add_stream(
+                chosen_codec, rate=out_rate, **_encoder_open_kwargs(chosen_codec)
+            )
             if chosen_codec != "pcm_s16le":
                 out_audio.bit_rate = bitrate_kbps * 1000
             out_audio.layout = target_layout
@@ -2200,6 +2275,7 @@ class EngineService:
             total_dur = float(inp.duration or 0) / float(av.time_base) if inp.duration else 1.0
             last_report = 0.0
             cur_pts = 0.0
+            mux_clamp = _MuxClamp()
 
             def _encode(f: av.AudioFrame) -> None:
                 nonlocal audio_fifo
@@ -2212,7 +2288,7 @@ class EngineService:
                             if full is None:
                                 break
                             for enc_pkt in out_audio.encode(full):
-                                out.mux(enc_pkt)
+                                mux_clamp.mux(out, enc_pkt)
                         return
                     except (TypeError, ValueError, av.error.FFmpegError) as exc:
                         # A decoder format that the FIFO cannot represent is
@@ -2223,7 +2299,7 @@ class EngineService:
                         logger.debug("AudioFifo fallback to encoder resampler: %s", exc)
                         audio_fifo = None
                 for enc_pkt in out_audio.encode(f):
-                    out.mux(enc_pkt)
+                    mux_clamp.mux(out, enc_pkt)
 
             def _emit(frames_list: list) -> None:
                 nonlocal resampler
@@ -2288,9 +2364,9 @@ class EngineService:
                 tail = audio_fifo.read(partial=True)
                 if tail is not None:
                     for enc_pkt in out_audio.encode(tail):
-                        out.mux(enc_pkt)
+                        mux_clamp.mux(out, enc_pkt)
             for enc_pkt in out_audio.encode(None):
-                out.mux(enc_pkt)
+                mux_clamp.mux(out, enc_pkt)
 
             if on_progress:
                 on_progress(1.0, "Audio Extracted")
@@ -2331,7 +2407,7 @@ class EngineService:
                 raise ValueError("No video stream found in source media")
 
             # One seek to the first target, then decode forward through all of them
-            inp.seek(int(timestamps[0] * av.time_base), backward=True)
+            _safe_seek(inp, int(timestamps[0] * av.time_base))
             done = False
             for packet in inp.demux([v_stream]):
                 _pause_hook(cancel_event)
@@ -2414,14 +2490,15 @@ class EngineService:
             palette_mode = True  # until the first frame proves otherwise
             pushed = 0
             last_report = 0.0
+            mux_clamp = _MuxClamp()
 
             def _direct_encode(frame: av.VideoFrame) -> None:
                 rf = frame.reformat(width=out_w, height=out_h, format="rgb8")
                 rf.pts = None
                 for enc_pkt in out_video.encode(rf):
-                    out.mux(enc_pkt)
+                    mux_clamp.mux(out, enc_pkt)
 
-            inp.seek(int(start_s * av.time_base), backward=True)
+            _safe_seek(inp, int(start_s * av.time_base))
             end_s = start_s + duration_s
 
             for packet in inp.demux([in_video]):
@@ -2485,7 +2562,7 @@ class EngineService:
                         rf = rf.reformat(width=out_w, height=out_h, format="rgb8")
                     rf.pts = None
                     for enc_pkt in out_video.encode(rf):
-                        out.mux(enc_pkt)
+                        mux_clamp.mux(out, enc_pkt)
                     if on_progress:
                         frac = min(1.0, drained / max(1, pushed))
                         on_progress(
@@ -2493,8 +2570,9 @@ class EngineService:
                             f"Creating GIF... {int(min(0.99, 0.85 + 0.14 * frac) * 100)}%",
                         )
 
-            for enc_pkt in out_video.encode(None):
-                out.mux(enc_pkt)
+            if not (cancel_event and cancel_event.is_set()):
+                for enc_pkt in out_video.encode(None):
+                    mux_clamp.mux(out, enc_pkt)
 
             if on_progress:
                 on_progress(1.0, "GIF Created")
@@ -2635,7 +2713,7 @@ class EngineService:
             v = inp.streams.best("video")
             if not v:
                 return []
-            inp.seek(int(max(0.0, times[order[0]] - 1.0) * av.time_base), backward=True)
+            _safe_seek(inp, int(max(0.0, times[order[0]] - 1.0) * av.time_base))
             idx = 0
             done = False
             for packet in inp.demux([v]):
@@ -2672,6 +2750,8 @@ class EngineService:
 
         Drives the Cut screen's keyframe jump chips; empty list when the
         container has no usable index (MPEG-TS etc.) — UI degrades gracefully.
+        Negative index entries (edit-list offsets, measured -0.08s on a real
+        mp4) are floored at 0.0 — chips seek to a time the player can show.
         """
         try:
             with av.open(input_path, "r", timeout=_INPUT_TIMEOUT, options=_INPUT_OPTIONS) as inp:
@@ -2687,7 +2767,7 @@ class EngineService:
                 step = max(1, len(keys) // max(1, limit))
                 sampled = keys[::step][:limit]
                 tb = v.time_base
-                return sorted(float(e.timestamp * tb) for e in sampled)
+                return sorted(max(0.0, float(e.timestamp * tb)) for e in sampled)
         except Exception as exc:
             logger.warning("Keyframe index unavailable: %s", exc)
             return []
@@ -2794,6 +2874,7 @@ class EngineService:
 
             total_s = (float(inp.duration or 0) / float(av.time_base)) if inp.duration else 0.0
             last_report = 0.0
+            mux_clamp = _MuxClamp()
 
             for packet in inp.demux(list(stream_map)):
                 _pause_hook(cancel_event)
@@ -2804,7 +2885,7 @@ class EngineService:
                 ts = packet.pts if packet.pts is not None else packet.dts
                 pkt_time = float(ts * packet.stream.time_base)
                 packet.stream = stream_map[packet.stream]
-                out.mux(packet)
+                mux_clamp.mux(out, packet)
 
                 now = time.monotonic()
                 if on_progress and (now - last_report >= 0.25):
@@ -3023,10 +3104,21 @@ class EngineService:
                         previous_pts = last_pts.get(pos)
                         if previous_pts is not None and packet.pts <= previous_pts:
                             packet.pts = previous_pts + 1
+                        # B-frame delay vs the DTS floor: a pushed-up DTS can
+                        # overtake this packet's PTS (muxer: "pts < dts").
+                        # Presentation can never precede decode — carry PTS up.
+                        if (
+                            packet.dts is not None
+                            and packet.pts is not None
+                            and packet.dts > packet.pts
+                        ):
+                            packet.pts = packet.dts
                         last_pts[pos] = packet.pts
                         last_dts[pos] = packet.dts
 
                         packet.stream = out_by_pos[pos]
+                        # Manually clamped above (shift + last_pts/last_dts
+                        # floors) — no _MuxClamp needed on this path.
                         out.mux(packet)
 
                     if on_progress:
@@ -3212,6 +3304,7 @@ class EngineService:
             last_audio_packet_dts = -1
             last_audio_packet_pts = -1
             cursor = 0.0  # output seconds where the next segment begins
+            mux_clamp = _MuxClamp()
 
             def enc_video(frame) -> None:
                 nonlocal v_idx
@@ -3219,7 +3312,7 @@ class EngineService:
                 frame.pts = vid_pts(v_idx)
                 v_idx += 1
                 for enc_pkt in out_video.encode(frame):
-                    out.mux(enc_pkt)
+                    mux_clamp.mux(out, enc_pkt)
 
             def enc_audio(frame, out_seconds: float) -> None:
                 nonlocal audio_pts_cursor, last_audio_packet_dts, last_audio_packet_pts
@@ -3238,7 +3331,7 @@ class EngineService:
                         enc_pkt.pts = last_audio_packet_pts + 1
                     last_audio_packet_dts = enc_pkt.dts
                     last_audio_packet_pts = enc_pkt.pts
-                    out.mux(enc_pkt)
+                    mux_clamp.mux(out, enc_pkt)
 
             def reformat_to_out(frame):
                 if frame.width != out_w or frame.height != out_h or frame.format.name != "yuv420p":
@@ -3264,10 +3357,7 @@ class EngineService:
 
                     # ── Video mid-segment (index-timeline: pts = out_idx·step)
                     if in_start > 0:
-                        inp.seek(
-                            int(max(0.0, in_start - 1.0) * av.time_base),
-                            backward=True,
-                        )
+                        _safe_seek(inp, int(max(0.0, in_start - 1.0) * av.time_base))
                     mid_done = False
                     for packet in inp.demux([in_video]):
                         if cancel_event and cancel_event.is_set():
@@ -3297,10 +3387,7 @@ class EngineService:
                     try:
                         a_stream = a_inp.streams.best("audio")
                         if in_start > 0:
-                            a_inp.seek(
-                                int(max(0.0, in_start - 1.0) * av.time_base),
-                                backward=True,
-                            )
+                            _safe_seek(a_inp, int(max(0.0, in_start - 1.0) * av.time_base))
                         a_mid_done = False
                         for packet in a_inp.demux([a_stream]):
                             if cancel_event and cancel_event.is_set():
@@ -3357,10 +3444,10 @@ class EngineService:
             if not cancelled:
                 if out_video:
                     for enc_pkt in out_video.encode(None):
-                        out.mux(enc_pkt)
+                        mux_clamp.mux(out, enc_pkt)
                 if out_audio:
                     for enc_pkt in out_audio.encode(None):
-                        out.mux(enc_pkt)
+                        mux_clamp.mux(out, enc_pkt)
                 if on_progress:
                     on_progress(1.0, f"Joined {len(paths)} clips with crossfades")
         finally:
@@ -3406,7 +3493,7 @@ class EngineService:
             # Collect both windows first (small: fade·fps frames each)
             a_win: list = []
             done = False
-            inp_a.seek(int(max(0.0, window_start - 1.0) * av.time_base), backward=True)
+            _safe_seek(inp_a, int(max(0.0, window_start - 1.0) * av.time_base))
             for packet in inp_a.demux([va]):
                 if cancel_event and cancel_event.is_set():
                     return
@@ -3518,7 +3605,7 @@ class EngineService:
 
             a_tail: list = []
             if tail_start > 0:
-                inp_a.seek(int(max(0.0, tail_start - 1.0) * av.time_base), backward=True)
+                _safe_seek(inp_a, int(max(0.0, tail_start - 1.0) * av.time_base))
             done = False
             for packet in inp_a.demux([sa]):
                 if cancel_event and cancel_event.is_set():
@@ -4053,8 +4140,10 @@ class EngineService:
 
             start = time.monotonic()
             base_pts: dict[int, int] = {}
+            base_dts: dict[int, int] = {}
             bytes_out = 0
             last_report = 0.0
+            mux_clamp = _MuxClamp()
 
             def _emit(packet) -> None:
                 """Zero-base the timestamps, run the BSF if any, mux result(s)."""
@@ -4068,13 +4157,16 @@ class EngineService:
                     return
                 src_key = packet.stream.index if packet.stream is not None else -1
                 if src_key >= 0:
+                    # Separate bases per clock: B-frame delay (dts<pts) drives
+                    # the first dts negative under a single base.
                     if src_key not in base_pts:
                         base_pts[src_key] = packet.pts if packet.pts is not None else 0
-                    base = base_pts[src_key]
+                    if src_key not in base_dts:
+                        base_dts[src_key] = packet.dts if packet.dts is not None else 0
                     if packet.pts is not None:
-                        packet.pts = packet.pts - base
+                        packet.pts = max(0, packet.pts - base_pts[src_key])
                     if packet.dts is not None:
-                        packet.dts = packet.dts - base
+                        packet.dts = max(0, packet.dts - base_dts[src_key])
                 out_s = stream_map.get(packet.stream) if src_key >= 0 else None
                 # stream identity may already be consumed; resolve out_s via key
                 if out_s is None:
@@ -4086,7 +4178,7 @@ class EngineService:
                 candidates = bsf_entry[0].filter(packet) if bsf_entry else [packet]
                 for pkt in candidates:
                     pkt.stream = out_s
-                    out.mux(pkt)
+                    mux_clamp.mux(out, pkt)
 
             for packet in inp.demux(list(stream_map)):
                 _pause_hook(cancel_event)
@@ -4117,7 +4209,7 @@ class EngineService:
             for bsf_ctx, out_s in bsfs.values():
                 for pkt in bsf_ctx.filter(None):
                     pkt.stream = out_s
-                    out.mux(pkt)
+                    mux_clamp.mux(out, pkt)
 
             if on_progress:
                 total_s = time.monotonic() - start

@@ -57,12 +57,12 @@ def AudioScreen() -> ft.Control:
         if media_path and Path(media_path).exists()
         else "0 B"
     )
-    # Audio Studio needs an audio timeline: images and muted video are
-    # refused with an explanation (the engine raised ValueError in a
-    # background job before).
-    media_kind = info.kind if info is not None else "video"
+    # Audio Studio needs an audio timeline: images, muted video, and
+    # streamless files are refused with an explanation (the engine raises
+    # ValueError in a background job otherwise). info-None stays permissive —
+    # Start is disabled without a picked file anyway.
     has_audio = info.audio_stream is not None if info is not None else True
-    audio_ok = has_audio or media_kind == "video"
+    audio_ok = has_audio
 
     loudness_key, set_loudness_key = ft.use_state("podcast")
     channel_layout, set_channel_layout = ft.use_state("stereo")

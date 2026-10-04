@@ -247,14 +247,61 @@ def test_fps_rounds_not_truncates(media, tmp_path):
     assert plan.params["fps"] == 30
 
 
-def test_transpose_zero_is_ccw(media, tmp_path):
+def test_transpose_pure_rotations_map_flip_carriers_refuse(media, tmp_path):
+    # ffmpeg transpose truth: 1/clock = 90 CW, 2/cclock = 90 CCW, while 0/3
+    # carry a vertical flip the engine cannot reproduce — those refuse
+    # instead of returning a video facing the wrong way.
     src, _ = media
-    plan = parse_command(f"ffmpeg -i {src} -vf transpose=0 {tmp_path / 'o.mp4'}")
-    assert plan.params["rotation"] == 270
     plan = parse_command(f"ffmpeg -i {src} -vf transpose=1 {tmp_path / 'o.mp4'}")
     assert plan.params["rotation"] == 90
+    plan = parse_command(f"ffmpeg -i {src} -vf transpose=2 {tmp_path / 'o.mp4'}")
+    assert plan.params["rotation"] == 270
     plan = parse_command(f"ffmpeg -i {src} -vf transpose=clock {tmp_path / 'o.mp4'}")
     assert plan.params["rotation"] == 90
+    plan = parse_command(f"ffmpeg -i {src} -vf transpose=cclock {tmp_path / 'o.mp4'}")
+    assert plan.params["rotation"] == 270
+    for raw in ("0", "3"):
+        with pytest.raises(CommandError, match="flip"):
+            parse_command(f"ffmpeg -i {src} -vf transpose={raw} {tmp_path / 'o.mp4'}")
+
+
+def test_an_sn_refused_with_dossier_pointer(media, tmp_path):
+    # convert/cut always carry the best audio track — -an would be silently
+    # ignored, so it refuses with the screen that CAN drop tracks.
+    src, _ = media
+    with pytest.raises(CommandError, match=r"[Dd]ossier"):
+        parse_command(f"ffmpeg -i {src} -an {tmp_path / 'o.mp4'}")
+    with pytest.raises(CommandError, match=r"[Dd]ossier"):
+        parse_command(f"ffmpeg -i {src} -sn {tmp_path / 'o.mp4'}")
+    with pytest.raises(CommandError, match=r"[Dd]ossier"):
+        parse_command(f"ffmpeg -i {src} -ss 2 -t 2 -an {tmp_path / 'o.mp4'}")
+
+
+def test_join_with_stream_flags_refused(media, tmp_path):
+    src, second = media
+    with pytest.raises(CommandError, match="-vn"):
+        parse_command(f"ffmpeg -i {src} -i {second} -vn {tmp_path / 'o.mp4'}")
+
+
+def test_gif_reversed_range_refused(media, tmp_path):
+    src, _ = media
+    with pytest.raises(CommandError, match="empty GIF range"):
+        parse_command(f"ffmpeg -i {src} -ss 5 -to 3 {tmp_path / 'o.gif'}")
+
+
+def test_copy_note_only_on_transcode_paths(media, tmp_path):
+    # -c:v copy to .mkv remuxes — the plan must NOT carry the "re-encoded"
+    # note that the transcode paths add.
+    src, _ = media
+    plan = parse_command(f"ffmpeg -i {src} -c:v copy {tmp_path / 'o.mkv'}")
+    assert plan.op == "remux"
+    assert not any("re-encoded" in n for n in plan.notes)
+    # Same flag WITH a time range re-encodes (copy needs bare -c copy) —
+    # the note fires exactly there.
+    plan = parse_command(f"ffmpeg -i {src} -ss 2 -t 2 -c:v copy {tmp_path / 'o.mp4'}")
+    assert plan.op == "cut"
+    assert plan.params["stream_copy"] is False
+    assert any("re-encoded" in n for n in plan.notes)
 
 
 def test_gif_end_zero_is_valid(media, tmp_path):

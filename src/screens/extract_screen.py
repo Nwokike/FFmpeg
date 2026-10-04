@@ -15,6 +15,30 @@ from core.theme import ACCENT_CYAN, TEXT_MUTED_DARK, TEXT_MUTED_LIGHT, is_dark_m
 from core.tokens import FONT_LG, FONT_MD, FONT_SM, RADIUS_LG, SPACE_MD, SPACE_SM
 from state.controller_ctx import use_controller
 
+# Mode names in display order — the derived-clamp fallback walks this.
+_EXTRACT_MODES = ("audio", "frames", "gif", "subtitles")
+
+
+def extract_mode_availability(info) -> dict[str, bool]:
+    """Engine-truth availability of each extract mode for probed media.
+
+    Each mode names the stream it needs and the engine raises for a missing
+    stream mid-job — offering Frames on an audio file (or Audio on muted
+    video) used to pass the UI and fail inside the queue. A None info stays
+    permissive: the load gate guarantees a probe before the screen opens.
+    """
+    if info is None:
+        return {"audio": True, "frames": True, "gif": True, "subtitles": False}
+    has_audio = info.audio_stream is not None
+    is_video = info.kind == "video"
+    subs = any(s.stream_type == "subtitle" for s in info.streams)
+    return {
+        "audio": has_audio,
+        "frames": is_video,
+        "gif": is_video,
+        "subtitles": subs,
+    }
+
 
 @ft.component
 def ExtractScreen() -> ft.Control:
@@ -33,7 +57,6 @@ def ExtractScreen() -> ft.Control:
         if media_path and Path(media_path).exists()
         else "0 B"
     )
-    media_kind = info.kind if info is not None else "video"
     has_audio = info.audio_stream is not None if info is not None else True
     duration_s = max(0.5, info.duration_s if info and info.duration_s else 10.0)
 
@@ -67,6 +90,17 @@ def ExtractScreen() -> ft.Control:
 
     sub_streams = [s for s in (info.streams if info else []) if s.stream_type == "subtitle"]
 
+    # Mode availability is engine truth (see extract_mode_availability): a
+    # mode the file cannot support is disabled, never offered into a doomed
+    # queue job.
+    mode_ok = extract_mode_availability(info)
+    # Derived clamp (never written back): a mode the previous file allowed
+    # shows as the first usable mode for THIS file instead of gating only at
+    # Start.
+    active_mode = (
+        mode if mode_ok.get(mode) else next((m for m in _EXTRACT_MODES if mode_ok[m]), "audio")
+    )
+
     def _clamp_sub_sel() -> None:
         if sub_sel >= len(sub_streams):
             set_sub_sel(0)
@@ -76,13 +110,15 @@ def ExtractScreen() -> ft.Control:
     def _start_extraction(_):
         if not media_path or busy:
             return
-        if mode == "subtitles" and not sub_streams:
+        if not mode_ok.get(active_mode, True):
             return
-        if mode in ("audio", "subtitles") and not has_audio and media_kind != "video":
+        if active_mode == "audio" and not has_audio:
+            return
+        if active_mode == "subtitles" and not sub_streams:
             return
 
         stem = Path(media_path).stem
-        if mode == "audio":
+        if active_mode == "audio":
             out_name = unique_temp_name(f"{stem}_audio", chosen_audio_fmt)
             out_path = str(get_temp_dir() / out_name)
             job = Job(
@@ -94,7 +130,7 @@ def ExtractScreen() -> ft.Control:
                 if Path(media_path).exists()
                 else 0,
             )
-        elif mode == "subtitles":
+        elif active_mode == "subtitles":
             # Clamp for the engine, which indexes the subtitle SUBLIST
             # (inp.streams.subtitles) — the container-wide stream index made
             # it extract a different (or the first) track.
@@ -114,7 +150,7 @@ def ExtractScreen() -> ft.Control:
                 if Path(media_path).exists()
                 else 0,
             )
-        elif mode == "frames":
+        elif active_mode == "frames":
             out_dir = str(get_temp_dir() / unique_temp_name(f"{stem}_frames", ""))
             job = Job(
                 op="extract_frames",
@@ -125,7 +161,7 @@ def ExtractScreen() -> ft.Control:
                 if Path(media_path).exists()
                 else 0,
             )
-        else:  # gif
+        else:  # gif (active_mode)
             out_name = unique_temp_name(f"{stem}_animated", ".gif")
             out_path = str(get_temp_dir() / out_name)
             job = Job(
@@ -161,10 +197,8 @@ def ExtractScreen() -> ft.Control:
     lossless_audio = chosen_audio_fmt in ("wav", "flac")
 
     start_blocked_reason: str | None = None
-    if mode == "audio" and not audio_formats:
+    if active_mode == "audio" and not audio_formats:
         start_blocked_reason = "This build has no audio encoders — extraction is unavailable."
-    elif mode in ("audio", "subtitles") and not has_audio and media_kind != "video":
-        start_blocked_reason = "This file has no audio track to extract."
 
     return ft.ListView(
         controls=[
@@ -220,27 +254,21 @@ def ExtractScreen() -> ft.Control:
             ft.Row(
                 controls=[
                     ft.Chip(
-                        label=ft.Text("Audio Track"),
-                        selected=mode == "audio",
-                        on_click=lambda _: set_mode("audio"),
-                    ),
-                    ft.Chip(
-                        label=ft.Text("Video Frames"),
-                        selected=mode == "frames",
-                        on_click=lambda _: set_mode("frames"),
-                    ),
-                    ft.Chip(
-                        label=ft.Text("Animated GIF"),
-                        selected=mode == "gif",
-                        on_click=lambda _: set_mode("gif"),
-                    ),
-                    ft.Chip(
-                        label=ft.Text("Subtitles"),
-                        selected=mode == "subtitles",
-                        on_click=lambda _: set_mode("subtitles"),
-                    ),
+                        label=ft.Text(label),
+                        selected=active_mode == key,
+                        disabled=not mode_ok[key],
+                        tooltip=tooltip if not mode_ok[key] else None,
+                        on_click=lambda _, k=key: set_mode(k),
+                    )
+                    for key, label, tooltip in (
+                        ("audio", "Audio Track", "This file has no audio track"),
+                        ("frames", "Video Frames", "Video frames need a video file"),
+                        ("gif", "Animated GIF", "GIFs need a video file"),
+                        ("subtitles", "Subtitles", "This file carries no subtitle streams"),
+                    )
                 ],
                 spacing=SPACE_SM,
+                wrap=True,
             ),
             # Conditional settings based on mode
             *(
@@ -279,7 +307,7 @@ def ExtractScreen() -> ft.Control:
                         else []
                     ),
                 ]
-                if mode == "audio"
+                if active_mode == "audio"
                 else []
             ),
             *(
@@ -295,7 +323,7 @@ def ExtractScreen() -> ft.Control:
                         on_change=lambda e: set_frame_count(int(e.control.value)),
                     ),
                 ]
-                if mode == "frames"
+                if active_mode == "frames"
                 else []
             ),
             *(
@@ -348,7 +376,7 @@ def ExtractScreen() -> ft.Control:
                         else []
                     ),
                 ]
-                if mode == "subtitles"
+                if active_mode == "subtitles"
                 else []
             ),
             *(
@@ -388,7 +416,7 @@ def ExtractScreen() -> ft.Control:
                         color=muted,
                     ),
                 ]
-                if mode == "gif"
+                if active_mode == "gif"
                 else []
             ),
             *(
@@ -398,12 +426,13 @@ def ExtractScreen() -> ft.Control:
             ),
             # Action button
             ft.FilledButton(
-                f"Extract {mode.title()}",
+                f"Extract {active_mode.title()}",
                 icon=ft.Icons.DOWNLOAD_ROUNDED,
                 height=48,
                 disabled=not media_path
                 or busy
-                or (mode == "subtitles" and not sub_streams)
+                or not mode_ok.get(active_mode, True)
+                or (active_mode == "subtitles" and not sub_streams)
                 or start_blocked_reason is not None,
                 on_click=_start_extraction,
             ),

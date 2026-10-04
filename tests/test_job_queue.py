@@ -284,3 +284,26 @@ def test_global_pause_survives_per_job_resume():
     q.set_paused(False)
     assert q.is_job_paused(j.id) is False
     q.shutdown()
+
+
+def test_pausing_one_job_does_not_mark_others_paused():
+    """The shared engine-hook event must not leak into per-card state."""
+    started = threading.Event()
+
+    def runner(job: Job, evt) -> None:
+        started.set()
+        evt.wait(5)
+        job.status = "completed"
+
+    q = JobQueue(runner=runner)
+    running, queued = _job(), _job()
+    q.enqueue(running)
+    q.enqueue(queued)
+    try:
+        assert started.wait(5)
+        assert q.set_job_paused(running.id, True) is True
+        assert q.pause_event.is_set() is True, "engine hook drives the shared event"
+        assert q.is_job_paused(running.id) is True
+        assert q.is_job_paused(queued.id) is False, "innocent queued card must read unpaused"
+    finally:
+        q.shutdown()
