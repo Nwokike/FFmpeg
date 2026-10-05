@@ -22,7 +22,7 @@ from core.storage_paths import format_bytes, get_temp_dir, unique_temp_name
 from core.styles import card_container, section_header
 from core.theme import TEXT_MUTED_DARK, TEXT_MUTED_LIGHT, is_dark_mode
 from core.tokens import FONT_LG, FONT_SM, FONT_XS, RADIUS_LG, SPACE_MD, SPACE_SM
-from services.engine_service import EngineService, available_filters
+from services.engine_service import EngineService, available_filters, check_pair
 from state.controller_ctx import use_controller
 from state.service_ctx import use_services
 
@@ -46,8 +46,35 @@ def JoinScreen() -> ft.Control:
     container_fmt, set_container_fmt = ft.use_state("mp4")
     transition, set_transition = ft.use_state("cut")  # cut | crossfade
     fade_s, set_fade_s = ft.use_state(0.5)
+    v_codec, set_v_codec = ft.use_state("")
     avail, set_avail = ft.use_state(frozenset())
     busy, set_busy = ft.use_state(False)
+
+    # Wheel-measured encoders: a crossfade RE-ENCODES, so the gate must name
+    # an encoder this build ships — the phone's mpeg4, never H.264.
+    probe_info = app_state.probe_info
+    available_video = list(probe_info.video_encoder_picks or []) if probe_info else []
+    _VIDEO_LABELS = {
+        "libx264": "H.264",
+        "h264": "H.264",
+        "libx265": "HEVC",
+        "mpeg4": "MPEG-4",
+        "mjpeg": "MJPEG",
+        "prores": "ProRes",
+        "ffv1": "FFV1 (lossless)",
+        "libvpx-vp9": "VP9",
+        "libsvtav1": "AV1",
+    }
+    chosen_video = (
+        v_codec if v_codec in available_video else (available_video[0] if available_video else "")
+    )
+    # Container truth: only offer encoders the chosen container muxes
+    # (mjpeg-in-mp4 fails at mux time after a full encode — refused here).
+    pair_ok = {enc: check_pair(container_fmt, enc, "aac") is None for enc in available_video}
+    join_codecs = [enc for enc in available_video if pair_ok[enc]]
+    chosen_video = (
+        chosen_video if chosen_video in join_codecs else (join_codecs[0] if join_codecs else "")
+    )
 
     # Live pipeline: derived from the queue (Start locks while it runs).
     running_job = (
@@ -67,6 +94,8 @@ def JoinScreen() -> ft.Control:
         """None when crossfade can run for the current list; else why not."""
         if not entries:
             return "add at least two clips first"
+        if not chosen_video:
+            return "no video encoder on this build"
         needed = {"alphamerge", "overlay"}
         if any(e.get("has_audio") for e in entries):
             needed.add("acrossfade")
@@ -184,6 +213,11 @@ def JoinScreen() -> ft.Control:
                 "container": ("matroska" if ext == "mkv" else "mp4"),
                 "transition": transition,
                 "fade_s": fade_s,
+                **(
+                    {"video_codec": chosen_video}
+                    if transition == "crossfade" and chosen_video
+                    else {}
+                ),
             },
             original_size_bytes=sum(e["size_s"] for e in entries),
         )
@@ -349,6 +383,24 @@ def JoinScreen() -> ft.Control:
                             ),
                             size=FONT_XS,
                             color=muted,
+                        ),
+                        *(
+                            [
+                                ft.Row(
+                                    controls=[
+                                        ft.Chip(
+                                            label=ft.Text(_VIDEO_LABELS.get(enc, enc)),
+                                            selected=chosen_video == enc,
+                                            on_click=lambda _, e=enc: set_v_codec(e),
+                                        )
+                                        for enc in join_codecs
+                                    ],
+                                    wrap=True,
+                                    spacing=SPACE_SM,
+                                ),
+                            ]
+                            if transition == "crossfade" and join_codecs
+                            else []
                         ),
                     ],
                     spacing=SPACE_SM,

@@ -37,6 +37,7 @@ def CompressScreen() -> ft.Control:
     duration_s = info.duration_s if info and info.duration_s > 0 else 10.0
 
     target_mb, set_target_mb = ft.use_state(16.0)  # Default 16MB (WhatsApp)
+    v_codec, set_v_codec = ft.use_state("")
 
     # Encoder-empty guard mirrors Convert: without verified video encoders
     # Start would fail late in _pick_video_encoder instead of refusing here.
@@ -44,6 +45,25 @@ def CompressScreen() -> ft.Control:
     available_video = (
         list(app_state.probe_info.video_encoder_picks or []) if app_state.probe_info else []
     )
+
+    # Wheel-measured codec choices (Convert parity): only encoders this build
+    # verified. The default is the wheel's first pick — mpeg4 on the LGPL
+    # phone, never libx264-first. Derived (never written back).
+    _VIDEO_LABELS = {
+        "libx264": "H.264",
+        "h264": "H.264",
+        "libx265": "HEVC",
+        "mpeg4": "MPEG-4",
+        "mjpeg": "MJPEG",
+        "prores": "ProRes",
+        "ffv1": "FFV1 (lossless)",
+        "libvpx-vp9": "VP9",
+        "libsvtav1": "AV1",
+    }
+    chosen_video = (
+        v_codec if v_codec in available_video else (available_video[0] if available_video else "")
+    )
+    chosen_label = _VIDEO_LABELS.get(chosen_video, chosen_video or "—")
 
     # Live pipeline: derived from the queue, never a stuck local flag.
     running_job = (
@@ -86,7 +106,7 @@ def CompressScreen() -> ft.Control:
             op="compress",
             input_path=media_path,
             output_path=out_path,
-            params={"target_size_mb": float(target_mb)},
+            params={"target_size_mb": float(target_mb), "video_codec": chosen_video},
             original_size_bytes=orig_bytes,
         )
         ctrl.start_job(job)
@@ -144,6 +164,25 @@ def CompressScreen() -> ft.Control:
             ),
             # Live pipeline status (derived, never stuck)
             *([tool_job_row(running_job, ctrl, is_dark=is_dark)] if running_job else []),
+            # Video codec: measured against this device's FFmpeg build. The
+            # phone's LGPL wheel ships mpeg4 (not H.264) — the default is the
+            # wheel's first verified encoder, so Start can never demand a
+            # missing encoder.
+            section_header(
+                "Video Codec", f"Encoded with {chosen_label} on this device", is_dark=is_dark
+            ),
+            ft.Row(
+                controls=[
+                    ft.Chip(
+                        label=ft.Text(_VIDEO_LABELS.get(enc, enc)),
+                        selected=chosen_video == enc,
+                        on_click=lambda _, e=enc: set_v_codec(e),
+                    )
+                    for enc in available_video
+                ],
+                wrap=True,
+                spacing=SPACE_SM,
+            ),
             # Kind gate: compress needs a video timeline.
             *(
                 [
@@ -207,8 +246,8 @@ def CompressScreen() -> ft.Control:
                         ft.Text(
                             f"Original: {orig_size_str} → Target: ≤ {target_mb:.1f} MB "
                             "(decimal MB vs platform quotas).\n"
-                            "Below ~1 Mbps the engine downscales to 720p, below "
-                            "~400 kbps to 480p; always H.264/AAC, preset fast, "
+                            f"Below ~1 Mbps the engine downscales to 720p, below "
+                            f"~400 kbps to 480p; {chosen_label}/AAC, preset fast, "
                             "~8% container headroom.",
                             size=FONT_XS,
                             color=muted,

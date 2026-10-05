@@ -31,6 +31,7 @@ from core.tokens import (
     FONT_SM,
     FONT_XS,
     RADIUS_LG,
+    RADIUS_MD,
     SPACE_MD,
     SPACE_SM,
 )
@@ -55,6 +56,14 @@ try:
 except ImportError:  # pragma: no cover
     AudioEncoder = None
     AudioRecorderConfiguration = None
+
+try:
+    from flet_audio import Audio as AudioPlayer
+
+    _HAS_AUDIO_PLAYER = True
+except ImportError:  # pragma: no cover
+    AudioPlayer = None
+    _HAS_AUDIO_PLAYER = False
 
 logger = logging.getLogger(__name__)
 
@@ -130,6 +139,7 @@ def CaptureScreen() -> ft.Control:
     lock_orientation, set_lock_orientation = ft.use_state(False)
     captured_path, set_captured_path = ft.use_state(None)
     captured_info, set_captured_info = ft.use_state(None)
+    preview_playing, set_preview_playing = ft.use_state(False)
     busy, set_busy = ft.use_state(False)
 
     camera_ref = ft.use_ref(None)
@@ -140,6 +150,7 @@ def CaptureScreen() -> ft.Control:
         False
     )  # queryable from unmount cleanup (effect captures first render)
     ticking_ref = ft.use_ref(False)
+    tick_gen_ref = ft.use_ref(0)
     elapsed_ref = ft.use_ref(0)
     mic_out_ref = ft.use_ref(None)
     mic_codec_ref = ft.use_ref("pcm16")
@@ -408,8 +419,15 @@ def CaptureScreen() -> ft.Control:
         if cam is None or camera_inited_ref.current:
             return
         if not await _wait_for_mount(cam):
-            logger.error("Camera control never mounted — init aborted")
-            show_snack(page, "Camera failed to start: control was not mounted", bgcolor=ERROR)
+            # The control was built while a mode switch or finalize pulled it
+            # out of the tree (the observed "never mounted" abort). Discard
+            # and rebuild once — the fresh control mounts on the current tree.
+            logger.warning("Camera control never mounted — rebuilding once")
+            camera_ref.current = None
+            camera_inited_ref.current = False
+            camera_audio_mode_ref.current = None
+            set_camera_ready(False)
+            await _prepare_camera()
             return
         try:
             cameras = await cam.get_available_cameras()
@@ -487,11 +505,16 @@ def CaptureScreen() -> ft.Control:
         if cam is None:
             return
         if not _is_mounted(cam):
-            logger.warning("Camera preview pause skipped: control not mounted")
+            # The old path returned here and stranded camera_ready=False: the
+            # pending control was discarded and never recreated, so the next
+            # open sat on "Camera is still starting" forever. Clear and
+            # rebuild — the render tree takes the fresh control.
+            logger.warning("Camera control not mounted during switch — recreating")
             camera_ref.current = None
             camera_inited_ref.current = False
             camera_audio_mode_ref.current = None
             set_camera_ready(False)
+            await _prepare_camera()
             return
         try:
             await cam.pause_preview()
@@ -536,9 +559,14 @@ def CaptureScreen() -> ft.Control:
     async def _tick() -> None:
         # Loop is gated on ticking_ref (cleared by _stop_ticker and unmount
         # cleanup), so it always has an exit — no reliance on task cancellation.
+        # Generation-guarded: a resume relaunch racing the dying pause loop
+        # must not double-increment.
+        my_gen = tick_gen_ref.current
         try:
-            while ticking_ref.current:
+            while ticking_ref.current and tick_gen_ref.current == my_gen:
                 await asyncio.sleep(1)
+                if not ticking_ref.current or tick_gen_ref.current != my_gen:
+                    break
                 elapsed_ref.current += 1
                 set_elapsed(elapsed_ref.current)
                 if elapsed_ref.current >= _MAX_RECORD_SEC:
@@ -554,6 +582,13 @@ def CaptureScreen() -> ft.Control:
     def _start_ticker() -> None:
         elapsed_ref.current = 0
         set_elapsed(0)
+        tick_gen_ref.current += 1
+        ticking_ref.current = True
+        page.run_task(_tick)
+
+    def _resume_ticker() -> None:
+        # Restart after pause WITHOUT resetting elapsed (unlike _start_ticker).
+        tick_gen_ref.current += 1
         ticking_ref.current = True
         page.run_task(_tick)
 
@@ -761,6 +796,14 @@ def CaptureScreen() -> ft.Control:
                 await cam.resume_video_recording()
             else:
                 await cam.pause_video_recording()
+            # The mic path gates the MM:SS ticker on paused state — video
+            # never did, so its counter ran through pauses. Same contract.
+            paused_now = rec_paused is False
+            set_rec_paused(paused_now)
+            if paused_now:
+                ticking_ref.current = False
+            else:
+                _resume_ticker()
         except Exception as exc:
             logger.warning("Pause toggle failed: %s", exc)
             show_snack(page, f"Pause failed: {exc}", bgcolor=ERROR)
@@ -965,12 +1008,51 @@ def CaptureScreen() -> ft.Control:
             set_rec_paused(paused_now)
             # The 1s ticker keeps going while the button says Resume — gate it
             # on the recorder's actual paused state so the MM:SS freezes too.
-            ticking_ref.current = not paused_now
+            # The loop EXITS on pause, so resume must relaunch it — flipping
+            # the flag alone left every counter frozen while audio kept going.
+            if paused_now:
+                ticking_ref.current = False
+            else:
+                _resume_ticker()
         except Exception as exc:
             logger.warning("Pause toggle failed: %s", exc)
             show_snack(page, f"Pause failed: {exc}", bgcolor=ERROR)
 
     # ── After-capture actions ───────────────────────────────────────────────
+
+    preview_player_ref = ft.use_ref(None)
+
+    def _toggle_take_preview() -> None:
+        """Play/stop the captured take inline (mic audio only).
+
+        Photos show a static thumbnail and video takes open in their tools —
+        an inline player for every take type would duplicate the result
+        screen. The mic had NO playback at all, so it gets the player.
+        """
+        if not captured_path or not _HAS_AUDIO_PLAYER:
+            return
+        player = preview_player_ref.current
+        if player is None:
+            try:
+                player = AudioPlayer(
+                    src=captured_path,
+                    on_state_change=lambda e: set_preview_playing(
+                        str(getattr(getattr(e, "state", None), "value", "")) == "playing"
+                    ),
+                    on_loaded=lambda _: set_preview_playing(True),
+                )
+                page.services.append(player)
+                preview_player_ref.current = player
+            except Exception as exc:
+                logger.warning("Take preview unavailable: %s", exc)
+                return
+        try:
+            if preview_playing:
+                page.run_task(player.pause)
+            else:
+                page.run_task(player.play)
+        except Exception as exc:
+            logger.debug("Take preview toggle skipped: %s", exc)
 
     def _use_in(tool: str) -> None:
         if not captured_path or captured_info is None:
@@ -1037,6 +1119,48 @@ def CaptureScreen() -> ft.Control:
                         spacing=SPACE_SM,
                     ),
                     ft.Divider(height=1),
+                    # Take preview: a mic take had NO playback at all (the
+                    # reported gap); a photo shows its thumbnail inline.
+                    *(
+                        [
+                            ft.Image(
+                                src=captured_path,
+                                height=180,
+                                fit=ft.BoxFit.CONTAIN,
+                                border_radius=RADIUS_MD,
+                            )
+                        ]
+                        if captured_info is not None
+                        and captured_info.kind == "image"
+                        and Path(captured_path).exists()
+                        else []
+                    ),
+                    *(
+                        [
+                            ft.Row(
+                                controls=[
+                                    ft.IconButton(
+                                        icon=ft.Icons.PAUSE_ROUNDED
+                                        if preview_playing
+                                        else ft.Icons.PLAY_ARROW_ROUNDED,
+                                        icon_size=32,
+                                        tooltip="Pause take" if preview_playing else "Play take",
+                                        on_click=lambda _: _toggle_take_preview(),
+                                    ),
+                                    ft.Text(
+                                        "Playing take…" if preview_playing else "Play this take",
+                                        size=FONT_SM,
+                                        color=muted,
+                                    ),
+                                ],
+                                spacing=SPACE_SM,
+                            )
+                        ]
+                        if captured_info is not None
+                        and captured_info.kind == "audio"
+                        and _HAS_AUDIO_PLAYER
+                        else []
+                    ),
                     ft.Row(
                         controls=[
                             ft.OutlinedButton("Convert", on_click=lambda _: _use_in("convert")),

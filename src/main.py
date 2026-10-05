@@ -661,6 +661,7 @@ async def main(page: ft.Page) -> None:
                     input_path=job.input_path,
                     output_path=job.output_path,
                     target_size_mb=p.get("target_size_mb", 16.0),
+                    video_codec=p.get("video_codec"),
                     on_progress=_on_progress,
                     cancel_event=cancel_evt,
                 )
@@ -671,6 +672,7 @@ async def main(page: ft.Page) -> None:
                     start_seconds=p.get("start_seconds", 0.0),
                     end_seconds=p.get("end_seconds", 10.0),
                     stream_copy=p.get("stream_copy", True),
+                    video_codec=p.get("video_codec"),
                     on_progress=_on_progress,
                     cancel_event=cancel_evt,
                 )
@@ -726,6 +728,7 @@ async def main(page: ft.Page) -> None:
                     container_format=p.get("container", "mp4"),
                     transition=p.get("transition", "cut"),
                     fade_s=p.get("fade_s", 0.5),
+                    video_codec=p.get("video_codec"),
                     on_progress=_on_progress,
                     cancel_event=cancel_evt,
                 )

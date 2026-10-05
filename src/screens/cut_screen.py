@@ -72,6 +72,26 @@ def CutScreen() -> ft.Control:
 
     ft.use_effect(_clamp_window, [total_dur])
     stream_copy, set_stream_copy = ft.use_state(True)
+    v_codec, set_v_codec = ft.use_state("")
+
+    # Re-encode needs a verified encoder (stream-copy needs none): the same
+    # wheel-measured pick as Compress — the phone offers mpeg4, never H.264.
+    probe_info = app_state.probe_info
+    available_video = list(probe_info.video_encoder_picks or []) if probe_info else []
+    _VIDEO_LABELS = {
+        "libx264": "H.264",
+        "h264": "H.264",
+        "libx265": "HEVC",
+        "mpeg4": "MPEG-4",
+        "mjpeg": "MJPEG",
+        "prores": "ProRes",
+        "ffv1": "FFV1 (lossless)",
+        "libvpx-vp9": "VP9",
+        "libsvtav1": "AV1",
+    }
+    chosen_video = (
+        v_codec if v_codec in available_video else (available_video[0] if available_video else "")
+    )
     thumbs, set_thumbs = ft.use_state([])
     keyframes, set_keyframes = ft.use_state([])
     strip_loaded, set_strip_loaded = ft.use_state(False)
@@ -276,6 +296,7 @@ def CutScreen() -> ft.Control:
                 "start_seconds": float(start_s),
                 "end_seconds": float(end_s),
                 "stream_copy": bool(stream_copy),
+                **({} if stream_copy else {"video_codec": chosen_video}),
             },
             original_size_bytes=Path(media_path).stat().st_size if Path(media_path).exists() else 0,
         )
@@ -532,6 +553,7 @@ def CutScreen() -> ft.Control:
                             for img in thumbs
                         ],
                         spacing=4,
+                        scroll="auto",
                     )
                 ]
                 if thumbs
@@ -588,6 +610,31 @@ def CutScreen() -> ft.Control:
                 ],
                 wrap=True,
                 spacing=SPACE_SM,
+            ),
+            # Re-encode codec: measured, never assumed. Stream-copy needs no
+            # encoder so this only shows for the re-encode path.
+            *(
+                [
+                    section_header(
+                        "Re-encode Codec",
+                        f"Frame-accurate trim encodes with {_VIDEO_LABELS.get(chosen_video, chosen_video or '—')}",
+                        is_dark=is_dark,
+                    ),
+                    ft.Row(
+                        controls=[
+                            ft.Chip(
+                                label=ft.Text(_VIDEO_LABELS.get(enc, enc)),
+                                selected=chosen_video == enc,
+                                on_click=lambda _, e=enc: set_v_codec(e),
+                            )
+                            for enc in available_video
+                        ],
+                        wrap=True,
+                        spacing=SPACE_SM,
+                    ),
+                ]
+                if not stream_copy
+                else []
             ),
             # Action button
             *([tool_job_row(running_job, ctrl, is_dark=is_dark)] if running_job else []),

@@ -354,6 +354,19 @@ def StreamsScreen() -> ft.Control:
         set_stage_url(target)
         _check_url()
 
+    # Paste-to-play: a complete URL stages itself — no Watch tap needed.
+    # The field only writes state; the stage follows valid input, so typing
+    # never mounts half a URL and recording stays an explicit action.
+    def _follow_url() -> None:
+        target = url.strip()
+        if not target.lower().startswith(("http://", "https://")):
+            return
+        if stage_url != target:
+            set_stage_url(target)
+            _check_url()
+
+    ft.use_effect(_follow_url, [url.strip() if isinstance(url, str) else ""])
+
     async def _retry_watch() -> None:
         target = stage_url
         if not target:
@@ -494,7 +507,7 @@ def StreamsScreen() -> ft.Control:
                     controls=[
                         ft.Icon(ft.Icons.PLAY_CIRCLE_OUTLINE_ROUNDED, size=40, color=muted),
                         ft.Text(
-                            "Press Watch to see this stream live",
+                            "Paste a stream URL below — it plays here live",
                             size=FONT_SM,
                             color=muted,
                         ),
@@ -619,14 +632,15 @@ def StreamsScreen() -> ft.Control:
                             *(
                                 [
                                     ft.OutlinedButton(
-                                        "Watch",
-                                        icon=ft.Icons.PLAY_ARROW_ROUNDED,
+                                        "Reload",
+                                        icon=ft.Icons.REFRESH_ROUNDED,
                                         height=48,
                                         disabled=not url_ok,
-                                        on_click=_watch,
+                                        tooltip="Reload the live stream",
+                                        on_click=lambda _: page.run_task(_retry_watch),
                                     )
                                 ]
-                                if stage_url != url.strip()
+                                if stage_url is not None
                                 else []
                             ),
                         ],

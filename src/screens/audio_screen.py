@@ -162,6 +162,9 @@ def AudioScreen() -> ft.Control:
         if not _HAS_AUDIO_PLAYER or not media_path or audition_ref.current is not None:
             return None
         try:
+            # No on_error: the installed flet_audio Audio has no such kwarg
+            # (verified against .venv: on_loaded/on_state_change only here).
+            # Errors surface via on_state_change → DISPOSED, never a crash.
             player = Audio(
                 src=media_path,
                 on_state_change=lambda e: set_audition_playing(
@@ -169,7 +172,6 @@ def AudioScreen() -> ft.Control:
                     and str(getattr(e.state, "value", e.state)) == "playing"
                 ),
                 on_loaded=lambda _: set_audition_ready(True),
-                on_error=lambda e: logger.warning("Audition error: %s", getattr(e, "data", e)),
             )
             page.services.append(player)
             audition_ref.current = player

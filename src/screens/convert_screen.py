@@ -190,7 +190,10 @@ def ConvertScreen() -> ft.Control:
 
     # Container↔codec matrix: pairs the wheel's muxers reject (vp9+mp4,
     # aac-in-.mp3…) refuse BEFORE Start, not after a full encode.
-    # check_params validates pix_fmt/fps against declared encoder facts.
+    # check_params validates pix_fmt/fps against declared encoder facts —
+    # with the ENCODER-FITTED pix_fmt (mjpeg-family rejects yuv420p, and the
+    # engine fits per encoder since the still-image fix).
+    from services.engine_service import _encoder_pix_fmt as _fit_pix_fmt
     from services.engine_service import check_params as _check_params
 
     pair_reason = (
@@ -199,7 +202,7 @@ def ConvertScreen() -> ft.Control:
         else None
     )
     params_reason = (
-        _check_params(video_codec=chosen_video, pix_fmt="yuv420p")
+        _check_params(video_codec=chosen_video, pix_fmt=_fit_pix_fmt(chosen_video))
         if not probing and media_path and media_kind == "video" and chosen_video
         else None
     )

@@ -1643,13 +1643,13 @@ class EngineService:
                     if (
                         frame.width != out_video.width
                         or frame.height != out_video.height
-                        or frame.format.name != "yuv420p"
+                        or frame.format.name != out_video.pix_fmt
                     ):
                         frame = video_reformatter.reformat(
                             frame,
                             width=out_video.width,
                             height=out_video.height,
-                            format="yuv420p",
+                            format=out_video.pix_fmt,
                         )
                     _monotonic_video_pts(frame)
                     for enc_pkt in out_video.encode(frame):
@@ -1689,10 +1689,17 @@ class EngineService:
         input_path: str,
         output_path: str,
         target_size_mb: float,
+        video_codec: str | None = None,
         on_progress: Callable[[float, str], None] | None = None,
         cancel_event: Event | None = None,
     ) -> str:
-        """Compress video to stay under a specified target file size (e.g. WhatsApp 16MB)."""
+        """Compress video to stay under a specified target file size (e.g. WhatsApp 16MB).
+
+        ``video_codec`` is the screen's wheel-measured pick (the Compress UI
+        offers only verified encoders, mpeg4-first on LGPL wheels). None keeps
+        the legacy auto choice. The resolver raises EngineCapabilityError for
+        anything the wheel cannot encode — a refuse-before-Start at the UI.
+        """
         info = EngineService.probe(input_path)
         duration = max(1.0, info.duration_s)
         target_bits = target_size_mb * 8 * 1024 * 1024 * 0.92  # 8% safety headroom
@@ -1732,13 +1739,15 @@ class EngineService:
             out_video = None
             if in_video:
                 fps = int(in_video.average_rate or 30)
-                chosen_vcodec = _pick_video_encoder()
+                chosen_vcodec = (
+                    _resolve_video_codec(video_codec) if video_codec else _pick_video_encoder()
+                )
                 out_video = out.add_stream(chosen_vcodec, rate=fps)
                 target_w = (scale_w or in_video.width or 640) // 2 * 2
                 target_h = (scale_h or in_video.height or 360) // 2 * 2
                 out_video.width = target_w
                 out_video.height = target_h
-                out_video.pix_fmt = "yuv420p"
+                out_video.pix_fmt = _encoder_pix_fmt(chosen_vcodec)
                 out_video.time_base = Fraction(1, fps)
                 out_video.bit_rate = video_bitrate
                 out_video.options = _supported_encoder_options(chosen_vcodec, {"preset": "fast"})
@@ -1794,13 +1803,14 @@ class EngineService:
                         if cancel_event and cancel_event.is_set():
                             break
                         if out_video:
+                            enc_fmt = out_video.pix_fmt
                             if (
                                 frame.width != out_video.width
                                 or frame.height != out_video.height
-                                or frame.format.name != "yuv420p"
+                                or frame.format.name != enc_fmt
                             ):
                                 frame = frame.reformat(
-                                    width=out_video.width, height=out_video.height, format="yuv420p"
+                                    width=out_video.width, height=out_video.height, format=enc_fmt
                                 )
                             _monotonic_video_pts(frame)
                             for enc_pkt in out_video.encode(frame):
@@ -1854,16 +1864,28 @@ class EngineService:
         start_seconds: float,
         end_seconds: float,
         stream_copy: bool = True,
+        video_codec: str | None = None,
         on_progress: Callable[[float, str], None] | None = None,
         cancel_event: Event | None = None,
     ) -> str:
-        """Trim/cut a segment from media. Supports lossless stream copy or frame-accurate re-encode."""
+        """Trim/cut a segment from media. Supports lossless stream copy or frame-accurate re-encode.
+
+        ``video_codec`` is the screen's wheel-measured pick for the re-encode
+        path (None = legacy auto). The resolver raises EngineCapabilityError
+        for anything the wheel cannot encode.
+        """
         if stream_copy:
             return EngineService._cut_stream_copy(
                 input_path, output_path, start_seconds, end_seconds, on_progress, cancel_event
             )
         return EngineService._cut_reencode(
-            input_path, output_path, start_seconds, end_seconds, on_progress, cancel_event
+            input_path,
+            output_path,
+            start_seconds,
+            end_seconds,
+            video_codec,
+            on_progress,
+            cancel_event,
         )
 
     @staticmethod
@@ -2012,6 +2034,7 @@ class EngineService:
         output_path: str,
         start_s: float,
         end_s: float,
+        video_codec: str | None = None,
         on_progress: Callable[[float, str], None] | None = None,
         cancel_event: Event | None = None,
     ) -> str:
@@ -2029,11 +2052,13 @@ class EngineService:
             out_video = None
             if in_video:
                 fps = int(in_video.average_rate or 30)
-                chosen_vcodec = _pick_video_encoder()
+                chosen_vcodec = (
+                    _resolve_video_codec(video_codec) if video_codec else _pick_video_encoder()
+                )
                 out_video = out.add_stream(chosen_vcodec, rate=fps)
                 out_video.width = in_video.width
                 out_video.height = in_video.height
-                out_video.pix_fmt = "yuv420p"
+                out_video.pix_fmt = _encoder_pix_fmt(chosen_vcodec)
                 out_video.time_base = Fraction(1, fps)
                 out_video.options = _supported_encoder_options(
                     chosen_vcodec, {"crf": "20", "preset": "fast"}
@@ -2912,11 +2937,17 @@ class EngineService:
         container_format: str | None = "mp4",
         transition: str = "cut",
         fade_s: float = 0.5,
+        video_codec: str | None = None,
         on_progress: Callable[[float, str], None] | None = None,
         cancel_event: Event | None = None,
     ) -> str:
         """Join clips end-to-end. Identical streams → lossless stream-copy;
-        anything else → uniform re-encode (scaled to the first clip's shape)."""
+        anything else → uniform re-encode (scaled to the first clip's shape).
+
+        ``video_codec`` is the screen's wheel-measured pick for any path that
+        re-encodes (None = legacy auto). The resolver raises
+        EngineCapabilityError for anything the wheel cannot encode.
+        """
         if not paths or len(paths) < 2:
             raise ValueError("Pick at least two files to join")
 
@@ -2931,6 +2962,7 @@ class EngineService:
                     output_path,
                     container_format,
                     fade_s,
+                    video_codec,
                     on_progress,
                     cancel_event,
                 )
@@ -2945,7 +2977,7 @@ class EngineService:
                 paths, output_path, container_format, on_progress, cancel_event
             )
         return EngineService._concat_reencode(
-            paths, infos, output_path, container_format, on_progress, cancel_event
+            paths, infos, output_path, container_format, video_codec, on_progress, cancel_event
         )
 
     @staticmethod
@@ -3146,8 +3178,9 @@ class EngineService:
         infos: list[MediaInfo],
         output_path: str,
         container_format: str | None,
-        on_progress: Callable[[float, str], None] | None,
-        cancel_event: Event | None,
+        video_codec: str | None = None,
+        on_progress: Callable[[float, str], None] | None = None,
+        cancel_event: Event | None = None,
     ) -> str:
         """Uniform re-encode join: one encoder pair for the whole chain;
         clips with mismatched shapes are scaled to the first clip's size.
@@ -3165,11 +3198,11 @@ class EngineService:
             out_w = max(2, (fv.width or 640 // 2 * 2) // 2 * 2)
             out_h = max(2, (fv.height or 360 // 2 * 2) // 2 * 2)
             out_video = None
-            chosen_v = _pick_video_encoder()
+            chosen_v = _resolve_video_codec(video_codec) if video_codec else _pick_video_encoder()
             out_video = out.add_stream(chosen_v, rate=out_fps)
             out_video.width = out_w
             out_video.height = out_h
-            out_video.pix_fmt = "yuv420p"
+            out_video.pix_fmt = _encoder_pix_fmt(chosen_v)
             out_video.time_base = Fraction(1, out_fps)
             out_video.options = _supported_encoder_options(
                 chosen_v, {"crf": "23", "preset": "fast"}
@@ -3206,12 +3239,12 @@ class EngineService:
                                 if (
                                     frame.width != out_video.width
                                     or frame.height != out_video.height
-                                    or frame.format.name != "yuv420p"
+                                    or frame.format.name != out_video.pix_fmt
                                 ):
                                     frame = frame.reformat(
                                         width=out_video.width,
                                         height=out_video.height,
-                                        format="yuv420p",
+                                        format=out_video.pix_fmt,
                                     )
                                 frame.pts = None  # sequential across the whole chain
                                 for enc_pkt in out_video.encode(frame):
@@ -3254,8 +3287,9 @@ class EngineService:
         output_path: str,
         container_format: str | None,
         fade_s: float,
-        on_progress: Callable[[float, str], None] | None,
-        cancel_event: Event | None,
+        video_codec: str | None = None,
+        on_progress: Callable[[float, str], None] | None = None,
+        cancel_event: Event | None = None,
     ) -> str:
         """Uniform re-encode join with crossfades at every boundary.
 
@@ -3267,6 +3301,8 @@ class EngineService:
         output frames are then re-stamped by index like the mid segments.
         Audio windows use acrossfade (native pts in, encode-time +cursor shift
         out — verified monotonic); mid audio is seconds-based (t - start + cursor).
+
+        ``video_codec`` is the screen's wheel-measured pick (None = legacy).
         """
         first = infos[0]
         fps = first.video_stream.fps or 30.0
@@ -3284,11 +3320,11 @@ class EngineService:
         out = av.open(output_path, "w", format=container_format)
         cancelled = False
         try:
-            chosen_v = _pick_video_encoder()
+            chosen_v = _resolve_video_codec(video_codec) if video_codec else _pick_video_encoder()
             out_video = out.add_stream(chosen_v, rate=max(1, round(fps)))
             out_video.width = out_w
             out_video.height = out_h
-            out_video.pix_fmt = "yuv420p"
+            out_video.pix_fmt = _encoder_pix_fmt(chosen_v)
             out_video.time_base = fine
             out_video.options = _supported_encoder_options(
                 chosen_v, {"crf": "23", "preset": "fast", "bf": "0"}
@@ -3334,8 +3370,12 @@ class EngineService:
                     mux_clamp.mux(out, enc_pkt)
 
             def reformat_to_out(frame):
-                if frame.width != out_w or frame.height != out_h or frame.format.name != "yuv420p":
-                    return frame.reformat(width=out_w, height=out_h, format="yuv420p")
+                if (
+                    frame.width != out_w
+                    or frame.height != out_h
+                    or frame.format.name != out_video.pix_fmt
+                ):
+                    return frame.reformat(width=out_w, height=out_h, format=out_video.pix_fmt)
                 return frame
 
             for i, path in enumerate(paths):

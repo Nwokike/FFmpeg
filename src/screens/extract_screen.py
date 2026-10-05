@@ -80,7 +80,7 @@ def ExtractScreen() -> ft.Control:
     # max<min and render a broken slider); value pinned inside both.
     # The clamp only ever *lowered*, so it could never repair max<min.
     def _clamp_gif_duration() -> None:
-        lo, hi = 1.0, max(1.0, min(15.0, duration_s))
+        lo, hi = 1.0, max(1.0, min(8.0, duration_s))
         if gif_duration < lo:
             set_gif_duration(lo)
         elif gif_duration > hi:
@@ -386,32 +386,37 @@ def ExtractScreen() -> ft.Control:
                         f"{gif_fps} fps • {gif_width}px wide",
                         is_dark=is_dark,
                     ),
+                    # Phone CPUs stall on the single-pass palette graph past
+                    # ~20fps/640px/8s (hundreds of full-res frames through
+                    # palettegen+paletteuse on the serial worker) — the caps
+                    # keep the worst case responsive, with the reason on screen.
                     ft.Slider(
                         value=float(gif_fps),
                         min=10,
-                        max=30,
-                        divisions=20,
+                        max=20,
+                        divisions=10,
                         on_change=lambda e: set_gif_fps(int(e.control.value)),
                     ),
                     section_header("GIF Width", f"{gif_width}px wide", is_dark=is_dark),
                     ft.Slider(
                         value=float(gif_width),
                         min=160,
-                        max=1080,
-                        divisions=23,
+                        max=640,
+                        divisions=12,
                         on_change=lambda e: set_gif_width(int(e.control.value)),
                     ),
                     section_header("GIF Duration", f"{gif_duration:.1f} seconds", is_dark=is_dark),
                     ft.Slider(
                         value=float(gif_duration),
                         min=1.0,
-                        max=max(1.0, float(min(15.0, duration_s))),
+                        max=max(1.0, float(min(8.0, duration_s))),
                         divisions=14,
                         on_change=lambda e: set_gif_duration(round(float(e.control.value), 1)),
                     ),
                     ft.Text(
-                        "Tall portrait sources scale height proportionally — "
-                        "1080px-wide portrait GIFs get very tall and heavy.",
+                        "GIFs cap at 20 fps, 640px wide and 8s — the palette "
+                        "pass on a phone CPU stalls past that. Tall portrait "
+                        "sources scale height proportionally.",
                         size=FONT_SM,
                         color=muted,
                     ),

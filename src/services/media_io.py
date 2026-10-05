@@ -102,6 +102,11 @@ class MediaIOService:
         self.page = page
         self.file_picker = ft.FilePicker()
         self.share = ft.Share()
+        # Single-flight: the native picker raises PlatformException
+        # (already_active) when a second pick_files lands while one is open —
+        # a double-tap on Upload did exactly that. One asyncio lock serializes
+        # every pick round (the retry inside pick_media_files included).
+        self._pick_lock = asyncio.Lock()
         # Service controls self-register with the client on construction
         # (Service.__post_init__ → ServiceRegistry.register_service, which
         # pushes the update). Manual page.services.append bypasses that
@@ -139,6 +144,10 @@ class MediaIOService:
 
     async def pick_media_file(self) -> str | None:
         """Open the media picker without copying a 500 MB file into Python RAM."""
+        async with self._pick_lock:
+            return await self._pick_media_file_locked()
+
+    async def _pick_media_file_locked(self) -> str | None:
         try:
             files = await self._pick_once(allow_multiple=False)
             if files:
@@ -168,6 +177,10 @@ class MediaIOService:
 
     async def pick_media_files(self) -> list[str]:
         """Multi-select media picker; never buffers large files in RAM."""
+        async with self._pick_lock:
+            return await self._pick_media_files_locked()
+
+    async def _pick_media_files_locked(self) -> list[str]:
         picked: list[str] = []
         try:
             files = await self._pick_once(allow_multiple=True)

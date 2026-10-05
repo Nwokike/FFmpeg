@@ -132,8 +132,16 @@ def ResultScreen() -> ft.Control:
         idx = 1 if target == "original" else 0
 
         async def _jump():
+            # A bare jump_to left the old item on screen under
+            # PlaylistMode.NONE (verified flet_video 1.0.3: no resync on
+            # jump) — pause, jump, rewind to 0 and play so the new item is
+            # audibly/visibly the one selected.
             try:
+                await v.pause()
                 await v.jump_to(idx)
+                await v.seek(ft.Duration(seconds=0))
+                await v.play()
+                set_playing(True)
             except IndexError as exc:
                 logger.debug("jump_to(%s) out of range: %s", idx, exc)
             except Exception as exc:
@@ -246,6 +254,9 @@ def ResultScreen() -> ft.Control:
         audio_wanted = suffix in _AUDIO_EXTS and _HAS_AUDIO_PLAYER
         if audio_wanted and audio_ref.current is None:
             try:
+                # No on_error: the installed flet_audio Audio has no such
+                # kwarg (verified against .venv). Errors surface via
+                # on_state_change → DISPOSED, never a crash.
                 player = Audio(
                     src=str(out_p),
                     release_mode=ReleaseMode.STOP,
@@ -262,9 +273,6 @@ def ResultScreen() -> ft.Control:
                         set_dur_ms(int(e.duration.in_milliseconds))
                         if getattr(e, "duration", None) is not None
                         else None
-                    ),
-                    on_error=lambda e: logger.warning(
-                        "Preview audio error: %s", getattr(e, "data", e)
                     ),
                 )
                 page.services.append(player)
@@ -435,17 +443,19 @@ def ResultScreen() -> ft.Control:
                                             else None
                                         ),
                                     ),
-                                    ft.IconButton(
-                                        icon=ft.Icons.FULLSCREEN_ROUNDED,
-                                        tooltip="Fullscreen preview",
-                                        on_click=_go_fullscreen,
-                                    ),
+                                    # No screen-level fullscreen button here: the
+                                    # player keeps its native chrome (with its own
+                                    # fullscreen affordance) — a second button
+                                    # beside Output/Original duplicated it.
                                 ],
                                 alignment=ft.MainAxisAlignment.CENTER,
                                 spacing=SPACE_SM,
                             )
                         ]
                         if has_orig  # single-item playlist: Original would doom jump_to(1)
+                        # Single-item playlist: the native chrome's fullscreen
+                        # affordance is small on phones, so one explicit
+                        # button stays — exactly one, never two.
                         else (
                             [
                                 ft.IconButton(
