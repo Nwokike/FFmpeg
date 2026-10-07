@@ -2116,6 +2116,8 @@ class EngineService:
                         if frame.time > end_s:
                             break
                         if out_video:
+                            if frame.format.name != out_video.pix_fmt:
+                                frame = frame.reformat(format=out_video.pix_fmt)
                             _monotonic_video_pts(frame)
                             for enc_pkt in out_video.encode(frame):
                                 mux_clamp.mux(out, enc_pkt)

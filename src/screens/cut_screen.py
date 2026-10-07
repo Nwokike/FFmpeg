@@ -274,11 +274,15 @@ def CutScreen() -> ft.Control:
         if running:
             return
         # Frame-accurate re-encode needs a verified encoder; stream-copy
-        # needs none.  Gate only the re-encode path on the probe.
-        if not stream_copy and app_state.probe_info is None:
+        # needs none. Gate the re-encode path on the probe AND the measured
+        # encoder list — a landed-but-empty probe would otherwise start a job
+        # that dies late in _pick_video_encoder.
+        if not stream_copy and (app_state.probe_info is None or not available_video):
             show_snack(
                 page,
-                "Still probing engine capabilities — try again in a moment.",
+                "Still probing engine capabilities — try again in a moment."
+                if app_state.probe_info is None
+                else "This build has no video encoder for re-encode — use Stream Copy.",
                 bgcolor=ERROR,
             )
             return
@@ -646,7 +650,7 @@ def CutScreen() -> ft.Control:
                 or busy
                 or cut_duration <= 0.05
                 or not kind_ok
-                or (not stream_copy and app_state.probe_info is None),
+                or (not stream_copy and (app_state.probe_info is None or not available_video)),
                 on_click=_start_cut,
             ),
         ],

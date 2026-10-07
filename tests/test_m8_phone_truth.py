@@ -183,3 +183,22 @@ def test_gif_caps_are_phone_safe():
     assert "max=20" in src, "GIF fps cap missing"
     assert "max=640" in src, "GIF width cap missing"
     assert "min(8.0" in src, "GIF duration cap missing"
+
+
+def test_verifier_defects_closed():
+    """D1-D4 from the independent verification swarm (M8 review)."""
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    engine = (root / "src" / "services" / "engine_service.py").read_text(encoding="utf-8")
+    cut = (root / "src" / "screens" / "cut_screen.py").read_text(encoding="utf-8")
+    join = (root / "src" / "screens" / "join_screen.py").read_text(encoding="utf-8")
+
+    # D1: _cut_reencode normalizes frames to the declared pix_fmt.
+    assert "frame.reformat(format=out_video.pix_fmt)" in engine
+    # D2: cut re-encode Start refuses on empty encoder list (both guard sites).
+    assert "not available_video" in cut
+    # D3: join Start is disabled with no encoder.
+    assert "or not chosen_video" in join
+    # D4: plain-cut joins forward the measured codec (not only crossfade).
+    assert '"video_codec": chosen_video' in join

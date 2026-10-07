@@ -201,6 +201,11 @@ def JoinScreen() -> ft.Control:
             if reason is not None:
                 show_snack(page, f"Crossfade unavailable: {reason}", bgcolor=ERROR)
                 return
+        # Any mixed-format join re-encodes (lossless only when copyable) —
+        # without a measured encoder that path dies late in the engine.
+        if not chosen_video:
+            show_snack(page, "This build has no video encoder for joining", bgcolor=ERROR)
+            return
         ext = container_fmt
         out_name = unique_temp_name("joined", ext)
         out_path = str(get_temp_dir() / out_name)
@@ -213,11 +218,7 @@ def JoinScreen() -> ft.Control:
                 "container": ("matroska" if ext == "mkv" else "mp4"),
                 "transition": transition,
                 "fade_s": fade_s,
-                **(
-                    {"video_codec": chosen_video}
-                    if transition == "crossfade" and chosen_video
-                    else {}
-                ),
+                "video_codec": chosen_video,
             },
             original_size_bytes=sum(e["size_s"] for e in entries),
         )
@@ -386,6 +387,12 @@ def JoinScreen() -> ft.Control:
                         ),
                         *(
                             [
+                                ft.Text(
+                                    "Re-encode codec (lossless when formats match, "
+                                    "otherwise this encoder runs):",
+                                    size=FONT_XS,
+                                    color=muted,
+                                ),
                                 ft.Row(
                                     controls=[
                                         ft.Chip(
@@ -399,7 +406,7 @@ def JoinScreen() -> ft.Control:
                                     spacing=SPACE_SM,
                                 ),
                             ]
-                            if transition == "crossfade" and join_codecs
+                            if join_codecs
                             else []
                         ),
                     ],
@@ -430,7 +437,7 @@ def JoinScreen() -> ft.Control:
                 f"Join {len(entries) or ''} Clips".replace("  ", " "),
                 icon=ft.Icons.MERGE_TYPE_ROUNDED,
                 height=48,
-                disabled=len(entries) < 2 or busy or queue_busy,
+                disabled=len(entries) < 2 or busy or queue_busy or not chosen_video,
                 on_click=_start_join,
             ),
         ],
