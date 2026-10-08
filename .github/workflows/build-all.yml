@@ -265,7 +265,11 @@ jobs:
             bundletool version
             exit 0
           fi
-          sudo apt-get update -qq && sudo apt-get install -y -qq bundletool
+          # No apt package named bundletool exists on Ubuntu — fetch the jar
+          # from Google's GitHub releases (java comes from setup-java above).
+          curl -sSL -o /tmp/bundletool.jar https://github.com/google/bundletool/releases/download/1.18.3/bundletool-all-1.18.3.jar
+          printf '#!/bin/sh\nexec java -jar /tmp/bundletool.jar "$@"\n' | sudo tee /usr/local/bin/bundletool > /dev/null
+          sudo chmod +x /usr/local/bin/bundletool
           bundletool version
       - name: Inspect AAB manifest (minSdk/targetSdk/versionCode/AdMob)
         run: |
