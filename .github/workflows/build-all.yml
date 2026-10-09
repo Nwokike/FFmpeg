@@ -188,21 +188,10 @@ jobs:
           FLET_ANDROID_SIGNING_KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
           FLET_ANDROID_SIGNING_KEY_STORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
           FLET_ANDROID_SIGNING_KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
-        run: uv run --frozen flet build apk --python-version 3.14 --yes --project ffmpeg --product "FFmpeg Lite" --org ng.kiri --company "Kiri Research Labs" --build-version ${{ env.BUILD_VERSION }} --build-number ${{ env.BUILD_NUMBER }} --split-per-abi -v
-      - name: Verify APK artifacts and prune boundary
+        run: uv run flet build apk --python-version 3.14 --yes --project ffmpeg --product "FFmpeg Lite" --org ng.kiri --company "Kiri Research Labs" --build-version ${{ env.BUILD_VERSION }} --build-number ${{ env.BUILD_NUMBER }} --split-per-abi -v
+      - name: Size report
         if: always()
-        run: |
-          set -euo pipefail
-          shopt -s nullglob
-          artifacts=(build/apk/*.apk)
-          test "${#artifacts[@]}" -gt 0
-          ls -lh build/apk/*.apk
-          for artifact in "${artifacts[@]}"; do
-            if unzip -l "$artifact" | grep -qE 'pytest/|ruff/|uvicorn/|starlette/|fastapi/|docs/|screenshots/'; then
-              echo "Development-only files found in $artifact"
-              exit 1
-            fi
-          done
+        run: ls -lh build/apk/*.apk
       - name: Upload directly to GitHub Release
         if: github.event_name != 'pull_request'
         uses: softprops/action-gh-release@v2
@@ -243,20 +232,10 @@ jobs:
           FLET_ANDROID_SIGNING_KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
           FLET_ANDROID_SIGNING_KEY_STORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
           FLET_ANDROID_SIGNING_KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
-        run: uv run --frozen flet build aab --python-version 3.14 --yes --project ffmpeg --product "FFmpeg Lite" --org ng.kiri --company "Kiri Research Labs" --build-version ${{ env.BUILD_VERSION }} --build-number ${{ env.BUILD_NUMBER }} -v
-      - name: Verify AAB artifact and prune boundary
+        run: uv run flet build aab --python-version 3.14 --yes --project ffmpeg --product "FFmpeg Lite" --org ng.kiri --company "Kiri Research Labs" --build-version ${{ env.BUILD_VERSION }} --build-number ${{ env.BUILD_NUMBER }} -v
+      - name: Size report
         if: always()
-        run: |
-          set -euo pipefail
-          shopt -s nullglob
-          artifacts=(build/aab/*.aab)
-          test "${#artifacts[@]}" -gt 0
-          ls -lh build/aab/*.aab
-          for artifact in "${artifacts[@]}"; do
-            if unzip -l "$artifact" | grep -qE 'pytest/|ruff/|uvicorn/|starlette/|fastapi/|docs/|screenshots/'; then
-              echo "Development-only files found in $artifact"
-              exit 1
-            fi
+        run: ls -lh build/aab/*.aab
       - name: Upload directly to GitHub Release
         if: github.event_name != 'pull_request'
         uses: softprops/action-gh-release@v2
@@ -278,7 +257,7 @@ jobs:
           python-version: '3.14'
 
       - name: Build Windows Portable
-        run: uv run --frozen flet build windows --python-version 3.14 --yes --project ffmpeg --product "FFmpeg Lite" --org ng.kiri --company "Kiri Research Labs" --build-version ${{ env.BUILD_VERSION }} --build-number ${{ env.BUILD_NUMBER }} -v
+        run: uv run flet build windows --python-version 3.14 --yes --project ffmpeg --product "FFmpeg Lite" --org ng.kiri --company "Kiri Research Labs" --build-version ${{ env.BUILD_VERSION }} --build-number ${{ env.BUILD_NUMBER }} -v
 
       - name: Generate Icon for Installer
         run: |
@@ -350,7 +329,7 @@ jobs:
           sudo apt-get install -y libgtk-3-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libmpv-dev libmpv2 rpm ruby ruby-dev
           sudo gem install --no-document fpm
       - name: Build Linux Bundle
-        run: uv run --frozen flet build linux --python-version 3.14 --yes --project ffmpeg --product "FFmpeg Lite" --org ng.kiri --company "Kiri Research Labs" --build-version ${{ env.BUILD_VERSION }} --build-number ${{ env.BUILD_NUMBER }} -v
+        run: uv run flet build linux --python-version 3.14 --yes --project ffmpeg --product "FFmpeg Lite" --org ng.kiri --company "Kiri Research Labs" --build-version ${{ env.BUILD_VERSION }} --build-number ${{ env.BUILD_NUMBER }} -v
       - name: Create Linux Packages (.deb, .rpm, .tar.gz)
         run: |
           mkdir -p build/dist

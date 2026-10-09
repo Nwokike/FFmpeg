@@ -9,20 +9,20 @@ requires-python = ">=3.14"
 # framework release can change component constructors and event semantics.
 dependencies = [
     "av==18.1.0",
-    "flet==1.0.3",
-    "flet-ads==1.0.3",
-    "flet-audio==1.0.3",
-    "flet-audio-recorder==1.0.3",
-    "flet-camera==1.0.3",
-    "flet-permission-handler==1.0.3",
-    "flet-video==1.0.3",
+    "flet==1.0.4",
+    "flet-ads==1.0.4",
+    "flet-audio==1.0.4",
+    "flet-audio-recorder==1.0.4",
+    "flet-camera==1.0.4",
+    "flet-permission-handler==1.0.4",
+    "flet-video==1.0.4",
     "httpx==0.28.1",
 ]
 
 [dependency-groups]
 dev = [
-    "flet-cli==1.0.3",
-    "flet-desktop==1.0.3",
+    "flet-cli==1.0.4",
+    "flet-desktop==1.0.4",
     "pytest==9.1.1",
     "ruff==0.16.8",
 ]
