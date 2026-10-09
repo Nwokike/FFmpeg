@@ -49,9 +49,98 @@
 
 ## Screenshots
 
+<table>
+  <tr>
+    <td width="50%"><img src="screenshots/home_light_mobile.png" width="280" alt="Home" /></td>
+    <td width="50%"><img src="screenshots/home_dark_mobile.png" width="280" alt="Home, dark mode" /></td>
+  </tr>
+  <tr>
+    <td align="center"><em>Studio Tools: every operation gated on what this device can actually encode</em></td>
+    <td align="center"><em>Full dark mode for late-night sessions</em></td>
+  </tr>
+</table>
+
+<table>
+  <tr>
+    <td width="50%"><img src="screenshots/source_picker_mobile.png" width="280" alt="Choose a source" /></td>
+    <td width="50%"><img src="screenshots/convert_formats_mobile.png" width="280" alt="Convert" /></td>
+  </tr>
+  <tr>
+    <td align="center"><em>Upload from storage, or capture straight from camera and mic</em></td>
+    <td align="center"><em>Convert: pick the container — MP4, MKV, MOV, WebM, AVI — or FFV1 lossless</em></td>
+  </tr>
+</table>
+
+<table>
+  <tr>
+    <td width="50%"><img src="screenshots/compress_targets_mobile.png" width="280" alt="Compress" /></td>
+    <td width="50%"><img src="screenshots/extract_tracks_mobile.png" width="280" alt="Extract" /></td>
+  </tr>
+  <tr>
+    <td align="center"><em>Compress to a real target: WhatsApp 16 MB, Discord 25 MB, Email 10 MB or a custom limit</em></td>
+    <td align="center"><em>Extract audio, video frames or animated GIFs — codecs measured per build</em></td>
+  </tr>
+</table>
+
+<table>
+  <tr>
+    <td width="50%"><img src="screenshots/filters_stack_mobile.png" width="280" alt="Filters" /></td>
+    <td width="50%"><img src="screenshots/audio_studio_mobile.png" width="280" alt="Audio Studio" /></td>
+  </tr>
+  <tr>
+    <td align="center"><em>Filter stack: speed, volume, rotation, crop, scale, EQ and PNG watermark</em></td>
+    <td align="center"><em>Audio Studio: audition the source, then master with loudness presets</em></td>
+  </tr>
+</table>
+
+<table>
+  <tr>
+    <td width="50%"><img src="screenshots/cut_timeline_dark_mobile.png" width="280" alt="Cut and trim" /></td>
+    <td width="50%"><img src="screenshots/join_clips_mobile.png" width="280" alt="Join" /></td>
+  </tr>
+  <tr>
+    <td align="center"><em>Cut: keyframe timeline with lossless stream-copy or frame-accurate re-encode</em></td>
+    <td align="center"><em>Join clips end-to-end — hard cut or a crossfade blend</em></td>
+  </tr>
+</table>
+
+<table>
+  <tr>
+    <td width="50%"><img src="screenshots/dossier_dark_mobile.png" width="280" alt="Media Dossier" /></td>
+    <td width="50%"><img src="screenshots/streams_live_mobile.png" width="280" alt="Live Streams" /></td>
+  </tr>
+  <tr>
+    <td align="center"><em>Media Dossier: codecs, bitrates, rotation and a shareable report</em></td>
+    <td align="center"><em>Streams: watch HTTP/HLS live while it records — Stop is yours</em></td>
+  </tr>
+</table>
+
+<table>
+  <tr>
+    <td width="50%"><img src="screenshots/result_audio_mobile.png" width="280" alt="Result with audio player" /></td>
+    <td width="50%"><img src="screenshots/result_video_mobile.png" width="280" alt="Result with compare" /></td>
+  </tr>
+  <tr>
+    <td align="center"><em>Result: inline audio player with the exact size change</em></td>
+    <td align="center"><em>Compare the output against the original, frame for frame</em></td>
+  </tr>
+</table>
+
+<table>
+  <tr>
+    <td width="50%"><img src="screenshots/capture_mic_mobile.png" width="280" alt="Capture" /></td>
+    <td width="50%"><img src="screenshots/history_dark_mobile.png" width="280" alt="History" /></td>
+  </tr>
+  <tr>
+    <td align="center"><em>Capture photo, video or mic straight into the pipeline</em></td>
+    <td align="center"><em>History: every job, its inputs and outputs, with one-tap restore</em></td>
+  </tr>
+</table>
+
 <p align="center">
-  <img src="screenshots/home_dark.png" width="90%" alt="FFmpeg Lite Home" />
+  <img src="screenshots/settings_light_mobile.png" width="280" alt="Settings" />
 </p>
+<p align="center"><em>Settings: theme, hardware decode, cache and the HLS download cap</em></p>
 
 ---
 
