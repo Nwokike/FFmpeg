@@ -38,7 +38,6 @@ org = "ng.kiri"
 product = "FFmpeg Lite"
 company = "Kiri Research Labs"
 build_number = 1
-icon_background = "#0f1114"
 desktop_flavor = "full"
 # Cross-platform groups add matching iOS usage descriptions/entitlements;
 # Android's explicit permission table below remains intact.
@@ -81,7 +80,6 @@ target_arch = ["arm64-v8a", "x86_64", "armeabi-v7a"]
 # `manifest_application.usesCleartextTraffic` is likewise NOT merged (only
 # permission/feature/meta_data/provider are) — http:// capture depends on the
 # platform default, so test it on-device before advertising plain-http input.
-adaptive_icon_background = "#0f1114"
 
 [tool.flet.android.meta_data]
 # Production AdMob App ID (matches ADMOB_APP_ID_PROD in src/core/constants.py
