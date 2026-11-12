@@ -7,6 +7,7 @@ from pathlib import Path
 import flet as ft
 
 from components.tool_job_status import tool_job_row
+from core.engine_probe import codec_family, codec_label, container_label
 from core.notify import ERROR, show_snack
 from core.state import Job, use_app_state
 from core.storage_paths import format_bytes, get_temp_dir, unique_temp_name
@@ -35,41 +36,6 @@ def _containers_for(kind: str) -> tuple[str, ...]:
         "audio": _AUDIO_CONTAINERS,
         "video": _VIDEO_CONTAINERS,
     }.get(kind, _VIDEO_CONTAINERS)
-
-
-_CONTAINER_LABELS = {
-    "mp4": "MP4 (Universal standard)",
-    "mkv": "MKV (Matroska container)",
-    "mov": "MOV (QuickTime / Apple)",
-    "webm": "WebM (Open web video)",
-    "avi": "AVI (Legacy container)",
-    "mp3": "MP3 (Audio only)",
-    "m4a": "M4A (AAC Audio)",
-    "flac": "FLAC (Lossless audio)",
-    "wav": "WAV (PCM audio)",
-    "jpg": "JPEG (Lossy image)",
-    "png": "PNG (Lossless image)",
-    "webp": "WebP (Modern image)",
-}
-
-_AUDIO_CODEC_CHOICES = (
-    ("aac", "AAC"),
-    ("mp3", "MP3"),
-    ("flac", "FLAC"),
-    ("opus", "Opus"),
-    ("vorbis", "Vorbis"),
-    ("wav", "WAV"),
-)
-
-# Display codec → probe encoder names it may resolve to (engine aliases).
-_AUDIO_CHOICE_ENCODERS: dict[str, tuple[str, ...]] = {
-    "aac": ("aac",),
-    "mp3": ("libmp3lame", "mp3"),
-    "flac": ("flac",),
-    "opus": ("libopus", "opus"),
-    "vorbis": ("vorbis",),
-    "wav": ("pcm_s16le", "pcm_s24le"),
-}
 
 
 @ft.component
@@ -102,25 +68,16 @@ def ConvertScreen() -> ft.Control:
     # wheel and let AAC-in-.mp3-class mismatches through to mux time).
     available_audio = list(probe_info.audio_encoder_picks or []) if probe_info else []
 
-    def _video_visible(key: str) -> bool:
-        if key in available_video:
-            return True
-        return any(
-            alias in available_video
-            for alias in ({"libx264": ("h264",), "h264": ("libx264",)}.get(key, ()))
-        )
+    available_set = set(available_video)
 
-    video_choices = [
-        ("libx264", "H.264 (libx264)"),
-        ("libx265", "H.265 (HEVC)"),
-        ("libsvtav1", "AV1 (SVT)"),
-        ("vp9", "VP9"),
-        ("mpeg4", "MPEG-4"),
-        ("mjpeg", "MJPEG"),
-        ("prores", "ProRes"),
-        ("ffv1", "FFV1 (lossless)"),
-    ]
-    visible_video = [(key, label) for key, label in video_choices if _video_visible(key)]
+    def _video_visible(key: str) -> bool:
+        if key in available_set:
+            return True
+        return any(alias in available_set for alias in codec_family(key))
+
+    # Every verified video encoder the wheel ships, in the probe's display
+    # order, labeled from the wheel's own long names.
+    visible_video = [(name, codec_label(name)) for name in available_video]
 
     # What kind of file the user picked. Selecting a still image and seeing
     # "playback speed / H.264 / 4K resolution" was the reported bug — the
@@ -129,7 +86,7 @@ def ConvertScreen() -> ft.Control:
 
     # State variables
     container_fmt, set_container_fmt = ft.use_state("mp4")
-    v_codec, set_v_codec = ft.use_state("libx264")
+    v_codec, set_v_codec = ft.use_state("")
     a_codec, set_a_codec = ft.use_state("aac")
     crf_val, set_crf_val = ft.use_state(23)
     res_choice, set_res_choice = ft.use_state("original")
@@ -141,22 +98,18 @@ def ConvertScreen() -> ft.Control:
     # default (libx264) is meaningless on a wheel that only ships LGPL codecs.
     # The clamp is DERIVED (not written back): the UI always shows the
     # effective value, so stale state can never silently resurrect.
-    # Wheel-measured audio shortlist, shared by every kind branch below.
-    visible_audio = [
-        key
-        for key, encs in _AUDIO_CHOICE_ENCODERS.items()
-        if any(e in available_audio for e in encs)
-    ]
+    # Wheel-measured audio encoders, shared by every kind branch below.
+    visible_audio = list(available_audio)
 
     def _pick_audio() -> str | None:
-        # Wheel default for the container wins (opus-for-webm-class cases),
+        # Wheel default for the container wins (aac-for-m4a, mp3-for-mp3...),
         # then the user's pick if the wheel encodes it, else first verified.
         wheel_default = (
             (probe_info.muxer_default_audio.get(chosen_container, "") or "") if probe_info else ""
         )
         default_choice = next(
-            (key for key, encs in _AUDIO_CHOICE_ENCODERS.items() if wheel_default in encs),
-            "aac",
+            (name for name in available_audio if name in codec_family(wheel_default)),
+            None,
         )
         if a_codec in visible_audio:
             return a_codec
@@ -165,7 +118,9 @@ def ConvertScreen() -> ft.Control:
         return visible_audio[0] if visible_audio else a_codec
 
     if media_kind == "image":
-        still_choices = [c for c in ("png", "mjpeg", "libwebp", "gif") if c in available_video]
+        still_choices = [
+            c for c in available_video if c in (probe_info.encoder_intra_only if probe_info else [])
+        ]
         chosen_video = (
             v_codec
             if v_codec in still_choices
@@ -284,15 +239,10 @@ def ConvertScreen() -> ft.Control:
     ]
 
     container_options = [
-        ft.DropdownOption(key=key, text=_CONTAINER_LABELS.get(key, key.upper()))
-        for key in allowed_containers
+        ft.DropdownOption(key=key, text=container_label(key)) for key in allowed_containers
     ]
 
-    audio_options = [
-        ft.DropdownOption(key=key, text=label)
-        for key, label in _AUDIO_CODEC_CHOICES
-        if key in visible_audio
-    ]
+    audio_options = [ft.DropdownOption(key=key, text=codec_label(key)) for key in visible_audio]
 
     return ft.ListView(
         controls=[
@@ -383,16 +333,7 @@ def ConvertScreen() -> ft.Control:
                                     for key, label in (
                                         visible_video
                                         if media_kind == "video"
-                                        else [
-                                            (still_key, still_label)
-                                            for still_key, still_label in (
-                                                ("png", "PNG"),
-                                                ("mjpeg", "JPEG"),
-                                                ("libwebp", "WebP"),
-                                                ("gif", "GIF"),
-                                            )
-                                            if still_key in available_video
-                                        ]
+                                        else [(key, codec_label(key)) for key in still_choices]
                                     )
                                 ],
                                 wrap=True,
@@ -431,7 +372,8 @@ def ConvertScreen() -> ft.Control:
                             ),
                         ]
                         if media_kind == "video"
-                        and chosen_video not in ("prores", "ffv1", "mjpeg", "png", "gif", "libwebp")
+                        and chosen_video not in (probe_info.encoder_lossless if probe_info else [])
+                        and chosen_video not in (probe_info.encoder_intra_only if probe_info else [])
                         else []
                     ),
                     # Resolution

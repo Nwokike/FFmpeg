@@ -10,6 +10,7 @@ from pathlib import Path
 import flet as ft
 
 from components.tool_job_status import tool_job_row
+from core.engine_probe import codec_label
 from core.notify import ERROR, show_snack
 from core.state import Job, use_app_state
 from core.storage_paths import format_bytes, get_temp_dir, unique_temp_name
@@ -78,17 +79,6 @@ def CutScreen() -> ft.Control:
     # wheel-measured pick as Compress — the phone offers mpeg4, never H.264.
     probe_info = app_state.probe_info
     available_video = list(probe_info.video_encoder_picks or []) if probe_info else []
-    _VIDEO_LABELS = {
-        "libx264": "H.264",
-        "h264": "H.264",
-        "libx265": "HEVC",
-        "mpeg4": "MPEG-4",
-        "mjpeg": "MJPEG",
-        "prores": "ProRes",
-        "ffv1": "FFV1 (lossless)",
-        "libvpx-vp9": "VP9",
-        "libsvtav1": "AV1",
-    }
     chosen_video = (
         v_codec if v_codec in available_video else (available_video[0] if available_video else "")
     )
@@ -621,13 +611,13 @@ def CutScreen() -> ft.Control:
                 [
                     section_header(
                         "Re-encode Codec",
-                        f"Frame-accurate trim encodes with {_VIDEO_LABELS.get(chosen_video, chosen_video or '—')}",
+                        f"Frame-accurate trim encodes with {codec_label(chosen_video) if chosen_video else '—'}",
                         is_dark=is_dark,
                     ),
                     ft.Row(
                         controls=[
                             ft.Chip(
-                                label=ft.Text(_VIDEO_LABELS.get(enc, enc)),
+                                label=ft.Text(codec_label(enc)),
                                 selected=chosen_video == enc,
                                 on_click=lambda _, e=enc: set_v_codec(e),
                             )

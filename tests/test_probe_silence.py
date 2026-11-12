@@ -59,10 +59,10 @@ def test_hls_and_dash_are_formats_only():
     assert ("dash" in p.formats) == p.dash_ok
 
 
-def test_to_text_labels_preferred_tier_counts():
+def test_to_text_labels_full_enumeration_counts():
     text = probe().to_text()
-    assert "preferred encoders verified" in text
-    assert "preferred decoders verified" in text
+    assert "encoders (verified)" in text
+    assert "decoders (verified)" in text
 
 
 def test_find_attr_resolves_dotted_module_path():

@@ -203,10 +203,14 @@ def test_unique_temp_names_never_collide():
 def test_check_pair_matrix():
     from services.engine_service import check_pair
 
+    # Derived from the wheel's own muxer codec lists (no hand-written matrix):
+    # the mp4 muxer does accept VP9/AV1/H.264, so those pairs mux fine.
     assert check_pair("mp4", "mpeg4", "aac") is None
-    assert check_pair("mp4", "vp9", "aac") is not None
-    assert "muxable" in (check_pair("mp4", "vp9", "aac") or "")
+    assert check_pair("mp4", "vp9", "aac") is None
     assert check_pair("webm", "libvpx-vp9", "opus") is None
+    # mp3 is an audio-only muxer: a video codec is refused before Start.
+    assert "muxable" in (check_pair("mp3", "mpeg4", "aac") or "")
+    # Unknown containers fail OPEN (None).
     assert check_pair("unknowncontainer", "anything", "anything") is None
 
 

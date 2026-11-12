@@ -38,7 +38,7 @@ from av.error import FFmpegError
 from av.filter.loudnorm import stats as loudnorm_stats
 from av.video.reformatter import VideoReformatter
 
-from core.engine_probe import probe
+from core.engine_probe import codec_family, probe
 from core.state import ChapterInfo, MediaInfo, MediaStreamInfo
 from core.storage_paths import get_cache_dir, get_temp_dir
 
@@ -173,82 +173,11 @@ class EngineCapabilityError(ValueError):
 
 # FFmpeg exposes the same encoder under several names. Resolve the friendly
 # name a screen/job asks for onto whichever alias this build actually ships.
-_VIDEO_CODEC_ALIASES: dict[str, tuple[str, ...]] = {
-    "libx264": ("libx264", "h264"),
-    "h264": ("h264", "libx264"),
-    "libx265": ("libx265", "hevc", "x265"),
-    "hevc": ("hevc", "libx265", "x265"),
-    "x265": ("x265", "libx265", "hevc"),
-    "libsvtav1": ("libsvtav1", "av1"),
-    "av1": ("av1", "libsvtav1"),
-    "vp9": ("vp9", "libvpx-vp9", "libvpx"),
-    "libvpx-vp9": ("libvpx-vp9", "vp9", "libvpx"),
-    "libvpx": ("libvpx", "vp9", "libvpx-vp9"),
-    "mpeg4": ("mpeg4",),
-    "mjpeg": ("mjpeg",),
-    "prores": ("prores",),
-    "ffv1": ("ffv1",),
-    "libwebp": ("libwebp",),
-    "png": ("png",),
-    "gif": ("gif",),
-}
-_AUDIO_CODEC_ALIASES: dict[str, tuple[str, ...]] = {
-    "aac": ("aac",),
-    "flac": ("flac",),
-    "opus": ("libopus", "opus"),
-    "libopus": ("libopus", "opus"),
-    "mp3": ("libmp3lame", "mp3"),
-    "libmp3lame": ("libmp3lame", "mp3"),
-    "wav": ("pcm_s16le",),
-    "pcm_s16le": ("pcm_s16le",),
-    "pcm_s24le": ("pcm_s24le", "pcm_s16le"),
-    "vorbis": ("vorbis", "libvorbis"),
-    "libvorbis": ("libvorbis", "vorbis"),
-    "ogg": ("vorbis", "libvorbis"),
-    "alac": ("alac",),
-    "m4a": ("aac",),
-}
-_VIDEO_CODEC_LABELS = {
-    "libx264": "H.264",
-    "h264": "H.264",
-    "libx265": "HEVC",
-    "hevc": "HEVC",
-    "x265": "HEVC",
-    "vp9": "VP9",
-    "libvpx-vp9": "VP9",
-    "libvpx": "VP9",
-    "libsvtav1": "AV1",
-    "av1": "AV1",
-    "mpeg4": "MPEG-4",
-    "mjpeg": "MJPEG",
-    "prores": "ProRes",
-    "ffv1": "FFV1",
-    "libwebp": "WebP",
-    "png": "PNG",
-    "gif": "GIF",
-}
-_AUDIO_CODEC_LABELS = {
-    "aac": "AAC",
-    "flac": "FLAC",
-    "opus": "Opus",
-    "libopus": "Opus",
-    "mp3": "MP3",
-    "libmp3lame": "MP3",
-    "wav": "WAV",
-    "pcm_s16le": "WAV",
-    "pcm_s24le": "WAV 24-bit",
-    "vorbis": "Vorbis",
-    "libvorbis": "Vorbis",
-    "ogg": "Vorbis",
-    "alac": "ALAC",
-    "m4a": "AAC",
-}
-
-
 def _friendly_codec(requested: str, kind: str) -> str:
-    """Map a codec name onto a name users recognise ('libx264' → 'H.264')."""
-    labels = _VIDEO_CODEC_LABELS if kind == "video" else _AUDIO_CODEC_LABELS
-    return labels.get(requested) or requested
+    """Derived display label for a codec name ('libx264' → 'H.264 (libx264)')."""
+    from core.engine_probe import codec_label
+
+    return codec_label(requested)
 
 
 def _encoder_pix_fmt(codec_name: str) -> str:
@@ -286,66 +215,6 @@ def _encoder_open_kwargs(codec_name: str) -> dict:
     return {}
 
 
-# Container ↔ codec pairs the wheel's muxers actually accept. Keyed by
-# container extension (no dot); values are (video codecs, audio codecs)
-# using RESOLVED encoder names as the engine emits them. Anything outside a
-# cell fails at mux time AFTER a full encode — check_pair() exists so the UI
-# refuses before Start instead of after minutes of work.
-_CONTAINER_CODEC_MATRIX: dict[str, tuple[frozenset[str], frozenset[str]]] = {
-    "mp4": (
-        frozenset({"libx264", "h264", "libx265", "hevc", "mpeg4", "libsvtav1", "av1"}),
-        frozenset({"aac", "libmp3lame", "mp3", "ac3"}),
-    ),
-    "mov": (
-        frozenset(
-            {
-                "libx264",
-                "h264",
-                "libx265",
-                "hevc",
-                "mpeg4",
-                "prores",
-                "libsvtav1",
-                "av1",
-            }
-        ),
-        frozenset({"aac", "alac", "pcm_s16le", "pcm_s24le"}),
-    ),
-    "mkv": (
-        frozenset(
-            {
-                "libx264",
-                "h264",
-                "libx265",
-                "hevc",
-                "mpeg4",
-                "vp9",
-                "libvpx-vp9",
-                "libvpx",
-                "libsvtav1",
-                "av1",
-                "ffv1",
-            }
-        ),
-        frozenset({"aac", "flac", "libopus", "opus", "vorbis", "pcm_s16le", "pcm_s24le"}),
-    ),
-    "webm": (
-        frozenset({"vp9", "libvpx-vp9", "libvpx", "libsvtav1", "av1"}),
-        frozenset({"libopus", "opus", "vorbis"}),
-    ),
-    "avi": (
-        frozenset({"mpeg4", "mjpeg"}),
-        frozenset({"pcm_s16le", "pcm_s24le", "libmp3lame", "mp3"}),
-    ),
-    "m4a": (frozenset(), frozenset({"aac", "alac"})),
-    "mp3": (frozenset(), frozenset({"libmp3lame", "mp3"})),
-    "ogg": (frozenset(), frozenset({"vorbis", "libopus", "opus", "flac"})),
-    "opus": (frozenset(), frozenset({"libopus", "opus"})),
-    "flac": (frozenset(), frozenset({"flac"})),
-    "wav": (frozenset(), frozenset({"pcm_s16le", "pcm_s24le"})),
-}
-
-
 def check_pair(container: str, video_codec: str | None, audio_codec: str | None) -> str | None:
     """None when (container, vcodec, acodec) muxes; else the refusal reason.
 
@@ -353,40 +222,39 @@ def check_pair(container: str, video_codec: str | None, audio_codec: str | None)
     offers H.264 instead of hiding the chip. Unknown containers fail OPEN
     (None) — the matrix covers the wheel's muxers, not every FFmpeg build.
     """
-    key = (container or "").lower().lstrip(".")
-    cell = _CONTAINER_CODEC_MATRIX.get(key)
-    if cell is None:
-        return None
-    allowed_video, allowed_audio = cell
-    if video_codec:
-        try:
-            resolved = _resolve_video_codec(video_codec)
-        except Exception:
-            resolved = video_codec
-        candidates = {video_codec, resolved}
-        try:
-            from core.engine_probe import can_encode as _can_encode
+    from core.engine_probe import codec_family, muxers_for_container
 
-            encodable = {c for c in candidates if _can_encode(c)}
-            if encodable:
-                candidates = encodable
-        except Exception:
-            pass
-        if not (candidates & allowed_video):
-            return (
-                f"{_friendly_codec(video_codec, 'video')} is not muxable into .{key} "
-                f"on this build — pick {sorted(allowed_video)[0] if allowed_video else 'another container'}"
-            )
-    if audio_codec:
-        try:
-            resolved_audio = _resolve_audio_codec(audio_codec)
-        except Exception:
-            resolved_audio = audio_codec
-        if resolved_audio not in allowed_audio and audio_codec not in allowed_audio:
-            return (
-                f"{_friendly_codec(audio_codec, 'audio')} is not muxable into .{key} on this build"
-            )
-    return None
+    key = (container or "").lower().lstrip(".")
+    matches = muxers_for_container(key)
+    if not matches:
+        # Unknown container: fail OPEN (None) — the matrix derives from the
+        # wheel's muxers, not every FFmpeg build.
+        return None
+    video_family = set(codec_family(video_codec)) if video_codec else set()
+    audio_family = set(codec_family(audio_codec)) if audio_codec else set()
+    for match in matches:
+        allowed_video = set(match.get("video", [])) | {
+            v for v in (match.get("default_video"),) if v
+        }
+        allowed_audio = set(match.get("audio", [])) | {
+            a for a in (match.get("default_audio"),) if a
+        }
+        if video_codec:
+            encodable = {c for c in {video_codec, *video_family} if _codec_supports_mode(c, "w")}
+            if not (encodable & allowed_video) and video_codec not in allowed_video:
+                continue
+        if audio_codec:
+            encodable_audio = {
+                c for c in {audio_codec, *audio_family} if _codec_supports_mode(c, "w")
+            }
+            if not (encodable_audio & allowed_audio) and audio_codec not in allowed_audio:
+                continue
+        return None  # one muxer for this container accepts the pair
+    reason_codec = video_codec or audio_codec or ""
+    return (
+        f"{_friendly_codec(reason_codec, 'video' if video_codec else 'audio')} is not "
+        f"muxable into .{key} on this build — pick another container"
+    )
 
 
 def check_params(
@@ -457,30 +325,37 @@ def available_audio_encoders() -> list[str]:
     return list(probe().audio_encoder_picks)
 
 
-def _resolve_codec(
-    requested: str,
-    aliases: dict[str, tuple[str, ...]],
-    labels: dict[str, str],
-    kind: str,
-) -> str:
+def _resolve_codec(requested: str, kind: str) -> str:
     """Return a verified encoder name for ``requested`` or raise a clear error.
 
+    Two derivation steps, both from the wheel: the name itself when it
+    constructs in "w" mode, else the family's display-preferred encoder (same
+    AVCodecID: h264 → libx264, mp3 → libmp3lame, hevc → libx265...).
     Constructing ``av.codec.Codec(name, mode='w')`` is the only honest check —
     ``codecs_available`` also lists decoders, which is exactly how the Android
     build reached ``add_stream('h264')`` and exploded with UnknownCodecError.
     """
-    for candidate in aliases.get(requested, (requested,)):
-        if _codec_supports_mode(candidate, "w"):
-            if candidate != requested:
-                logger.info(
-                    "Resolved %s codec %r to available encoder %r",
-                    kind,
-                    requested,
-                    candidate,
-                )
+    if _codec_supports_mode(requested, "w"):
+        # The wheel resolves aliases itself: Codec("h264","w").name is
+        # "libx264" on this build. Return the canonical encoder name.
+        try:
+            return av.codec.Codec(requested, "w").name or requested
+        except Exception:
+            return requested
+
+    order = available_video_encoders() if kind == "video" else available_audio_encoders()
+    family = set(codec_family(requested))
+    for candidate in order:
+        if candidate in family and _codec_supports_mode(candidate, "w"):
+            logger.info(
+                "Resolved %s codec %r to available encoder %r",
+                kind,
+                requested,
+                candidate,
+            )
             return candidate
 
-    available = available_video_encoders() if kind == "video" else available_audio_encoders()
+    available = order
     label = _friendly_codec(requested, kind)
     if available:
         options = ", ".join(available)
@@ -493,11 +368,47 @@ def _resolve_codec(
 
 
 def _resolve_video_codec(requested: str) -> str:
-    return _resolve_codec(requested, _VIDEO_CODEC_ALIASES, _VIDEO_CODEC_LABELS, "video")
+    return _resolve_codec(requested, "video")
 
 
 def _resolve_audio_codec(requested: str) -> str:
-    return _resolve_codec(requested, _AUDIO_CODEC_ALIASES, _AUDIO_CODEC_LABELS, "audio")
+    return _resolve_codec(requested, "audio")
+
+
+def _derive_audio_codec_for_format(requested_format: str) -> str:
+    """Display-ordered encodable audio codec for one output format.
+
+    Derived from the muxer matrix (extension → muxers → default/supported
+    audio codecs). Raises EngineCapabilityError when no muxer for the format
+    has an encodable audio codec.
+    """
+    from core.engine_probe import muxers_for_container
+
+    order = available_audio_encoders()
+    matches = muxers_for_container(requested_format)
+    # Only the muxer that will actually write the file (best match) constrains
+    # the codec: mp4's supported list must not bless libopus into an ipod
+    # container. FFmpeg's own default for the container wins (wav →
+    # pcm_s16le, mp3 → the wheel's default); then the display-ordered set.
+    default_codec = ""
+    supported: list[str] = []
+    for match in matches[:1]:
+        default = match.get("default_audio") or ""
+        if default and _codec_supports_mode(default, "w"):
+            default_codec = default
+        supported = [c for c in match.get("audio", []) if _codec_supports_mode(c, "w")]
+    for candidate in [default_codec, *(c for c in order if c in supported)]:
+        if candidate:
+            logger.info(
+                "Derived audio codec %r for format %r", candidate, requested_format
+            )
+            return candidate
+    if supported:
+        return supported[0]
+    raise EngineCapabilityError(
+        f"Unknown output format {requested_format!r}. The installed FFmpeg "
+        "build has no muxer for it with an encodable audio codec."
+    )
 
 
 def friendly_job_error(exc: BaseException) -> str:
@@ -722,30 +633,10 @@ def _safe_seek(container: av.container.InputContainer, ts: int, *, backward: boo
         logger.warning("Seek unavailable (%s) — decoding from start; output unaffected", exc)
 
 
-# Stream disposition flags surfaced in the dossier (av.stream.Disposition names).
-# Measured against the installed wheel (30 members incl. IntFlag helpers) —
-# only real track flags are listed; helpers like bit_count/numerator are not.
-_DISPOSITION_FLAG_NAMES = (
-    "default",
-    "dub",
-    "original",
-    "comment",
-    "lyrics",
-    "karaoke",
-    "forced",
-    "hearing_impaired",
-    "visual_impaired",
-    "clean_effects",
-    "attached_pic",
-    "timed_thumbnails",
-    "non_diegetic",
-    "captions",
-    "descriptions",
-    "metadata",
-    "dependent",
-    "still_image",
-    "multilayer",
-)
+# Stream disposition flags surfaced in the dossier — derived from
+# av.stream.Disposition (the wheel's own IntFlag members).
+def _disposition_flag_names() -> tuple[str, ...]:
+    return tuple(name for name in av.stream.Disposition.__members__)
 
 
 # ── Subtitle cue model + hand writers (no muxer dependency) ──────────────
@@ -1238,7 +1129,7 @@ class EngineService:
                     # Disposition is an IntFlag: attribute access returns the
                     # CLASS member (always truthy) — test bits, not attributes.
                     disp_bits = int(disp_obj)
-                    for flag_name in _DISPOSITION_FLAG_NAMES:
+                    for flag_name in _disposition_flag_names():
                         flag_bit = int(getattr(av.stream.Disposition, flag_name, 0))
                         if flag_bit and disp_bits & flag_bit:
                             disp_flags[flag_name] = True
@@ -2195,25 +2086,11 @@ class EngineService:
         """Extract audio with optional LUFS mastering, channel mix, and soxr resampling."""
         # Do not create a partial output while the serial queue is paused.
         _pause_hook(cancel_event)
-        # Requested format → friendly codec name. The resolver decides whether
-        # this build can encode it; the old `else "mp3"` / `else "opus"`
-        # branches pointed at encoders FFmpeg does not ship, which is exactly
-        # what raised UnknownCodecError on the Android wheel.
-        codec_map = {
-            "mp3": "mp3",
-            "aac": "aac",
-            "m4a": "aac",
-            "flac": "flac",
-            "opus": "opus",
-            "ogg": "vorbis",
-            "wav": "pcm_s16le",
-        }
+        # Requested format → derived audio encoder: the container resolves to
+        # muxers via extensions, and the display-ordered encodable audio codec
+        # wins (mp3 → libmp3lame, m4a → aac via ipod, wav → pcm_s16le...).
         requested_format = format_name.lower()
-        if requested_format not in codec_map:
-            raise EngineCapabilityError(
-                f"Unknown output format {format_name!r}. Supported: " + ", ".join(sorted(codec_map))
-            )
-        chosen_codec = _resolve_audio_codec(codec_map[requested_format])
+        chosen_codec = _derive_audio_codec_for_format(requested_format)
 
         # Two-pass loudnorm needs a full measurement pass before encoding starts.
         measured = (
