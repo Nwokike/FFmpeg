@@ -5,6 +5,12 @@ from __future__ import annotations
 from core.constants import APP_VERSION
 
 CHANGELOG: dict[str, str] = {
+    "2.0.0": """### FFmpeg AV 2.0.0 — The Full FFmpeg Engine
+- **Renamed FFmpeg Lite → FFmpeg AV**: a one-to-one wrap of `av` (PyAV) — the app exposes the engine it ships, name follows the library.
+- **Full FFmpeg 9.0.2 on mobile**: the bundled engine is now a complete build — H.264 (x264), H.265 (x265), VP9, AV1, MP3 (LAME), Opus, WebP, TLS — the old "Lite" capability floor is gone.
+- **Latest PyAV**: runs on av 19 / FFmpeg 9; dependencies stay unpinned and ride upstream releases.
+- **Open-Source Licenses**: Settings now carries the GPL §6(b) source offer and every bundled component's license text.
+""",
     "1.0.0": """### FFmpeg 1.0.0 — Initial Release
 - **Full FFmpeg 8 Media Engine**: Powered by PyAV on-device with zero cloud dependencies.
 - **Convert & Transcode**: Support for MP4, MKV, MOV, WEBM, AVI, MP3, AAC, FLAC, Opus, and more.

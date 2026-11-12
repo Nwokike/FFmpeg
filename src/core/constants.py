@@ -15,8 +15,8 @@ BUNDLE_ID = "ng.kiri.ffmpeg"
 
 # Read from pyproject.toml at import time so the update check compares
 # against the real build (not a stale literal).
-APP_VERSION = "1.0.0"
-BUILD_NUMBER = 1
+APP_VERSION = "2.0.0"
+BUILD_NUMBER = 2
 
 
 def _read_build_from_pyproject() -> tuple[str, int]:

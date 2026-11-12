@@ -1,6 +1,6 @@
 [project]
 name = "ffmpeg"
-version = "1.0.0"
+version = "2.0.0"
 description = "FFmpeg — convert, transcode, compress, cut, extract, and filter any media on your phone. Powered by FFmpeg via PyAV."
 readme = "README.md"
 requires-python = ">=3.14"
@@ -31,7 +31,7 @@ package = false
 org = "ng.kiri"
 product = "FFmpeg AV"
 company = "Kiri Research Labs"
-build_number = 1
+build_number = 2
 desktop_flavor = "full"
 # Cross-platform groups add matching iOS usage descriptions/entitlements;
 # Android's explicit permission table below remains intact.

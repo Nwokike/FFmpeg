@@ -73,7 +73,7 @@ def test_update_url_targets_canonical_repo():
 
 def test_manifest_shape_when_present(patch_client):
     payload = json.loads(
-        '{"build_number": 2, "version": "1.0.1", "release_notes": "x", "mandatory": false}'
+        '{"build_number": 3, "version": "2.0.1", "release_notes": "x", "mandatory": false}'
     )
     patch_client(lambda req: httpx.Response(200, json=payload))
     data = _check()
@@ -90,8 +90,8 @@ def test_version_only_bump_offers_update(patch_client):
 
 
 def test_lexicographic_trap_is_not_hit(patch_client):
-    # "1.10.0" > "1.9.0" numerically; any string compare gets this backwards.
-    payload = {"build_number": BUILD_NUMBER, "version": "1.10.0"}
+    # "10.0.0" > "2.0.0" numerically; any string compare gets this backwards.
+    payload = {"build_number": BUILD_NUMBER, "version": "10.0.0"}
     patch_client(lambda req: httpx.Response(200, json=payload))
     assert _check() == payload
 
