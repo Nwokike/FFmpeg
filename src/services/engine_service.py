@@ -868,7 +868,7 @@ _FINE_VIDEO_TB = Fraction(1, 90000)
 
 def _rebase_pts(frame: av.VideoFrame, dst_tb: Fraction) -> None:
     """Rescale a frame's pts into dst_tb (Frame.time_base setter does not rescale)."""
-    if frame.time_base is None or dst_tb is None:
+    if not frame.time_base or dst_tb is None:
         frame.time_base = dst_tb
         return
     if frame.time_base == dst_tb:
@@ -1061,7 +1061,7 @@ def _build_audio_filter_graph(
         "format": frame.format.name,
         "layout": frame.layout.name,
     }
-    if frame.time_base is not None:
+    if frame.time_base:
         ab_kwargs["time_base"] = frame.time_base
     nodes: list = [g.add_abuffer(**ab_kwargs)]
     if volume_pct != 100:
@@ -1521,7 +1521,7 @@ class EngineService:
                 nonlocal last_video_pts
                 out_tb = out_video.time_base or Fraction(1, out_fps)
                 candidate = None
-                if frame.pts is not None and frame.time_base is not None:
+                if frame.pts is not None and frame.time_base:
                     candidate = round(Fraction(frame.pts) * frame.time_base / out_tb)
                 if candidate is None or candidate <= last_video_pts:
                     candidate = last_video_pts + 1
@@ -1540,7 +1540,7 @@ class EngineService:
                 nonlocal last_audio_pts
                 out_tb = out_audio.time_base or Fraction(1, out_audio.rate or 44100)
                 candidate = None
-                if frame.pts is not None and frame.time_base is not None:
+                if frame.pts is not None and frame.time_base:
                     candidate = round(Fraction(frame.pts) * frame.time_base / out_tb)
                 if candidate is None or candidate <= last_audio_pts:
                     candidate = last_audio_pts + max(1, frame.samples)
@@ -1716,10 +1716,9 @@ class EngineService:
             if video_bitrate < 400000 and v_stream.width > 854:  # <400kbps -> 480p
                 scale_w = 854
                 scale_h = int(854 * (v_stream.height / v_stream.width))
-            elif video_bitrate < 1000000:  # < 1Mbps -> 720p
-                if v_stream.width > 1280:
-                    scale_w = 1280
-                    scale_h = int(1280 * (v_stream.height / v_stream.width))
+            elif video_bitrate < 1000000 and v_stream.width > 1280:  # < 1Mbps -> 720p
+                scale_w = 1280
+                scale_h = int(1280 * (v_stream.height / v_stream.width))
 
         # Perform 1-pass constrained transcode with target bitrate
         inp = av.open(input_path, "r", timeout=_INPUT_TIMEOUT, options=_INPUT_OPTIONS)
@@ -1738,7 +1737,7 @@ class EngineService:
 
             out_video = None
             if in_video:
-                fps = int(in_video.average_rate or 30)
+                fps = int(float(in_video.average_rate or 30))
                 chosen_vcodec = (
                     _resolve_video_codec(video_codec) if video_codec else _pick_video_encoder()
                 )
@@ -1765,7 +1764,7 @@ class EngineService:
                 nonlocal last_video_pts
                 out_tb = out_video.time_base or Fraction(1, 30)
                 candidate = None
-                if frame.pts is not None and frame.time_base is not None:
+                if frame.pts is not None and frame.time_base:
                     candidate = round(Fraction(frame.pts) * frame.time_base / out_tb)
                 if candidate is None or candidate <= last_video_pts:
                     candidate = last_video_pts + 1
@@ -1779,7 +1778,7 @@ class EngineService:
                 nonlocal last_audio_pts
                 out_tb = out_audio.time_base or Fraction(1, out_audio.rate or 44100)
                 candidate = None
-                if frame.pts is not None and frame.time_base is not None:
+                if frame.pts is not None and frame.time_base:
                     candidate = round(Fraction(frame.pts) * frame.time_base / out_tb)
                 if candidate is None or candidate <= last_audio_pts:
                     candidate = last_audio_pts + max(1, frame.samples)
@@ -1981,9 +1980,9 @@ class EngineService:
 
                 out_s = stream_map[packet.stream]
                 # Template streams normally share the input time base; rescale
-                # when they don't. The installed wheel exposes stream bases as
-                # Fraction but rescale_ts requires AVRational.
-                if out_s.time_base is not None and packet.time_base != out_s.time_base:
+                # when they don't. Stream bases are AVRational; rescale_ts
+                # requires AVRational.
+                if out_s.time_base and packet.time_base != out_s.time_base:
                     packet.rescale_ts(_av_rational(out_s.time_base))
 
                 # Rebase PTS/DTS to start at 0, in the OUTPUT time base.
@@ -2051,7 +2050,7 @@ class EngineService:
 
             out_video = None
             if in_video:
-                fps = int(in_video.average_rate or 30)
+                fps = int(float(in_video.average_rate or 30))
                 chosen_vcodec = (
                     _resolve_video_codec(video_codec) if video_codec else _pick_video_encoder()
                 )
@@ -2076,7 +2075,7 @@ class EngineService:
                 nonlocal last_video_pts
                 out_tb = out_video.time_base or Fraction(1, 30)
                 candidate = None
-                if frame.pts is not None and frame.time_base is not None:
+                if frame.pts is not None and frame.time_base:
                     candidate = round(Fraction(frame.pts) * frame.time_base / out_tb)
                 if candidate is None or candidate <= last_video_pts:
                     candidate = last_video_pts + 1
@@ -2090,7 +2089,7 @@ class EngineService:
                 nonlocal last_audio_pts
                 out_tb = out_audio.time_base or Fraction(1, out_audio.rate or 44100)
                 candidate = None
-                if frame.pts is not None and frame.time_base is not None:
+                if frame.pts is not None and frame.time_base:
                     candidate = round(Fraction(frame.pts) * frame.time_base / out_tb)
                 if candidate is None or candidate <= last_audio_pts:
                     candidate = last_audio_pts + max(1, frame.samples)
@@ -2361,7 +2360,7 @@ class EngineService:
                             "format": frame.format.name,
                             "layout": frame.layout.name,
                         }
-                        if frame.time_base is not None:
+                        if frame.time_base:
                             ab_kwargs["time_base"] = frame.time_base
                         src = lg.add_abuffer(**ab_kwargs)
                         ln = lg.add("loudnorm", loud_args)

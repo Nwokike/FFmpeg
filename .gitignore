@@ -17,6 +17,7 @@ release_notes.md
 audit-output/
 .zcode/
 wheels/
+.wrap-work/
 *.apk
 *.aab
 ui-spike/

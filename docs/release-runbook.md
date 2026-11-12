@@ -1,4 +1,4 @@
-# Release runbook — FFmpeg Lite v1.0.0 → Play Store
+# Release runbook — FFmpeg AV → Play Store
 
 How a release happens, in order. The tag is YOUR action; everything before
 it is automated or documented below.
@@ -91,8 +91,9 @@ complaints, or storage-fill reports.
 
 ## Appendix B — known limitations (do not promise otherwise)
 
-- Mobile wheel is the capability floor (`docs/why-ffmpeg-lite.md`): no
-  H.264/HEVC/VP9/AV1 or MP3 encode on-device; HTTPS via the app stack.
+- Mobile FFmpeg is a full build shipped as a custom `flet-libffmpeg` wheel
+  (see `docs/full-ffmpeg-plan.md`); the old "Lite" capability floor is gone.
+  HTTPS still goes through the app stack for HLS streaming control.
 - `mandatory:true` is advisory (modal≠hard block).
 - `http://` capture follows the platform cleartext default (recorded by
   the AAB inspection step per build).

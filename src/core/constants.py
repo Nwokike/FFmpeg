@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import sys
 
-APP_NAME = "FFmpeg Lite"
+APP_NAME = "FFmpeg AV"
 COMPANY = "Kiri Research Labs"
 ORG = "ng.kiri"
 BUNDLE_ID = "ng.kiri.ffmpeg"

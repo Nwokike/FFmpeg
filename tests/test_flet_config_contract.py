@@ -16,7 +16,7 @@ def _flet() -> dict:
 def test_boot_screen_uses_supported_nested_shape():
     boot = _flet()["boot_screen"]
     assert boot["name"] == "flet"
-    assert boot["flet"]["startup_message"] == "Initializing FFmpeg Lite..."
+    assert boot["flet"]["startup_message"] == "Initializing FFmpeg AV..."
 
 
 def test_android_deep_link_is_platform_scoped():
@@ -31,9 +31,9 @@ def test_android_config_has_no_silently_ignored_keys():
     assert "manifest_application" not in android
     assert android["split_per_abi"] is True
     assert android["extract_packages"] == ["av"]
-    # Flet's bundled Python and the Mobile Forge PyAV index publish all three
-    # Android ABIs; the earlier arm64-only pin copied a sibling app's note
-    # about an emulator-only split that is not a dependency constraint here.
+    # The wrap pipeline (scripts/build_ffmpeg_android.sh + mobile-forge)
+    # builds the full FFmpeg and av for all three ABIs; --split-per-abi gives
+    # Play one device APK plus an emulator/QA APK.
     assert android["target_arch"] == ["arm64-v8a", "x86_64", "armeabi-v7a"]
 
 

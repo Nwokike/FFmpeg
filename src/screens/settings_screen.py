@@ -35,6 +35,7 @@ from core.tokens import (
     SPACE_SM,
 )
 from core.versions import ffmpeg_version, pyav_major
+from screens.license_view import licenses_view
 from state.controller_ctx import use_controller
 from state.service_ctx import use_services
 
@@ -506,6 +507,31 @@ def SettingsScreen() -> ft.Control:
                     title=ft.Text("GitHub Repository", weight=ft.FontWeight.W_600),
                     subtitle=ft.Text("Source code, releases, and discussions", color=muted),
                     on_click=lambda _: _open_link(GITHUB_RELEASE_URL),
+                ),
+                padding=0,
+                border_radius=RADIUS_MD,
+                is_dark=is_dark,
+            ),
+            card_container(
+                content=ft.ListTile(
+                    leading=ft.Icon(ft.Icons.GAVEL_ROUNDED, color=PRIMARY),
+                    title=ft.Text("Open-Source Licenses", weight=ft.FontWeight.W_600),
+                    subtitle=ft.Text(
+                        "GPL source offer and license texts for FFmpeg and every "
+                        "bundled codec library",
+                        color=muted,
+                    ),
+                    on_click=lambda _: page.show_dialog(
+                        ft.AlertDialog(
+                            title=ft.Text("Open-Source Licenses"),
+                            content=ft.Container(
+                                content=licenses_view(is_dark),
+                                width=520,
+                                height=420,
+                            ),
+                            actions=[ft.TextButton("Close", on_click=lambda _: page.pop_dialog())],
+                        )
+                    ),
                 ),
                 padding=0,
                 border_radius=RADIUS_MD,

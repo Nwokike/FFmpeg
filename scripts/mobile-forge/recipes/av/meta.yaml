@@ -1,0 +1,40 @@
+package:
+  name: av
+  version: "19.0.2"
+
+build:
+  number: 1
+# {% if sdk != 'android' %}
+  script_env:
+    # iOS only. Each of the 49 extension modules records seven @rpath refs to the
+    # FFmpeg dylibs, and flet rewrites every one of them to the much longer
+    # @rpath/opt.lib.lib<name>.framework/opt.lib.lib<name> when it relocates the
+    # dylibs into frameworks. setuptools links with no header padding, so
+    # install_name_tool cannot grow the load commands ("larger updated load
+    # commands do not fit"). That aborts serious_python's reconcile pass — and
+    # `flet build` then produces an app with NO site-packages at all rather than
+    # failing, so the symptom is a silent ModuleNotFoundError on device.
+    # LDFLAGS is additive in forge's script_env handling, and distutils'
+    # customize_compiler appends it to LDSHARED.
+    LDFLAGS: -Wl,-headerpad_max_install_names
+# {% endif %}
+
+patches:
+  - mobile.patch
+
+requirements:
+  host:
+    # PyAV compiles 49 Cython extension modules that link the seven libav*
+    # libraries; flet-libffmpeg ships them SHARED in opt/lib. A real runtime
+    # dep on both platforms, so requirements.host (promoted to Requires-Dist)
+    # rather than host_build — flet has to install the wheel for the libraries
+    # to reach the device at all. Android: serious_python copies opt/lib/*.so
+    # into the APK jniLibs and DT_NEEDED resolves them by basename. iOS: flet
+    # relocates each opt/lib dylib into its own *.framework, and the __init__
+    # preload shim from mobile.patch CDLLs them so the extension modules'
+    # @rpath links bind by install-name.
+    #
+    # Pinned exactly to the wrap's own full build (scripts/wrap_pins.py):
+    # PyAV 19.0.x tracks the FFmpeg 9.x ABI, and our flet-libffmpeg wheel is
+    # built from the same FFmpeg 9.0.2 release upstream's wheels pair with.
+    - flet-libffmpeg ==9.0.2

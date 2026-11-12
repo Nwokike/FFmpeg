@@ -52,7 +52,9 @@ jobs:
           sys.path.insert(0, "src")
           from core.constants import BUILD_NUMBER, APP_VERSION
 
-          vj = json.load(open("version.json"))
+          # version.json is the locally-written update feed (git-ignored);
+          # an absent file is the hold itself, not a failure.
+          vj = json.load(open("version.json")) if os.path.exists("version.json") else None
           env_v = os.environ.get("BUILD_VERSION", py)
           env_b = str(os.environ.get("BUILD_NUMBER", felb))
           errs = []
@@ -69,16 +71,19 @@ jobs:
           def vt(s):
               return tuple(int(x) for x in s.split("."))
 
-          vj_v = vj["version"]
-          if vj_v == py:
-              if str(vj["build_number"]) != env_b:
-                  errs.append(f"version.json synced to {vj_v} but build_number != {env_b}")
-              else:
-                  print(f"versions synced: {py} (build {env_b})")
-          elif vt(vj_v) < vt(py):
-              print(f"NOTICE: version.json held back at {vj_v}")
+          if vj is None:
+              print("NOTICE: version.json held back (absent)")
           else:
-              errs.append(f"version.json {vj_v} is ahead of pyproject {py}")
+              vj_v = vj["version"]
+              if vj_v == py:
+                  if str(vj["build_number"]) != env_b:
+                      errs.append(f"version.json synced to {vj_v} but build_number != {env_b}")
+                  else:
+                      print(f"versions synced: {py} (build {env_b})")
+              elif vt(vj_v) < vt(py):
+                  print(f"NOTICE: version.json held back at {vj_v}")
+              else:
+                  errs.append(f"version.json {vj_v} is ahead of pyproject {py}")
 
           if errs:
               print("Version drift:", file=sys.stderr)
@@ -132,7 +137,7 @@ jobs:
         run: |
           if [[ "${{ github.ref }}" == refs/tags/* ]]; then
             echo "TAG_NAME=${{ github.ref_name }}" >> $GITHUB_OUTPUT
-            echo "RELEASE_NAME=FFmpeg Lite ${{ github.ref_name }} (pre-release, pending approval)" >> $GITHUB_OUTPUT
+            echo "RELEASE_NAME=FFmpeg AV ${{ github.ref_name }} (pre-release, pending approval)" >> $GITHUB_OUTPUT
             echo "IS_PRERELEASE=true" >> $GITHUB_OUTPUT
             echo "MAKE_LATEST=false" >> $GITHUB_OUTPUT
           else
@@ -158,8 +163,32 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   # ─── Android APK (split per ABI) ───────────────────────
+  # ─── Mobile wrap pipeline: full FFmpeg + av Android wheels ───
+  android-wheels:
+    needs: [quality]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+      - name: Install cross-build host tools (ffmpeg-android-maker)
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends nasm ninja-build meson autoconf automake libtool pkg-config
+      - name: Build full FFmpeg 9.0.2 Android libraries
+        run: scripts/build_ffmpeg_android.sh
+      - name: Package flet-libffmpeg wheels
+        run: python3 scripts/build_flet_libffmpeg_wheel.py --ffmpeg-prefix .wrap-work/ffmpeg-android-maker/build/ffmpeg --out wheels
+      - name: Build av 19.0.2 Android wheels (mobile-forge)
+        run: scripts/build_av_android_wheels.sh wheels
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android-wheels
+          path: wheels/*.whl
+          retention-days: 7
+
   build-apk-split:
-    needs: [prepare-release]
+    needs: [prepare-release, android-wheels]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -171,12 +200,11 @@ jobs:
         with:
           distribution: temurin
           java-version: 17
-      - name: Pre-compile mobile wheels (PyAV and extensions)
-        run: |
-          set -euo pipefail
-          python -m pip install --upgrade wheel
-          uv export --frozen --no-dev --no-emit-project --format requirements-txt --output-file requirements.mobile.txt
-          python -m pip wheel -r requirements.mobile.txt --no-deps -w ${{ github.workspace }}/wheels
+      - name: Download mobile wheels (full FFmpeg + av)
+        uses: actions/download-artifact@v4
+        with:
+          name: android-wheels
+          path: wheels
       - name: Decode Keystore
         env:
           KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
@@ -188,7 +216,7 @@ jobs:
           FLET_ANDROID_SIGNING_KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
           FLET_ANDROID_SIGNING_KEY_STORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
           FLET_ANDROID_SIGNING_KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
-        run: uv run flet build apk --python-version 3.14 --yes --project ffmpeg --product "FFmpeg Lite" --org ng.kiri --company "Kiri Research Labs" --build-version ${{ env.BUILD_VERSION }} --build-number ${{ env.BUILD_NUMBER }} --split-per-abi -v
+        run: uv run flet build apk --python-version 3.14 --yes --project ffmpeg --product "FFmpeg AV" --org ng.kiri --company "Kiri Research Labs" --build-version ${{ env.BUILD_VERSION }} --build-number ${{ env.BUILD_NUMBER }} --split-per-abi -v
       - name: Size report
         if: always()
         run: ls -lh build/apk/*.apk
@@ -203,7 +231,7 @@ jobs:
 
   # ─── Android AAB (Play Store) ───────────────────────────
   build-aab:
-    needs: [prepare-release]
+    needs: [prepare-release, android-wheels]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -215,12 +243,13 @@ jobs:
         with:
           distribution: temurin
           java-version: 17
-      - name: Pre-compile mobile wheels (PyAV and extensions)
-        run: |
-          set -euo pipefail
-          python -m pip install --upgrade wheel
-          uv export --frozen --no-dev --no-emit-project --format requirements-txt --output-file requirements.mobile.txt
-          python -m pip wheel -r requirements.mobile.txt --no-deps -w ${{ github.workspace }}/wheels
+      - name: Download mobile wheels (full FFmpeg + av)
+        uses: actions/download-artifact@v4
+        with:
+          name: android-wheels
+          path: wheels
+      - name: Generate THIRD-PARTY-SOURCES.md (GPL source offer)
+        run: python3 scripts/generate_third_party_sources.py
       - name: Decode Keystore
         env:
           KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
@@ -232,7 +261,7 @@ jobs:
           FLET_ANDROID_SIGNING_KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
           FLET_ANDROID_SIGNING_KEY_STORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
           FLET_ANDROID_SIGNING_KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
-        run: uv run flet build aab --python-version 3.14 --yes --project ffmpeg --product "FFmpeg Lite" --org ng.kiri --company "Kiri Research Labs" --build-version ${{ env.BUILD_VERSION }} --build-number ${{ env.BUILD_NUMBER }} -v
+        run: uv run flet build aab --python-version 3.14 --yes --project ffmpeg --product "FFmpeg AV" --org ng.kiri --company "Kiri Research Labs" --build-version ${{ env.BUILD_VERSION }} --build-number ${{ env.BUILD_NUMBER }} -v
       - name: Size report
         if: always()
         run: ls -lh build/aab/*.aab
@@ -241,7 +270,9 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ needs.prepare-release.outputs.TAG_NAME }}
-          files: build/aab/*.aab
+          files: |
+            build/aab/*.aab
+            THIRD-PARTY-SOURCES.md
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -257,7 +288,7 @@ jobs:
           python-version: '3.14'
 
       - name: Build Windows Portable
-        run: uv run flet build windows --python-version 3.14 --yes --project ffmpeg --product "FFmpeg Lite" --org ng.kiri --company "Kiri Research Labs" --build-version ${{ env.BUILD_VERSION }} --build-number ${{ env.BUILD_NUMBER }} -v
+        run: uv run flet build windows --python-version 3.14 --yes --project ffmpeg --product "FFmpeg AV" --org ng.kiri --company "Kiri Research Labs" --build-version ${{ env.BUILD_VERSION }} --build-number ${{ env.BUILD_NUMBER }} -v
 
       - name: Generate Icon for Installer
         run: |
@@ -269,17 +300,17 @@ jobs:
           $IssContent = @"
           [Setup]
           AppId={{9A4F2C1B-7E63-4D08-B2A5-6C1E8F0D4A71}}
-          AppName=FFmpeg Lite
+          AppName=FFmpeg AV
           AppVersion=${{ env.BUILD_VERSION }}
           AppPublisher=Kiri Research Labs
           AppPublisherURL=https://kiri.ng
           AppSupportURL=https://kiri.ng/support
           AppUpdatesURL=https://kiri.ng/updates
           AppCopyright=Copyright (C) 2026 Kiri Research Labs
-          DefaultDirName={autopf}\FFmpeg Lite
-          DefaultGroupName=FFmpeg Lite
+          DefaultDirName={autopf}\FFmpeg AV
+          DefaultGroupName=FFmpeg AV
           OutputDir=.\build\installer
-          OutputBaseFilename=FFmpeg_Lite
+          OutputBaseFilename=FFmpeg_AV
           Compression=lzma2
           SolidCompression=yes
           WizardStyle=modern
@@ -295,8 +326,8 @@ jobs:
           Source: "build\windows\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
           [Icons]
-          Name: "{group}\FFmpeg Lite"; Filename: "{app}\ffmpeg.exe"
-          Name: "{autodesktop}\FFmpeg Lite"; Filename: "{app}\ffmpeg.exe"; Tasks: desktopicon
+          Name: "{group}\FFmpeg AV"; Filename: "{app}\ffmpeg.exe"
+          Name: "{autodesktop}\FFmpeg AV"; Filename: "{app}\ffmpeg.exe"; Tasks: desktopicon
 
           [Tasks]
           Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription: "Additional icons:"; Flags: unchecked
@@ -309,7 +340,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ needs.prepare-release.outputs.TAG_NAME }}
-          files: build/installer/FFmpeg_Lite.exe
+          files: build/installer/FFmpeg_AV.exe
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -329,13 +360,13 @@ jobs:
           sudo apt-get install -y libgtk-3-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libmpv-dev libmpv2 rpm ruby ruby-dev
           sudo gem install --no-document fpm
       - name: Build Linux Bundle
-        run: uv run flet build linux --python-version 3.14 --yes --project ffmpeg --product "FFmpeg Lite" --org ng.kiri --company "Kiri Research Labs" --build-version ${{ env.BUILD_VERSION }} --build-number ${{ env.BUILD_NUMBER }} -v
+        run: uv run flet build linux --python-version 3.14 --yes --project ffmpeg --product "FFmpeg AV" --org ng.kiri --company "Kiri Research Labs" --build-version ${{ env.BUILD_VERSION }} --build-number ${{ env.BUILD_NUMBER }} -v
       - name: Create Linux Packages (.deb, .rpm, .tar.gz)
         run: |
           mkdir -p build/dist
 
           # 1. Universal Portable .tar.gz
-          tar -czf build/dist/FFmpeg_Lite.tar.gz -C build/linux .
+          tar -czf build/dist/FFmpeg_AV.tar.gz -C build/linux .
 
           # 2. Stage filesystem tree for rich .deb and .rpm packages
           mkdir -p pkg_root/usr/lib/ffmpeg pkg_root/usr/bin pkg_root/usr/share/applications pkg_root/usr/share/icons/hicolor/256x256/apps pkg_root/usr/share/pixmaps pkg_root/usr/share/metainfo
@@ -351,7 +382,7 @@ jobs:
           cat <<EOF > pkg_root/usr/share/applications/ffmpeg.desktop
           [Desktop Entry]
           Version=1.0
-          Name=FFmpeg Lite
+          Name=FFmpeg AV
           GenericName=On-Device Media Toolkit
           Comment=Transcode, compress, cut, extract and filter any media on-device — powered by FFmpeg 8 via PyAV
           Exec=/usr/bin/ffmpeg
@@ -371,10 +402,10 @@ jobs:
             <id>ng.kiri.ffmpeg</id>
             <metadata_license>MIT</metadata_license>
             <project_license>MIT</project_license>
-            <name>FFmpeg Lite</name>
+            <name>FFmpeg AV</name>
             <summary>On-device media toolkit — transcode, compress, cut and extract any media with FFmpeg 8</summary>
             <description>
-              <p>FFmpeg Lite is an on-device media studio powered by FFmpeg 8 via PyAV:</p>
+              <p>FFmpeg AV is an on-device media studio powered by FFmpeg via PyAV:</p>
               <ul>
                 <li>Transcode and compress video/audio with quality presets and target-size control</li>
                 <li>Cut/trim with stream-copy (instant) or frame-accurate re-encode</li>
@@ -395,7 +426,7 @@ jobs:
               --maintainer "Kiri Research Labs <support@kiri.ng>" \
               --url "https://kiri.ng" \
               --category "video" \
-              -p build/dist/FFmpeg_Lite.deb \
+              -p build/dist/FFmpeg_AV.deb \
               -C pkg_root .
 
           # Build rich .rpm using fpm
@@ -405,7 +436,7 @@ jobs:
               --maintainer "Kiri Research Labs <support@kiri.ng>" \
               --url "https://kiri.ng" \
               --category "Utility" \
-              -p build/dist/FFmpeg_Lite.rpm \
+              -p build/dist/FFmpeg_AV.rpm \
               -C pkg_root .
 
       - name: Upload directly to GitHub Release

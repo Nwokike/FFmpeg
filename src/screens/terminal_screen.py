@@ -18,6 +18,7 @@ from core.state import Job, use_app_state
 from core.styles import card_container, section_header
 from core.theme import ACCENT_AMBER, PRIMARY, TEXT_MUTED_DARK, TEXT_MUTED_LIGHT, is_dark_mode
 from core.tokens import FONT_LG, FONT_MD, FONT_SM, RADIUS_MD, SPACE_LG, SPACE_MD, SPACE_SM
+from core.versions import pyav_version
 from services.command_parser import CommandError, OpPlan, help_text, parse_command, tokenize
 from state.controller_ctx import use_controller
 from state.service_ctx import use_services
@@ -162,7 +163,7 @@ def TerminalScreen() -> ft.Control:
                                             weight=ft.FontWeight.W_600,
                                         ),
                                         ft.Text(
-                                            "pyav-18.1.0 — FFmpeg libraries, no binary",
+                                            f"pyav-{pyav_version()} — FFmpeg libraries, no binary",
                                             size=FONT_SM,
                                             color=muted,
                                         ),

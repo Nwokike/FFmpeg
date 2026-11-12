@@ -1,41 +1,35 @@
 [project]
 name = "ffmpeg"
 version = "1.0.0"
-description = "FFmpeg — convert, transcode, compress, cut, extract, and filter any media on your phone. Powered by FFmpeg 8 via PyAV."
+description = "FFmpeg — convert, transcode, compress, cut, extract, and filter any media on your phone. Powered by FFmpeg via PyAV."
 readme = "README.md"
 requires-python = ">=3.14"
-# These packages are audited against one exact Flet/PyAV wire contract.
-# Keep the pins synchronized with uv.lock and pinned-deps.txt; a minor
-# framework release can change component constructors and event semantics.
 dependencies = [
-    "av==18.1.0",
-    "flet==1.0.4",
-    "flet-ads==1.0.4",
-    "flet-audio==1.0.4",
-    "flet-audio-recorder==1.0.4",
-    "flet-camera==1.0.4",
-    "flet-permission-handler==1.0.4",
-    "flet-video==1.0.4",
-    "httpx==0.28.1",
+    "av>=19.0.2",
+    "flet>=1.1.2",
+    "flet-ads>=1.1.2",
+    "flet-audio>=1.1.2",
+    "flet-audio-recorder>=1.1.2",
+    "flet-camera>=1.1.2",
+    "flet-permission-handler>=1.1.2",
+    "flet-video>=1.1.2",
+    "httpx>=0.28.1",
 ]
 
 [dependency-groups]
 dev = [
-    "flet-cli==1.0.4",
-    "flet-desktop==1.0.4",
-    "pytest==9.1.1",
-    "ruff==0.16.8",
+    "flet-cli>=1.1.2",
+    "flet-desktop>=1.1.2",
+    "pytest>=9.2.0",
+    "ruff>=0.17.4",
 ]
 
 [tool.uv]
 package = false
 
-# ── Flet 1.0 build config (flet-cli–consumed; keys verified against
-# ── flet.dev/docs/publish/ + sibling apps. Brand primary = FFmpeg green
-# ── #3c8038 (the launcher glyph); backgrounds are Kiri slate for contrast.
 [tool.flet]
 org = "ng.kiri"
-product = "FFmpeg Lite"
+product = "FFmpeg AV"
 company = "Kiri Research Labs"
 build_number = 1
 desktop_flavor = "full"
@@ -49,7 +43,7 @@ path = "src"
 # flet-cli reads the built-in screen as { name = "flet", flet = { ... } }.
 [tool.flet.boot_screen]
 name = "flet"
-flet = { startup_message = "Initializing FFmpeg Lite..." }
+flet = { startup_message = "Initializing FFmpeg AV..." }
 
 [tool.flet.splash]
 color = "#ffffff"
@@ -64,22 +58,8 @@ host = "app"
 [tool.flet.android]
 bundle_id = "ng.kiri.ffmpeg"
 split_per_abi = true
-# PyAV loads bundled FFmpeg shared libraries through package paths; keep its
-# native extension unpacked instead of relying on zipimport layout.
 extract_packages = ["av"]
-# All three ABIs: Flet's bundled Python manifest publishes arm64/x86_64/
-# armeabi-v7a, and the Mobile Forge `av` index ships Android 24 wheels for all
-# three. `--split-per-abi` gives Play one device APK plus an emulator/QA APK
-# instead of a fat universal package. The earlier arm64-only pin was copied
-# from a sibling app's emulator-split note, not derived from a dependency
-# failure in this project.
 target_arch = ["arm64-v8a", "x86_64", "armeabi-v7a"]
-# NOTE: `min_sdk_version` is NOT a flet-cli key (zero references in its
-# source) — av's wheels are built at ABI 24; the effective floor comes from
-# the Flutter/Gradle template, so verify the generated minSdk before tagging.
-# `manifest_application.usesCleartextTraffic` is likewise NOT merged (only
-# permission/feature/meta_data/provider are) — http:// capture depends on the
-# platform default, so test it on-device before advertising plain-http input.
 
 [tool.flet.android.meta_data]
 # Production AdMob App ID (matches ADMOB_APP_ID_PROD in src/core/constants.py
@@ -122,12 +102,6 @@ app_files = [
     "ui-spike",
     "src/ui-spike",
 ]
-
-# Upstream workaround for Flet <= 1.0.3 until 1.0.4 ships (Flet PR #6920):
-# Flet's template pins jni: 1.0.0, but on 2026-10-06 pub.dev released
-# jni_flutter 1.0.4+1 which enforces package:jni ^1.1.0 via JniVersionCheck.
-[tool.flet.flutter.pubspec.dependency_overrides]
-jni = "^1.1.0"
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]

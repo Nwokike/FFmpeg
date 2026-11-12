@@ -1,15 +1,15 @@
 <p align="center">
-  <img src="src/assets/icon.svg" alt="FFmpeg Lite" width="140" />
+  <img src="src/assets/icon.svg" alt="FFmpeg AV" width="140" />
 </p>
 
-<h1 align="center">FFmpeg Lite</h1>
+<h1 align="center">FFmpeg AV</h1>
 
 <p align="center">
   On-device media studio built with Python and Flet — transcode, cut, join, extract, and master audio with FFmpeg on your phone and desktop.
 </p>
 
 <p align="center">
-  Why "Lite"? <a href="docs/why-ffmpeg-lite.md">The capability contract and the path to the full suite</a>.
+  <a href="docs/full-ffmpeg-plan.md">A one-to-one wrap of <code>av</code> (PyAV): the engine is the installed wheel, exposed in full.</a>
 </p>
 
 <p align="center">
@@ -28,10 +28,10 @@
 | Platform | Download | Notes |
 | :---: | :---: | :--- |
 | 🤖 **Android** | [![Play Store](https://img.shields.io/badge/Google_Play-414141?style=flat-square&logo=google-play&logoColor=white)](https://play.google.com/store/apps/details?id=ng.kiri.ffmpeg) | Recommended for Android mobile users |
-| 🪟 **Windows** | [![Windows Release](https://img.shields.io/badge/Download_Windows_Release-0078D6?style=flat-square&logo=windows&logoColor=white)](https://github.com/Nwokike/FFmpeg/releases/latest/download/FFmpeg_Lite.exe) | Automated standalone setup installer with desktop shortcut integration |
-| 🐧 **Linux (Debian/Ubuntu)** | [![Linux DEB](https://img.shields.io/badge/Download_Linux_DEB-FCC624?style=flat-square&logo=linux&logoColor=white)](https://github.com/Nwokike/FFmpeg/releases/latest/download/FFmpeg_Lite.deb) | Desktop package tailored for Ubuntu, Debian, Linux Mint & Pop!_OS |
-| 🎩 **Linux (Fedora/RHEL)** | [![Linux RPM](https://img.shields.io/badge/Download_Linux_RPM-E91E63?style=flat-square&logo=redhat&logoColor=white)](https://github.com/Nwokike/FFmpeg/releases/latest/download/FFmpeg_Lite.rpm) | Desktop package tailored for Fedora, openSUSE, RHEL & CentOS |
-| 📦 **Linux (Universal Portable)** | [![Linux TAR.GZ](https://img.shields.io/badge/Download_Linux_TAR.GZ-9C27B0?style=flat-square&logo=linux&logoColor=white)](https://github.com/Nwokike/FFmpeg/releases/latest/download/FFmpeg_Lite.tar.gz) | Universal standalone portable archive for Arch, Alpine, Steam Deck & all distros |
+| 🪟 **Windows** | [![Windows Release](https://img.shields.io/badge/Download_Windows_Release-0078D6?style=flat-square&logo=windows&logoColor=white)](https://github.com/Nwokike/FFmpeg/releases/latest/download/FFmpeg_AV.exe) | Automated standalone setup installer with desktop shortcut integration |
+| 🐧 **Linux (Debian/Ubuntu)** | [![Linux DEB](https://img.shields.io/badge/Download_Linux_DEB-FCC624?style=flat-square&logo=linux&logoColor=white)](https://github.com/Nwokike/FFmpeg/releases/latest/download/FFmpeg_AV.deb) | Desktop package tailored for Ubuntu, Debian, Linux Mint & Pop!_OS |
+| 🎩 **Linux (Fedora/RHEL)** | [![Linux RPM](https://img.shields.io/badge/Download_Linux_RPM-E91E63?style=flat-square&logo=redhat&logoColor=white)](https://github.com/Nwokike/FFmpeg/releases/latest/download/FFmpeg_AV.rpm) | Desktop package tailored for Fedora, openSUSE, RHEL & CentOS |
+| 📦 **Linux (Universal Portable)** | [![Linux TAR.GZ](https://img.shields.io/badge/Download_Linux_TAR.GZ-9C27B0?style=flat-square&logo=linux&logoColor=white)](https://github.com/Nwokike/FFmpeg/releases/latest/download/FFmpeg_AV.tar.gz) | Universal standalone portable archive for Arch, Alpine, Steam Deck & all distros |
 
 ### Android Architecture Build Splits
 
@@ -162,7 +162,7 @@
 | Layer | Technology | Purpose |
 | :--- | :--- | :--- |
 | **Frontend** | Flet 1.0 (Flutter engine) | Cross-platform Material 3 interface |
-| **Media Engine** | `av` (PyAV 18 via FFmpeg 8) | Demuxing, decoding, encoding, filtering, and stream copying |
+| **Media Engine** | `av` (PyAV via FFmpeg) | Demuxing, decoding, encoding, filtering, and stream copying |
 | **Playback** | `flet-video` + `flet-audio` | Live hardware-accelerated preview of inputs and outputs |
 | **Capture** | `flet-camera` + `flet-audio-recorder` | In-app photo, video, and microphone recording |
 | **Storage** | Flet tiered storage | Isolated data, cache, and temp directory management |
@@ -171,4 +171,10 @@
 
 ## Legal Disclaimer
 
-FFmpeg Lite embeds FFmpeg libraries via PyAV under LGPL-2.1-or-later and IJG. Users are solely responsible for ensuring their use of converted media complies with applicable copyright laws and platform terms of service.
+FFmpeg AV embeds FFmpeg via PyAV. The mobile engine is a full FFmpeg build
+including GPL-licensed encoders (x264, x265), so the combined work is licensed
+**GPL-3.0-or-later**. The complete corresponding source is offered at
+[github.com/Nwokike/FFmpeg](https://github.com/Nwokike/FFmpeg); license texts
+and per-component notices ship in the app under **Settings → Open-Source
+Licenses**. Users are solely responsible for ensuring their use of converted
+media complies with applicable copyright laws and platform terms of service.

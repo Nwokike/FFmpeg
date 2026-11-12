@@ -2,8 +2,8 @@
 
 M4 removed cross-repo attributions, unmeasured speed claims, stale version
 pins, and hardcoded palette dupes. These tests fail the build if any of
-those classes creep back. Docs (swarm-audit archive) and changelog history
-are allow-listed: they record what WAS, not what IS.
+those classes creep back. Changelog history and version fallbacks are
+allow-listed: they record what WAS, not what IS.
 """
 
 from __future__ import annotations
