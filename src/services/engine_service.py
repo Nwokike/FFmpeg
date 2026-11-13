@@ -1127,41 +1127,43 @@ def run_encode_job(
     One monotonic-pts policy, one drain/flush sequence, one cancel/reconcile
     path for every op that produces encoded output (convert, compress,
     cut-reencode, extract_audio, gif, concat-reencode...). av owns timestamps;
-    this fixes only what the muxer genuinely requires.
+    this fixes only what the muxer genuinely requires. Multi-input jobs
+    (concat) iterate inputs over the same output streams with per-file
+    progress steps.
     """
-    spec_in = job.inputs[0]
-    inp = av.open(
-        spec_in.path,
+    first_spec = job.inputs[0]
+    first_inp = av.open(
+        first_spec.path,
         "r",
-        format=spec_in.format,
-        timeout=spec_in.timeout,
-        options=spec_in.options,
-        hwaccel=spec_in.hwaccel,
+        format=first_spec.format,
+        timeout=first_spec.timeout,
+        options=first_spec.options,
+        hwaccel=first_spec.hwaccel,
     )
     try:
         out = av.open(job.output_path, "w", format=job.output.container, options=job.output.options)
     except Exception:
-        inp.close()
+        first_inp.close()
         raise
 
-    in_video_early = inp.streams.best("video")
-    if spec_in.seek_s:
+    in_video_early = first_inp.streams.best("video")
+    if first_spec.seek_s:
         # container.seek defaults to AV_TIME_BASE (microseconds) units.
-        _safe_seek(inp, max(0, int(spec_in.seek_s * av.time_base)))
+        _safe_seek(first_inp, max(0, int(first_spec.seek_s * av.time_base)))
 
     try:
-        if job.output.metadata and inp.metadata:
-            out.metadata.update(inp.metadata)
+        if job.output.metadata and first_inp.metadata:
+            out.metadata.update(first_inp.metadata)
         if job.output.chapters:
             try:
-                out.set_chapters(inp.chapters())
+                out.set_chapters(first_inp.chapters())
             except Exception as exc:
                 logger.debug("Chapter copy skipped: %s", exc)
 
         v_spec = next((s for s in job.streams if s.kind == "video"), None)
         a_spec = next((s for s in job.streams if s.kind == "audio"), None)
-        in_video = inp.streams.best("video") if v_spec else None
-        in_audio = inp.streams.best("audio") if a_spec else None
+        in_video = first_inp.streams.best("video") if v_spec else None
+        in_audio = first_inp.streams.best("audio") if a_spec else None
 
         out_video = None
         if v_spec is not None and in_video is not None:
@@ -1247,7 +1249,7 @@ def run_encode_job(
             audio_fifo = av.AudioFifo() if out_audio.frame_size > 0 else None
 
         # soxr-quality rate/layout conversion when this build has libsoxr;
-        # _emit_audio falls back to plain swr on first use otherwise.
+        # _encode_audio_frame falls back to plain swr on first use otherwise.
         resampler = None
         if a_spec is not None and in_audio is not None and a_spec.audio_resample:
             src_rate = in_audio.rate or (a_spec.sample_rate or 44100)
@@ -1342,103 +1344,147 @@ def run_encode_job(
             frame.time_base = out_tb
             last_audio_pts = candidate
 
-        total_duration = float(inp.duration or 0) / float(av.time_base) if inp.duration else 1.0
-        last_report = 0.0
-        processed_pts = 0.0
-
-        streams_to_demux = [s for s, spec in ((in_video, v_spec), (in_audio, a_spec)) if s and spec]
-
-        video_graph = None
-        audio_graph = None
-        for packet in inp.demux(streams_to_demux):
-            _pause_hook(cancel_event)
-            if cancel_event and cancel_event.is_set():
-                logger.info("Transcode cancelled by user.")
+        multi_input = len(job.inputs) > 1
+        cancelled_any = False
+        for fi, spec_i in enumerate(job.inputs):
+            if (
+                fi > 0
+                and not job.record_mode
+                and cancel_event is not None
+                and cancel_event.is_set()
+            ):
+                cancelled_any = True
                 break
-
-            if packet.size == 0 or (packet.pts is None and packet.dts is None):
-                continue
-
-            win_start, win_end = job.window if job.window else (None, None)
-
-            if in_video and packet.stream == in_video:
-                for frame in _decode_packet(packet):
-                    if cancel_event and cancel_event.is_set():
-                        break
-                    if win_start is not None or win_end is not None:
-                        ft = frame.time
-                        if ft is None or (win_start is not None and ft < win_start):
-                            continue
-                        if win_end is not None and ft > win_end:
-                            break
-                    if frame.time:
-                        processed_pts = frame.time
-
-                    if job.video_chain is not None and video_graph is None:
-                        builder = job.video_chain.build
-                        if builder is not None:
-                            video_graph = builder(frame)
-                        elif job.video_chain.nodes:
-                            video_graph = _graph_from_nodes(job.video_chain.nodes, frame)
-
-                    out_frames = [frame]
-                    if video_graph is not None:
-                        _rebase_pts(frame, _FINE_VIDEO_TB)
-                        out_frames = _push_pull(video_graph, frame)
-
-                    for frame in out_frames:
-                        if out_video and (
-                            frame.width != out_video.width
-                            or frame.height != out_video.height
-                            or frame.format.name != enc_pix_fmt
-                        ):
-                            frame = video_reformatter.reformat(
-                                frame,
-                                width=out_video.width,
-                                height=out_video.height,
-                                format=enc_pix_fmt,
-                            )
-                        if out_video:
-                            _stamp_video(frame)
-                            for enc_pkt in out_video.encode(frame):
-                                _mux_packet(out, enc_pkt)
-
-            elif in_audio and packet.stream == in_audio:
-                for frame in _decode_packet(packet):
-                    if cancel_event and cancel_event.is_set():
-                        break
-                    if win_start is not None or win_end is not None:
-                        ft = getattr(frame, "time", None)
-                        if ft is None or (win_start is not None and ft < win_start):
-                            continue
-                        if win_end is not None and ft > win_end:
-                            break
-                    if not out_audio:
-                        continue
-                    if job.audio_chain is not None and audio_graph is None:
-                        builder = job.audio_chain.build
-                        if builder is not None:
-                            audio_graph = builder(frame)
-                        elif job.audio_chain.nodes:
-                            audio_graph = _graph_from_nodes(job.audio_chain.nodes, frame)
-                    out_frames = [frame]
-                    if audio_graph is not None:
-                        out_frames = _push_pull(audio_graph, frame)
-                    for frame in out_frames:
-                        _stamp_audio(frame)
-                        _encode_audio_frame(frame)
-
-            now = time.monotonic()
-            if on_progress and (now - last_report >= 0.25):
-                last_report = now
-                progress = (
-                    min(0.99, max(0.01, processed_pts / total_duration))
-                    if total_duration > 0
-                    else 0.5
+            if fi == 0:
+                inp = first_inp
+            elif (
+                job.input_containers
+                and fi < len(job.input_containers)
+                and job.input_containers[fi] is not None
+            ):
+                inp = job.input_containers[fi]
+            else:
+                inp = av.open(
+                    spec_i.path,
+                    "r",
+                    format=spec_i.format,
+                    timeout=spec_i.timeout,
+                    options=spec_i.options,
+                    hwaccel=spec_i.hwaccel,
                 )
-                on_progress(progress, f"{job.progress_label}... {int(progress * 100)}%")
+            try:
+                in_video = inp.streams.best("video") if v_spec else None
+                in_audio = inp.streams.best("audio") if a_spec else None
+                total_duration = (
+                    float(inp.duration or 0) / float(av.time_base) if inp.duration else 1.0
+                )
+                last_report = 0.0
+                processed_pts = 0.0
 
-        cancelled = bool(cancel_event is not None and cancel_event.is_set())
+                streams_to_demux = [
+                    s for s, spec in ((in_video, v_spec), (in_audio, a_spec)) if s and spec
+                ]
+
+                video_graph = None
+                audio_graph = None
+                for packet in inp.demux(streams_to_demux):
+                    _pause_hook(cancel_event)
+                    if cancel_event and cancel_event.is_set():
+                        logger.info("Transcode cancelled by user.")
+                        break
+
+                    if packet.size == 0 or (packet.pts is None and packet.dts is None):
+                        continue
+
+                    win_start, win_end = job.window if job.window else (None, None)
+
+                    if in_video and packet.stream == in_video:
+                        for frame in _decode_packet(packet):
+                            if cancel_event and cancel_event.is_set():
+                                break
+                            if win_start is not None or win_end is not None:
+                                ft = frame.time
+                                if ft is None or (win_start is not None and ft < win_start):
+                                    continue
+                                if win_end is not None and ft > win_end:
+                                    break
+                            if frame.time:
+                                processed_pts = frame.time
+
+                            if job.video_chain is not None and video_graph is None:
+                                builder = job.video_chain.build
+                                if builder is not None:
+                                    video_graph = builder(frame)
+                                elif job.video_chain.nodes:
+                                    video_graph = _graph_from_nodes(job.video_chain.nodes, frame)
+
+                            out_frames = [frame]
+                            if video_graph is not None:
+                                _rebase_pts(frame, _FINE_VIDEO_TB)
+                                out_frames = _push_pull(video_graph, frame)
+
+                            for frame in out_frames:
+                                if out_video and (
+                                    frame.width != out_video.width
+                                    or frame.height != out_video.height
+                                    or frame.format.name != enc_pix_fmt
+                                ):
+                                    frame = video_reformatter.reformat(
+                                        frame,
+                                        width=out_video.width,
+                                        height=out_video.height,
+                                        format=enc_pix_fmt,
+                                    )
+                                if out_video:
+                                    _stamp_video(frame)
+                                    for enc_pkt in out_video.encode(frame):
+                                        _mux_packet(out, enc_pkt)
+
+                    elif in_audio and packet.stream == in_audio:
+                        for frame in _decode_packet(packet):
+                            if cancel_event and cancel_event.is_set():
+                                break
+                            if win_start is not None or win_end is not None:
+                                ft = getattr(frame, "time", None)
+                                if ft is None or (win_start is not None and ft < win_start):
+                                    continue
+                                if win_end is not None and ft > win_end:
+                                    break
+                            if not out_audio:
+                                continue
+                            if job.audio_chain is not None and audio_graph is None:
+                                builder = job.audio_chain.build
+                                if builder is not None:
+                                    audio_graph = builder(frame)
+                                elif job.audio_chain.nodes:
+                                    audio_graph = _graph_from_nodes(job.audio_chain.nodes, frame)
+                            out_frames = [frame]
+                            if audio_graph is not None:
+                                out_frames = _push_pull(audio_graph, frame)
+                            for frame in out_frames:
+                                _stamp_audio(frame)
+                                _encode_audio_frame(frame)
+
+                    now = time.monotonic()
+                    if on_progress and not multi_input and (now - last_report >= 0.25):
+                        last_report = now
+                        progress = (
+                            min(0.99, max(0.01, processed_pts / total_duration))
+                            if total_duration > 0
+                            else 0.5
+                        )
+                        on_progress(progress, f"{job.progress_label}... {int(progress * 100)}%")
+
+                if multi_input and on_progress:
+                    on_progress(
+                        min(0.95, (fi + 1) / len(job.inputs) * 0.95),
+                        f"Joining {Path(spec_i.path).name}… ({fi + 1}/{len(job.inputs)})",
+                    )
+            finally:
+                if fi > 0:
+                    _close_container(inp)
+
+        cancelled = bool(cancel_event is not None and cancel_event.is_set()) or cancelled_any
         if not cancelled and video_graph is not None and out_video:
             for frame in _drain_graph(video_graph):
                 if (
@@ -1477,10 +1523,10 @@ def run_encode_job(
             on_progress(1.0, job.complete_label)
 
     finally:
-        _close_container(inp)
+        _close_container(first_inp)
         _close_container(out)
 
-    if cancel_event and cancel_event.is_set():
+    if cancelled:
         if Path(job.output_path).exists():
             try:
                 Path(job.output_path).unlink()
@@ -2991,103 +3037,54 @@ class EngineService:
         on_progress: Callable[[float, str], None] | None = None,
         cancel_event: Event | None = None,
     ) -> str:
-        """Uniform re-encode join: one encoder pair for the whole chain;
-        clips with mismatched shapes are scaled to the first clip's size.
-        Sequential pts=None keeps the timeline continuous across boundaries."""
+        """Uniform re-encode join: one encoder pair for the whole chain.
+
+        Multi-input preset over run_encode_job: clips with mismatched shapes
+        are scaled to the first clip's size; sequential pts=None keeps the
+        timeline continuous across boundaries.
+        """
         first = infos[0]
         fv = first.video_stream
         fa = first.audio_stream
         if fv is None:
             raise ValueError("The first file has no video stream to join")
 
-        out = av.open(output_path, "w", format=container_format)
-        cancelled = False
-        try:
-            out_fps = max(1, min(int(fv.fps or 30), 60))
-            out_w = max(2, (fv.width or 640 // 2 * 2) // 2 * 2)
-            out_h = max(2, (fv.height or 360 // 2 * 2) // 2 * 2)
-            out_video = None
-            chosen_v = _resolve_video_codec(video_codec) if video_codec else _pick_video_encoder()
-            out_video = out.add_stream(chosen_v, rate=out_fps)
-            out_video.width = out_w
-            out_video.height = out_h
-            out_video.pix_fmt = _encoder_pix_fmt(chosen_v)
-            out_video.time_base = Fraction(1, out_fps)
-            out_video.options = _supported_encoder_options(
-                chosen_v, {"crf": "23", "preset": "fast"}
-            )
-
-            out_audio = None
-            if fa is not None:
-                out_audio = out.add_stream(
-                    _resolve_audio_codec("aac"), rate=fa.sample_rate or 44100
-                )
-                out_audio.layout = "stereo" if (fa.channels or 2) >= 2 else "mono"
-
-            mux_clamp = _MuxClamp()
-
-            for fi, path in enumerate(paths):
-                if cancel_event and cancel_event.is_set():
-                    cancelled = True
-                    break
-                inp = av.open(path, "r", timeout=_INPUT_TIMEOUT)
-                try:
-                    in_video = inp.streams.best("video")
-                    in_audio = inp.streams.best("audio")
-                    streams = [s for s in (in_video, in_audio) if s]
-
-                    for packet in inp.demux(streams):
-                        if cancel_event and cancel_event.is_set():
-                            cancelled = True
-                            break
-                        _pause_hook(cancel_event)
-                        if in_video and packet.stream == in_video:
-                            for frame in _decode_packet(packet):
-                                if out_video is None:
-                                    break
-                                if (
-                                    frame.width != out_video.width
-                                    or frame.height != out_video.height
-                                    or frame.format.name != out_video.pix_fmt
-                                ):
-                                    frame = frame.reformat(
-                                        width=out_video.width,
-                                        height=out_video.height,
-                                        format=out_video.pix_fmt,
-                                    )
-                                frame.pts = None  # sequential across the whole chain
-                                for enc_pkt in out_video.encode(frame):
-                                    mux_clamp.mux(out, enc_pkt)
-                        elif in_audio and packet.stream == in_audio and out_audio is not None:
-                            for frame in _decode_packet(packet):
-                                frame.pts = None
-                                for enc_pkt in out_audio.encode(frame):
-                                    mux_clamp.mux(out, enc_pkt)
-
-                    if on_progress:
-                        on_progress(
-                            min(0.95, (fi + 1) / len(paths) * 0.95),
-                            f"Joining {Path(path).name}… ({fi + 1}/{len(paths)})",
-                        )
-                finally:
-                    _close_container(inp)
-
-            if not cancelled:
-                if out_video:
-                    for enc_pkt in out_video.encode(None):
-                        mux_clamp.mux(out, enc_pkt)
-                if out_audio:
-                    for enc_pkt in out_audio.encode(None):
-                        mux_clamp.mux(out, enc_pkt)
-                if on_progress:
-                    on_progress(1.0, f"Joined {len(paths)} clips")
-        finally:
-            _close_container(out)
-
-        if cancelled or (cancel_event and cancel_event.is_set()):
-            _discard_cancelled(output_path)
-            raise InterruptedError("Join cancelled")
-        return output_path
+        out_fps = max(1, min(int(fv.fps or 30), 60))
+        out_w = max(2, (fv.width or 640) // 2 * 2)
+        out_h = max(2, (fv.height or 360) // 2 * 2)
+        chosen_v = (
+            _resolve_or_raw(video_codec, "video") if video_codec else _pick_video_encoder()
+        )
+        job = Job(
+            output_path=output_path,
+            inputs=[InputSpec(path=path) for path in paths],
+            streams=[
+                StreamSpec(
+                    kind="video",
+                    codec=chosen_v,
+                    fps=out_fps,
+                    scale_width=out_w,
+                    scale_height=out_h,
+                    pts_policy="encoder",
+                    encoder_options=_supported_encoder_options(
+                        chosen_v, {"crf": "23", "preset": "fast"}
+                    ),
+                ),
+                StreamSpec(
+                    kind="audio",
+                    codec="aac",
+                    sample_rate=int(fa.sample_rate) if fa and fa.sample_rate else None,
+                    layout="stereo" if (fa and (fa.channels or 2) >= 2) else "mono",
+                    pts_policy="encoder",
+                ),
+            ],
+            output=OutputSpec(container=container_format, metadata=False),
+            chapters=CHAPTERS_SKIP,
+            progress_label="Joining",
+            complete_label=f"Joined {len(paths)} clips",
+            cancel_message="Join cancelled",
+        )
+        return run_encode_job(job, on_progress=on_progress, cancel_event=cancel_event)
 
     @staticmethod
     def _concat_crossfade(
