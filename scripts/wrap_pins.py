@@ -42,6 +42,13 @@ FAM_ARGS = [
     f"--android-api-level={ANDROID_API_LEVEL}",
     "--enable-all-free",
     "--enable-all-gpl",
+    # External libs beyond ffmpeg-android-maker's built-in set, built by the
+    # overlay in scripts/ffmpeg-android-maker-ext/ (libogg is a dependency of
+    # libvorbis; FFmpeg has no --enable-libogg, so apply.sh wires it as
+    # build-only and adds the external pkg-config path).
+    "--enable-libogg",
+    "--enable-libvorbis",
+    "--enable-libsvtav1",
 ]
 
 ABIS = ("arm64-v8a", "armeabi-v7a", "x86_64")
@@ -60,6 +67,8 @@ REQUIRED_CONFIGURE_TOKENS = (
     "libxml2",
     "libbluray",
     "mbedtls",
+    "libvorbis",
+    "libsvtav1",
 )
 
 WHEEL_BUILD_TAG = "1"

@@ -41,6 +41,9 @@ if [ ! -d "$FAM_DIR/.git" ]; then
 fi
 git -C "$FAM_DIR" checkout --quiet "$FAM_COMMIT"
 
+# ── Overlay: extra external codec libraries (ogg/vorbis/svtav1) ────────────
+"$ROOT/scripts/ffmpeg-android-maker-ext/apply.sh" "$FAM_DIR"
+
 # ── Build every requested ABI ───────────────────────────────────────────────
 FAM_ARGS=$(python3 "$ROOT/scripts/wrap_pins.py" --args)
 cd "$FAM_DIR"
