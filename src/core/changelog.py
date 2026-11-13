@@ -7,8 +7,10 @@ from core.constants import APP_VERSION
 CHANGELOG: dict[str, str] = {
     "2.0.0": """### FFmpeg AV 2.0.0 — The Full FFmpeg Engine
 - **Renamed FFmpeg Lite → FFmpeg AV**: a one-to-one wrap of `av` (PyAV) — the app exposes the engine it ships, name follows the library.
-- **Full FFmpeg 9.0.2 on mobile**: the bundled engine is now a complete build — H.264 (x264), H.265 (x265), VP9, AV1, MP3 (LAME), Opus, WebP, TLS — the old "Lite" capability floor is gone.
+- **Full FFmpeg 9.0.2 on mobile**: the bundled engine is now a complete build — H.264 (x264), H.265 (x265), VP9, AV1, MP3 (LAME), Opus, Vorbis, WebP, TLS — the old "Lite" capability floor is gone.
 - **Latest PyAV**: runs on av 19 / FFmpeg 9; dependencies stay unpinned and ride upstream releases.
+- **Every encoder setting, from the wheel**: an Advanced panel per codec renders the option schema the installed build measures (type, choices, range, help) — encoder and muxer settings included, with no per-codec tables.
+- **Terminal speaks real ffmpeg**: `-vf`/`-af` run through the engine's filter graph (any filter this build ships), codecs and options are validated against the wheel, and anything this build lacks is refused naming the cause.
 - **Open-Source Licenses**: Settings now carries the GPL §6(b) source offer and every bundled component's license text.
 """,
     "1.0.0": """### FFmpeg 1.0.0 — Initial Release

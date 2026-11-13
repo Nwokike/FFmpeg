@@ -543,6 +543,28 @@ def _exact_rate(value, default: int = 30):
     return rate
 
 
+def _tls_available() -> bool:
+    """Does THIS wheel have a TLS protocol handler? (measured, cached)
+
+    The stock flet-libffmpeg build is bare LGPL with no TLS, so https recording
+    has to go through httpx there; our wrap build (mbedtls) opens https natively.
+    The capability probe answers this — no platform or build literals.
+    """
+    global _TLS_OK
+    if _TLS_OK is None:
+        from core.engine_probe import probe
+
+        try:
+            _TLS_OK = probe().https_ok
+        except Exception as exc:
+            logger.warning("TLS capability probe failed: %s", exc)
+            _TLS_OK = False
+    return _TLS_OK
+
+
+_TLS_OK: bool | None = None
+
+
 def _wire_option_value(value: Any) -> str:
     """One encoder-option value in the form av accepts.
 
@@ -3990,10 +4012,13 @@ class EngineService:
     ):
         """Download an HTTPS (optionally HLS) stream into a local temp file.
 
-        The Android FFmpeg build has no TLS handler, so ``av.open`` cannot open
-        HTTPS directly. Fetch the bytes with ``httpx`` instead, using the app's
-        own network stack. HLS playlists are expanded segment-by-segment so the
-        resulting file is a plain container PyAV can demux.
+        The fallback for a wheel built WITHOUT a TLS protocol handler (the stock
+        flet-libffmpeg is bare LGPL): ``av.open`` cannot open HTTPS there, so the
+        bytes are fetched with ``httpx`` on the app's own network stack. When the
+        wheel's TLS probe says https works, :meth:`_open_network_input` never
+        calls this — the native path is always preferred.
+        HLS playlists are expanded segment-by-segment so the resulting file is a
+        plain container PyAV can demux.
 
         Plain files stream in ONE GET (the old code sniffed 512B, discarded the
         response, and GET again from byte 0). HLS totals are capped at
@@ -4078,13 +4103,14 @@ class EngineService:
     ):
         """Return ``(container, cleanup_path)`` for a URL.
 
-        HTTP and other protocols PyAV handles natively go straight to
-        ``av.open`` (no cleanup path). HTTPS goes through
-        :meth:`_open_https_via_httpx` because the Android FFmpeg build ships
-        without TLS, and its temp file must be removed after the mux closes.
+        Every protocol this wheel handles natively goes straight to ``av.open``
+        (no cleanup path) — including HTTPS when the wheel's TLS probe says the
+        handler is compiled in. Only a wheel WITHOUT TLS falls back to
+        :meth:`_open_https_via_httpx` (the app's own network stack), and that
+        download's temp file must be removed after the mux closes.
         ``max_hls_download_mb=None`` overrides the cap for this download.
         """
-        if input_url.lower().startswith("https://"):
+        if input_url.lower().startswith("https://") and not _tls_available():
             return EngineService._open_https_via_httpx(input_url, cancel_event, max_hls_download_mb)
         return av.open(input_url, "r", timeout=(10.0, 30.0)), None
 
@@ -4108,12 +4134,11 @@ class EngineService:
         ``max_hls_download_mb`` caps one HTTPS/HLS download (default 2 GB —
         the app setting; None = the caller overrode it for this download).
 
-        Flet Mobile Forge's Android FFmpeg build has NO TLS protocol handler,
-        so ``av.open('https://…')`` raises ProtocolNotFoundError on the phone
-        even though the same call works on desktop. HTTPS is therefore fetched
-        through ``httpx`` (which uses the app's own network stack) and handed
-        to PyAV as a local file — the exact approach the Mobile Forge recipe
-        documentation recommends.
+        HTTPS goes through ``av.open`` whenever this wheel has a TLS handler
+        (the wrap build does; so does the desktop wheel). A wheel without one
+        (the stock bare-LGPL flet-libffmpeg) falls back to fetching the stream
+        with ``httpx`` and handing PyAV a local file — measured per wheel, never
+        assumed from the platform.
         """
         if not input_url or "://" not in input_url:
             raise ValueError("That doesn't look like a stream URL (need scheme://…)")

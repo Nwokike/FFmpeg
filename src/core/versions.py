@@ -10,17 +10,17 @@ from __future__ import annotations
 
 
 def pyav_version() -> str:
-    """Installed PyAV wrapper version (e.g. "18.1.0"); "18" when unreadable."""
+    """Installed PyAV wrapper version (e.g. "19.0.2"); "unknown" if unreadable."""
     try:
         import av
 
-        return str(av.__version__ or "18")
+        return str(av.__version__ or "unknown")
     except Exception:
-        return "18"
+        return "unknown"
 
 
 def ffmpeg_version() -> str:
-    """Linked FFmpeg version (e.g. "8.1.2"); "8" when unreadable.
+    """Linked FFmpeg version (e.g. "9.0.2"); "unknown" when unreadable.
 
     ``ffmpeg_version_info`` is a plain string attribute on the installed wheel,
     not a callable.
@@ -29,14 +29,14 @@ def ffmpeg_version() -> str:
         import av
 
         info = av.ffmpeg_version_info
-        return str(info or "8")
+        return str(info or "unknown")
     except Exception:
-        return "8"
+        return "unknown"
 
 
 def pyav_major() -> str:
-    """Major PyAV number for short labels ("PyAV 18 …")."""
-    return pyav_version().split(".")[0] or "18"
+    """Major PyAV number for short labels ("PyAV 19 …")."""
+    return pyav_version().split(".")[0] or "unknown"
 
 
 __all__ = ["ffmpeg_version", "pyav_major", "pyav_version"]

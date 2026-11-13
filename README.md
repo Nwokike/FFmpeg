@@ -161,7 +161,7 @@
 
 | Layer | Technology | Purpose |
 | :--- | :--- | :--- |
-| **Frontend** | Flet 1.0 (Flutter engine) | Cross-platform Material 3 interface |
+| **Frontend** | Flet 1.1 (Flutter engine) | Cross-platform Material 3 interface |
 | **Media Engine** | `av` (PyAV via FFmpeg) | Demuxing, decoding, encoding, filtering, and stream copying |
 | **Playback** | `flet-video` + `flet-audio` | Live hardware-accelerated preview of inputs and outputs |
 | **Capture** | `flet-camera` + `flet-audio-recorder` | In-app photo, video, and microphone recording |

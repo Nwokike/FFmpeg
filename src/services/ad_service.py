@@ -1,6 +1,6 @@
 """AdMob advertising service with UMP consent and test unit management.
 
-Follows the canonical voicelm pattern adapted for Flet 1.0.
+Follows the canonical voicelm pattern adapted for Flet.
 """
 
 from __future__ import annotations

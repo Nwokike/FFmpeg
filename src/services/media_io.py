@@ -31,7 +31,7 @@ def _is_out_of_space(exc: BaseException) -> bool:
 
 
 def picker_files(result) -> list:
-    """Normalize Flet 1.0's list return and legacy event-shaped results."""
+    """Normalize Flet's list return and legacy event-shaped results."""
     if not result:
         return []
     if isinstance(result, list):

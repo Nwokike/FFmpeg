@@ -53,7 +53,7 @@ def build_update_dialog(
     is_mandatory = bool(update_data.get("mandatory", False)) if update_data else False
 
     def _launch(url: str) -> None:
-        # Flet 1.0: URLs open via the registered UrlLauncher service (async),
+        # URLs open via the registered UrlLauncher service (async),
         # never page.launch_url which no longer exists on Page.
         if not is_allowed_launch_url(url):
             logger.warning("Blocked non-allowlisted link: %r", url)

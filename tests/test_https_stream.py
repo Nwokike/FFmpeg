@@ -12,9 +12,16 @@ import pytest
 from services.engine_service import EngineService, friendly_job_error
 
 
-def test_https_routes_through_httpx_not_av(monkeypatch):
-    """HTTPS must not reach av.open — the Android build ships no TLS."""
+def test_https_routes_through_httpx_only_on_a_tls_less_wheel(monkeypatch):
+    """A wheel without a TLS handler must not hand https to av.open.
+
+    That is the stock bare-LGPL flet-libffmpeg (and the old Mobile Forge build);
+    the capability probe decides, not the platform.
+    """
+    import services.engine_service as es
+
     sentinel = MagicMock()
+    monkeypatch.setattr(es, "_TLS_OK", False)
     monkeypatch.setattr(
         EngineService,
         "_open_https_via_httpx",
@@ -24,7 +31,7 @@ def test_https_routes_through_httpx_not_av(monkeypatch):
     )
 
     def fail_open(*_args, **_kwargs):
-        raise AssertionError("HTTPS must not reach av.open on the TLS-less build")
+        raise AssertionError("HTTPS must not reach av.open on a TLS-less wheel")
 
     monkeypatch.setattr(av, "open", fail_open)
 
@@ -44,6 +51,24 @@ def test_http_routes_straight_to_native_av_open(monkeypatch):
     )
 
     got_container, cleanup = EngineService._open_network_input("http://example.com/stream")
+    assert got_container is container
+    assert cleanup is None
+
+
+def test_https_uses_av_open_when_the_wheel_has_tls(monkeypatch):
+    """Our wrap wheel ships TLS: https goes straight to av.open."""
+    import services.engine_service as es
+
+    container = MagicMock()
+    monkeypatch.setattr(es, "_TLS_OK", True)
+    monkeypatch.setattr(av, "open", lambda *a, **k: container)
+    monkeypatch.setattr(
+        EngineService,
+        "_open_https_via_httpx",
+        staticmethod(lambda *a, **k: pytest.fail("a TLS-capable wheel must not use the httpx path")),
+    )
+
+    got_container, cleanup = EngineService._open_network_input("https://example.com/stream.m3u8")
     assert got_container is container
     assert cleanup is None
 

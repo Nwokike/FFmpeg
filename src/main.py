@@ -288,7 +288,7 @@ async def main(page: ft.Page) -> None:
     ads = AdService(page)
     update_svc = UpdateService()
 
-    # Flet 1.0 has no page.launch_url/page.set_clipboard — these services must be
+    # Flet's Page has no launch_url/set_clipboard — these services must be
     # registered in page.services before any launch/clipboard call (GC + transport).
     url_launcher = ft.UrlLauncher()
     clipboard = ft.Clipboard()

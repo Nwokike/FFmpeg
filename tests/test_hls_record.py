@@ -471,3 +471,61 @@ def test_segment_retry_gives_up_loud():
 
 def test_hls_timeout_is_four_phase():
     assert EngineService._HLS_TIMEOUT == (10.0, 30.0, 30.0, 10.0)
+
+
+# ── TLS routing: measured per wheel, never assumed from the platform ────────
+
+
+class _FakeContainer:
+    def close(self):
+        pass
+
+
+def test_https_uses_the_native_path_when_this_wheel_has_tls(monkeypatch):
+    """A wheel with a TLS handler must open https directly — no httpx detour."""
+    import services.engine_service as es
+
+    monkeypatch.setattr(es, "_TLS_OK", True)
+    seen: dict = {}
+
+    def _fake_open(path, *args, **kwargs):
+        seen["path"] = path
+        return _FakeContainer()
+
+    monkeypatch.setattr(es.av, "open", _fake_open)
+    container, cleanup = EngineService._open_network_input("https://example.com/a.mp4")
+    assert isinstance(container, _FakeContainer)
+    assert cleanup is None, "a native open has no temp file to clean up"
+    assert seen["path"] == "https://example.com/a.mp4"
+
+
+def test_https_falls_back_to_httpx_only_without_tls(monkeypatch):
+    """The stock bare-LGPL wheel has no TLS: then, and only then, httpx."""
+    import services.engine_service as es
+
+    monkeypatch.setattr(es, "_TLS_OK", False)
+
+    def _no_native(*args, **kwargs):
+        raise AssertionError("native av.open must not run on a wheel without TLS")
+
+    monkeypatch.setattr(es.av, "open", _no_native)
+    called: dict = {}
+
+    def _fake_fetch(url, cancel_event=None, max_hls_download_mb=None):
+        called["url"] = url
+        return _FakeContainer(), "/tmp/https_dl_test.dat"
+
+    monkeypatch.setattr(EngineService, "_open_https_via_httpx", staticmethod(_fake_fetch))
+    container, cleanup = EngineService._open_network_input("https://example.com/a.mp4")
+    assert isinstance(container, _FakeContainer)
+    assert cleanup == "/tmp/https_dl_test.dat"
+    assert called["url"] == "https://example.com/a.mp4"
+
+
+def test_plain_http_never_takes_the_tls_fallback(monkeypatch):
+    import services.engine_service as es
+
+    monkeypatch.setattr(es, "_TLS_OK", False)
+    monkeypatch.setattr(es.av, "open", lambda path, *a, **k: _FakeContainer())
+    container, cleanup = EngineService._open_network_input("http://example.com/a.ts")
+    assert isinstance(container, _FakeContainer) and cleanup is None

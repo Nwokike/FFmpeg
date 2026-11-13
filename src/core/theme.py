@@ -33,7 +33,7 @@ BORDER_LIGHT = "#E5E7EB"
 
 
 class AppTheme:
-    """Produces Flet 1.0 M3 Themes for light and dark modes."""
+    """Produces Flet Material 3 themes for light and dark modes."""
 
     @staticmethod
     def get_light_theme() -> ft.Theme:

@@ -162,7 +162,7 @@ class Job:
 
 @ft.observable
 class AppState:
-    """Global observable application state for Flet 1.0."""
+    """Global observable application state."""
 
     def __init__(self) -> None:
         self.has_accepted_terms: bool = False
