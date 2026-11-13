@@ -41,7 +41,14 @@ from av.video.reformatter import VideoReformatter
 from core.engine_probe import codec_family, probe
 from core.state import ChapterInfo, MediaInfo, MediaStreamInfo
 from core.storage_paths import get_cache_dir, get_temp_dir
-from services.job_model import FilterChain, InputSpec, Job, OutputSpec, StreamSpec
+from services.job_model import (
+    CHAPTERS_SKIP,
+    FilterChain,
+    InputSpec,
+    Job,
+    OutputSpec,
+    StreamSpec,
+)
 
 logger = logging.getLogger("EngineService")
 
@@ -1484,6 +1491,390 @@ def run_encode_job(
     return job.output_path
 
 
+@_with_native_logs
+def run_copy_job(
+    job: Job,
+    on_progress: Callable[[float, str], None] | None = None,
+    cancel_event: Event | None = None,
+) -> str:
+    """The single generic packet-path builder: stream copy + mux (+ BSF).
+
+    Used by remux (template streams), cut stream-copy (windowed zero-base),
+    concat stream-copy (timeline shift) and record (zero-base + Annex-B BSF).
+    av owns the muxing; this applies one rescale/rebase/repair policy per op.
+    """
+    kept_types = (
+        ("video", "audio", "subtitle", "data")
+        if job.keep_data_streams
+        else ("video", "audio", "subtitle")
+    )
+    out = None
+    mux_clamp = _MuxClamp()
+    stream_map: dict = {}  # first input: src stream -> out stream
+    out_by_pos: list = []
+    tb_by_pos: list = []
+    base_pts: dict = {}
+    base_dts: dict = {}
+    shift: dict = {}
+    last_pts: dict = {}
+    last_dts: dict = {}
+    _timeline_state = {"fi": -1, "seen_pos": set()}
+    bsfs: dict = {}
+    win_start, win_end = job.window if job.window else (None, None)
+    job_window_start = win_start
+    start = time.monotonic()
+    bytes_out = 0
+
+    def _kept_streams(inp):
+        return [
+            s
+            for s in inp.streams
+            if s.type in kept_types
+            and not _is_attached_picture(s)
+            and s.index not in job.drop_indices
+        ]
+
+    cancelled_any = False
+    try:
+        for fi, spec_in in enumerate(job.inputs):
+            if (
+                fi > 0
+                and not job.record_mode
+                and cancel_event is not None
+                and cancel_event.is_set()
+            ):
+                cancelled_any = True
+                break
+            preopened = (
+                job.input_containers[fi]
+                if job.input_containers and fi < len(job.input_containers)
+                else None
+            )
+            if preopened is not None:
+                inp = preopened
+            else:
+                inp = av.open(
+                    spec_in.path,
+                    "r",
+                    format=spec_in.format,
+                    timeout=spec_in.timeout,
+                    options=spec_in.options,
+                    hwaccel=spec_in.hwaccel,
+                )
+            try:
+                if fi == 0:
+                    in_video_early = inp.streams.best("video")
+                    effective_seek_s = spec_in.seek_s or 0.0
+                    if job.snap_to_keyframe and in_video_early is not None:
+                        snapped = EngineService._snap_start_to_keyframe(
+                            in_video_early, effective_seek_s
+                        )
+                        if snapped < effective_seek_s - 1e-6:
+                            effective_seek_s = snapped
+                            if on_progress:
+                                on_progress(
+                                    0.0,
+                                    "Start snapped "
+                                    f"{spec_in.seek_s:.2f}s → {snapped:.2f}s for stream-copy cut",
+                                )
+                        job_window_start = effective_seek_s
+                    if effective_seek_s:
+                        _safe_seek(inp, max(0, int(effective_seek_s * av.time_base)))
+                    out = av.open(
+                        job.output_path, "w",
+                        format=job.output.container or "matroska",
+                        options=job.output.options,
+                    )
+                    if job.output.metadata and inp.metadata:
+                        out.metadata.update(inp.metadata)
+
+                    kept_attachments = False
+                    if job.keep_attachments:
+                        for attachment in inp.streams.attachments:
+                            try:
+                                out.add_attachment(
+                                    attachment.name, attachment.mimetype, attachment.data
+                                )
+                                kept_attachments = True
+                            except Exception as exc:
+                                logger.debug(
+                                    "Attachment copy skipped (%s): %s", attachment.name, exc
+                                )
+
+                    src_streams = _kept_streams(inp)
+                    for s in src_streams:
+                        try:
+                            out_s = out.add_stream_from_template(s, opaque=True)
+                        except ValueError as exc:
+                            # MP4-family cannot carry SRT/data/cover-art codecs;
+                            # keep the recordable tracks instead of failing.
+                            logger.info("Record stream %s skipped: %s", s.index, exc)
+                            continue
+                        # add_stream_from_template is a NO-OP for metadata/
+                        # disposition on this build — copy them explicitly.
+                        out_s.metadata.update(s.metadata)
+                        try:
+                            out_s.disposition = int(s.disposition)
+                        except Exception:
+                            pass
+                        stream_map[s] = out_s
+                        out_by_pos.append(out_s)
+                        tb_by_pos.append(_av_rational(s.time_base or Fraction(1, 1000)))
+                    if not stream_map and not kept_attachments:
+                        raise ValueError("Nothing to keep — every stream was excluded")
+
+                    rotation = job.output.rotation
+                    if rotation in (90, 180, 270):
+                        for s, out_s in stream_map.items():
+                            if s.type == "video":
+                                try:
+                                    out_s.set_display_rotation(rotation)
+                                except Exception as exc:
+                                    logger.warning("Rotation write skipped: %s", exc)
+
+                    if job.chapters is CHAPTERS_SKIP:
+                        pass
+                    elif job.chapters is not None:
+                        try:
+                            out.set_chapters(
+                                [
+                                    {
+                                        "id": i,
+                                        "start": int(c.get("start_s", 0) * 1000),
+                                        "end": int(c.get("end_s", 0) * 1000),
+                                        "time_base": Fraction(1, 1000),
+                                        "metadata": {
+                                            "title": str(c.get("title") or f"Chapter {i + 1}")
+                                        },
+                                    }
+                                    for i, c in enumerate(job.chapters)
+                                ]
+                            )
+                        except Exception as exc:
+                            logger.warning("Chapter write skipped: %s", exc)
+                    else:
+                        try:
+                            out.set_chapters(inp.chapters())
+                        except Exception as exc:
+                            logger.warning("Chapter copy skipped: %s", exc)
+
+                    # Bitstream filters (record): MP4-family sources into an
+                    # MPEG-TS/HLS muxer need Annex-B conversion; libavformat
+                    # does NOT auto-insert it.
+                    if job.bsf_codecs and out.format.name in ("mpegts", "hls"):
+                        for s, out_s in stream_map.items():
+                            if s.type != "video" or s.codec_context is None:
+                                continue
+                            cname = s.codec_context.name or ""
+                            for prefix, bsf_name in job.bsf_codecs.items():
+                                if cname.startswith(prefix):
+                                    try:
+                                        bsfs[s.index] = (
+                                            av.BitStreamFilterContext(
+                                                bsf_name, in_stream=s, out_stream=out_s
+                                            ),
+                                            out_s,
+                                        )
+                                    except Exception as exc:
+                                        logger.warning(
+                                            "BSF %s unavailable: %s", bsf_name, exc
+                                        )
+
+                src_streams = _kept_streams(inp)
+                if fi > 0:
+                    # Later inputs map positionally onto the first clip's
+                    # template streams; time bases stay the FIRST clip's
+                    # (every input is rescaled onto that timeline in _emit).
+                    stream_map_local = {
+                        s: out_by_pos[pos] for pos, s in enumerate(src_streams)
+                    }
+                else:
+                    stream_map_local = stream_map
+
+                total_s = (
+                    float(inp.duration or 0) / float(av.time_base) if inp.duration else 0.0
+                )
+                last_report = 0.0
+
+                def _emit(packet) -> None:
+                    nonlocal bytes_out
+                    if _timeline_state["fi"] != fi:
+                        _timeline_state["fi"] = fi
+                        _timeline_state["seen_pos"].clear()
+                    if packet.size == 0 or (packet.pts is None and packet.dts is None):
+                        return
+                    src_key = packet.stream.index if packet.stream is not None else -1
+                    # Rescale onto the target stream's clock when they differ
+                    # (template streams normally share the input time base).
+                    _out_s_pre = stream_map_local.get(packet.stream)
+                    if (
+                        _out_s_pre is not None
+                        and _out_s_pre.time_base
+                        and packet.time_base != _av_rational(_out_s_pre.time_base)
+                    ):
+                        packet.rescale_ts(_av_rational(_out_s_pre.time_base))
+                    if job.zero_base and src_key >= 0:
+                        # Separate bases per clock: B-frame delay (dts<pts) would
+                        # drive the first dts negative under a single base.
+                        if src_key not in base_pts:
+                            base_pts[src_key] = packet.pts if packet.pts is not None else 0
+                        if src_key not in base_dts:
+                            base_dts[src_key] = packet.dts if packet.dts is not None else 0
+                        if packet.pts is not None:
+                            packet.pts = max(0, packet.pts - base_pts[src_key])
+                        if packet.dts is not None:
+                            packet.dts = max(0, packet.dts - base_dts[src_key])
+                        if job.repair_pts_dts and packet.dts is not None and packet.pts is not None:
+                            if packet.dts > packet.pts:
+                                packet.pts = packet.dts
+                    elif job.timeline_shift:
+                        pos = next(
+                            (
+                                p
+                                for p, s in enumerate(src_streams)
+                                if s.index == src_key
+                            ),
+                            None,
+                        )
+                        if pos is not None:
+                            native_pts = packet.pts if packet.pts is not None else 0
+                            native_dts = (
+                                packet.dts if packet.dts is not None else native_pts
+                            )
+                            if pos not in _timeline_state["seen_pos"]:
+                                # First packet of THIS input: land one tick past
+                                # the previous input's final pts (continuity).
+                                _timeline_state["seen_pos"].add(pos)
+                                prev_pts = last_pts.get(pos)
+                                prev_dts = last_dts.get(pos)
+                                shift[pos] = max(
+                                    prev_pts + 1 - native_pts if prev_pts is not None else 0,
+                                    prev_dts + 1 - native_dts if prev_dts is not None else 0,
+                                )
+                            delta = shift.get(pos, 0)
+                            if packet.pts is not None:
+                                packet.pts = packet.pts + delta
+                            if packet.dts is not None:
+                                packet.dts = packet.dts + delta
+                            previous_dts = last_dts.get(pos)
+                            if previous_dts is not None and packet.dts <= previous_dts:
+                                packet.dts = previous_dts + 1
+                            previous_pts = last_pts.get(pos)
+                            if previous_pts is not None and packet.pts <= previous_pts:
+                                packet.pts = previous_pts + 1
+                            if (
+                                packet.dts is not None
+                                and packet.pts is not None
+                                and packet.dts > packet.pts
+                            ):
+                                packet.pts = packet.dts
+                            last_pts[pos] = packet.pts
+                            last_dts[pos] = packet.dts
+
+                    out_s = stream_map_local.get(packet.stream)
+                    if out_s is None:
+                        for src, mapped in stream_map_local.items():
+                            if src.index == src_key:
+                                out_s = mapped
+                                break
+                    bsf_entry = bsfs.get(src_key)
+                    candidates = bsf_entry[0].filter(packet) if bsf_entry else [packet]
+                    for pkt in candidates:
+                        pkt.stream = out_s
+                        if job.timeline_shift:
+                            # Timeline path self-manages monotonicity above.
+                            out.mux(pkt)
+                        else:
+                            mux_clamp.mux(out, pkt)
+                            bytes_out += max(0, pkt.size or 0)
+
+                for packet in inp.demux(src_streams):
+                    _pause_hook(cancel_event)
+                    if cancel_event and cancel_event.is_set():
+                        if job.record_mode:
+                            logger.info("Recording stopped by user (%d bytes) — keeping output", bytes_out)
+                            break
+                        break
+                    if job.duration_cap_s is not None:
+                        if time.monotonic() - start >= job.duration_cap_s:
+                            logger.info("Recording reached duration cap (%.1fs)", job.duration_cap_s)
+                            break
+                    ts = packet.pts if packet.pts is not None else packet.dts
+                    if ts is None:
+                        continue
+                    pkt_time = float(ts * packet.stream.time_base)
+                    if job_window_start is not None and pkt_time < job_window_start:
+                        continue
+                    if win_end is not None and pkt_time > win_end:
+                        break
+                    _emit(packet)
+                    if not job.record_mode:
+                        bytes_out += 0  # counted in _emit
+
+                    now = time.monotonic()
+                    if on_progress and (now - last_report >= 0.25):
+                        last_report = now
+                        if job.record_mode:
+                            elapsed = now - start
+                            prog = (
+                                min(0.99, elapsed / job.duration_cap_s)
+                                if job.duration_cap_s and job.duration_cap_s > 0
+                                else 0.05
+                            )
+                            on_progress(
+                                prog,
+                                f"Recording… {elapsed:.0f}s • {bytes_out // 1024} KB",
+                            )
+                        else:
+                            prog = (
+                                min(0.99, max(0.01, pkt_time / total_s))
+                                if total_s > 0
+                                else 0.5
+                            )
+                            label = (
+                                f"Joining {Path(spec_in.path).name}… ({fi + 1}/{len(job.inputs)})"
+                                if job.timeline_shift
+                                else f"{job.progress_label}... {int(prog * 100)}%"
+                            )
+                            on_progress(prog, label)
+
+                if fi > 0 and on_progress and job.timeline_shift:
+                    on_progress(
+                        min(0.95, (fi + 1) / len(job.inputs) * 0.95),
+                        f"Joining {Path(spec_in.path).name}… ({fi + 1}/{len(job.inputs)})",
+                    )
+            finally:
+                _close_container(inp)
+
+        if out is None:  # no inputs opened (defensive; presets always pass one)
+            raise ValueError("No inputs in copy job")
+
+        # Drain BSF-delayed packets (EOF marker).
+        for bsf_ctx, out_s in bsfs.values():
+            for pkt in bsf_ctx.filter(None):
+                pkt.stream = out_s
+                mux_clamp.mux(out, pkt)
+
+        if on_progress:
+            if job.record_mode:
+                total = time.monotonic() - start
+                on_progress(1.0, f"Recorded {total:.0f}s • {bytes_out // 1024} KB")
+            else:
+                on_progress(1.0, job.complete_label)
+    finally:
+        if out is not None:
+            _close_container(out)
+
+    if cancel_event and cancel_event.is_set() and not job.record_mode:
+        _discard_cancelled(job.output_path)
+        raise InterruptedError(job.cancel_message)
+    if job.record_mode and not Path(job.output_path).exists():
+        # Zero-packet stops never trigger the muxer's lazy header write.
+        Path(job.output_path).touch(exist_ok=True)
+    return job.output_path
+
+
+
 class EngineService:
     """Core media transformation engine powered by PyAV."""
 
@@ -1904,112 +2295,19 @@ class EngineService:
         on_progress: Callable[[float, str], None] | None = None,
         cancel_event: Event | None = None,
     ) -> str:
-        inp = av.open(input_path, "r", timeout=_INPUT_TIMEOUT, options=_INPUT_OPTIONS)
-        try:
-            out = av.open(output_path, "w")
-        except Exception:
-            inp.close()
-            raise
-
-        try:
-            stream_map = {}
-            for s in inp.streams:
-                if s.type in ("video", "audio", "subtitle") and not _is_attached_picture(s):
-                    out_s = out.add_stream_from_template(s, opaque=True)
-                    stream_map[s] = out_s
-            if inp.metadata:
-                out.metadata.update(inp.metadata)
-            try:
-                out.set_chapters(inp.chapters())
-            except Exception as exc:
-                logger.debug("Chapter copy skipped: %s", exc)
-
-            # Seek to start timestamp
-            # Stream-copy cuts must begin on a keyframe — snap and tell the user.
-            actual_start = start_s
-            video_src = inp.streams.best("video")
-            if video_src is not None:
-                snapped = EngineService._snap_start_to_keyframe(video_src, start_s)
-                if snapped < start_s - 1e-6:
-                    actual_start = snapped
-                    if on_progress:
-                        on_progress(
-                            0.0,
-                            f"Start snapped {start_s:.2f}s → {actual_start:.2f}s for stream-copy cut",
-                        )
-
-            seek_target = int(actual_start * av.time_base)
-            _safe_seek(inp, seek_target)
-
-            duration = max(0.1, end_s - actual_start)
-            last_report = 0.0
-            start_pts_map: dict[int, int] = {}
-            start_dts_map: dict[int, int] = {}
-            mux_clamp = _MuxClamp()
-
-            for packet in inp.demux(list(stream_map.keys())):
-                _pause_hook(cancel_event)
-                if cancel_event and cancel_event.is_set():
-                    break
-                if packet.size == 0:
-                    continue
-                ts = packet.pts if packet.pts is not None else packet.dts
-                if ts is None:
-                    continue
-
-                pkt_time = float(ts * packet.stream.time_base)
-                if pkt_time < actual_start:
-                    continue
-                if pkt_time > end_s:
-                    break
-
-                out_s = stream_map[packet.stream]
-                # Template streams normally share the input time base; rescale
-                # when they don't. Stream bases are AVRational; rescale_ts
-                # requires AVRational.
-                if out_s.time_base and packet.time_base != out_s.time_base:
-                    packet.rescale_ts(_av_rational(out_s.time_base))
-
-                # Rebase PTS/DTS to start at 0, in the OUTPUT time base.
-                # Separate bases per clock: with B-frame delay dts < pts, and
-                # a single base drives the first dts negative after rebase.
-                stream_idx = packet.stream.index
-                if stream_idx not in start_pts_map:
-                    start_pts_map[stream_idx] = packet.pts if packet.pts is not None else packet.dts
-                if stream_idx not in start_dts_map:
-                    start_dts_map[stream_idx] = packet.dts if packet.dts is not None else packet.pts
-
-                if packet.pts is not None:
-                    packet.pts = max(0, packet.pts - start_pts_map[stream_idx])
-                if packet.dts is not None:
-                    packet.dts = max(0, packet.dts - start_dts_map[stream_idx])
-                # Post-seek packets can carry an inverted pts/dts pair (the
-                # per-clock rebase above preserves each clock but not their
-                # relationship — measured pts(1) < dts(1001) on a real mp4).
-                # Presentation can never precede decode — carry PTS up to DTS
-                # (a sub-frame nudge, same rule as the concat-copy path).
-                if packet.dts is not None and packet.pts is not None and packet.dts > packet.pts:
-                    packet.pts = packet.dts
-                packet.stream = out_s
-                mux_clamp.mux(out, packet)
-
-                now = time.monotonic()
-                if on_progress and (now - last_report >= 0.25):
-                    last_report = now
-                    prog = min(0.99, max(0.01, (pkt_time - actual_start) / duration))
-                    on_progress(prog, f"Copying cut... {int(prog * 100)}%")
-
-            if on_progress:
-                on_progress(1.0, "Cut Complete")
-        finally:
-            _close_container(inp)
-            _close_container(out)
-
-        if cancel_event and cancel_event.is_set():
-            _discard_cancelled(output_path)
-            raise InterruptedError("Cut was cancelled")
-
-        return output_path
+        job = Job(
+            output_path=output_path,
+            inputs=[InputSpec(path=input_path, seek_s=start_s)],
+            output=OutputSpec(metadata=True),
+            snap_to_keyframe=True,
+            zero_base=True,
+            repair_pts_dts=True,
+            window=(start_s, end_s),
+            progress_label="Copying cut",
+            complete_label="Cut Complete",
+            cancel_message="Cut was cancelled",
+        )
+        return run_copy_job(job, on_progress=on_progress, cancel_event=cancel_event)
 
     @staticmethod
     def _cut_reencode(
@@ -2517,114 +2815,20 @@ class EngineService:
         the source chapters. Chapter writes are matroska/mov-gated by the
         caller (other muxers ignore them).
         """
-        drop = set(drop_indices or [])
-        inp = av.open(input_path, "r", timeout=_INPUT_TIMEOUT, options=_INPUT_OPTIONS)
-        try:
-            out = av.open(output_path, "w", format="matroska")
-        except Exception:
-            inp.close()
-            raise
-        try:
-            if inp.metadata:
-                out.metadata.update(inp.metadata)
-            stream_map = {}
-            kept_attachments = False
-            for attachment in inp.streams.attachments:
-                try:
-                    out.add_attachment(
-                        attachment.name,
-                        attachment.mimetype,
-                        attachment.data,
-                    )
-                    kept_attachments = True
-                except Exception as exc:
-                    logger.debug("Attachment copy skipped (%s): %s", attachment.name, exc)
-            for s in inp.streams:
-                if s.index in drop or s.type not in ("video", "audio", "subtitle"):
-                    continue
-                if _is_attached_picture(s):
-                    continue
-                try:
-                    out_s = out.add_stream_from_template(s, opaque=True)
-                except Exception as exc:
-                    logger.debug("Data/stream copy skipped for %s: %s", s.index, exc)
-                    continue
-                # add_stream_from_template is a NO-OP for metadata/disposition
-                # on this build (verified: both come across empty) — copy them
-                # explicitly before the header is written. Disposition is an
-                # IntFlag, so int() carries the exact bit set.
-                out_s.metadata.update(s.metadata)
-                try:
-                    out_s.disposition = int(s.disposition)
-                except Exception as exc:
-                    logger.debug("Disposition copy skipped: %s", exc)
-                stream_map[s] = out_s
-            if not stream_map and not kept_attachments:
-                raise ValueError("Nothing to keep — every stream was excluded")
-
-            if rotation in (90, 180, 270):
-                # Display-matrix rotation: players honor it, pixels untouched.
-                for s, out_s in stream_map.items():
-                    if s.type == "video":
-                        try:
-                            out_s.set_display_rotation(rotation)
-                        except Exception as exc:
-                            logger.warning("Rotation write skipped: %s", exc)
-
-            if chapters is not None:
-                try:
-                    out.set_chapters(
-                        [
-                            {
-                                "id": i,
-                                "start": int(c.get("start_s", 0) * 1000),
-                                "end": int(c.get("end_s", 0) * 1000),
-                                "time_base": Fraction(1, 1000),
-                                "metadata": {"title": str(c.get("title") or f"Chapter {i + 1}")},
-                            }
-                            for i, c in enumerate(chapters)
-                        ]
-                    )
-                except Exception as exc:
-                    logger.warning("Chapter write skipped: %s", exc)
-            else:
-                try:
-                    out.set_chapters(inp.chapters())
-                except Exception as exc:
-                    logger.warning("Chapter copy skipped: %s", exc)
-
-            total_s = (float(inp.duration or 0) / float(av.time_base)) if inp.duration else 0.0
-            last_report = 0.0
-            mux_clamp = _MuxClamp()
-
-            for packet in inp.demux(list(stream_map)):
-                _pause_hook(cancel_event)
-                if cancel_event and cancel_event.is_set():
-                    break
-                if packet.size == 0 or (packet.pts is None and packet.dts is None):
-                    continue
-                ts = packet.pts if packet.pts is not None else packet.dts
-                pkt_time = float(ts * packet.stream.time_base)
-                packet.stream = stream_map[packet.stream]
-                mux_clamp.mux(out, packet)
-
-                now = time.monotonic()
-                if on_progress and (now - last_report >= 0.25):
-                    last_report = now
-                    prog = min(0.99, max(0.01, pkt_time / total_s)) if total_s > 0 else 0.5
-                    on_progress(prog, f"Copying streams... {int(prog * 100)}%")
-
-            if on_progress:
-                on_progress(1.0, "Streams copied")
-        finally:
-            _close_container(inp)
-            _close_container(out)
-
-        if cancel_event and cancel_event.is_set():
-            _discard_cancelled(output_path)
-            raise InterruptedError("Stream copy cancelled")
-
-        return output_path
+        job = Job(
+            output_path=output_path,
+            inputs=[InputSpec(path=input_path)],
+            output=OutputSpec(
+                container="matroska", metadata=True, rotation=rotation
+            ),
+            drop_indices=list(drop_indices or []),
+            keep_attachments=True,
+            chapters=chapters,
+            progress_label="Copying streams",
+            complete_label="Streams copied",
+            cancel_message="Stream copy cancelled",
+        )
+        return run_copy_job(job, on_progress=on_progress, cancel_event=cancel_event)
 
     @staticmethod
     def concat(
@@ -2763,109 +2967,18 @@ class EngineService:
         on_progress: Callable[[float, str], None] | None,
         cancel_event: Event | None,
     ) -> str:
-        """Lossless join: packets are rescaled onto the first clip's timeline
-        and shifted so each file starts exactly one tick after the previous
-        file's last packet (no duration-rounding gaps or overlaps)."""
-        out = av.open(output_path, "w", format=container_format)
-        cancelled = False
-        try:
-            out_by_pos: list = []
-            tb_by_pos: list = []
-            last_pts: dict[int, int] = {}
-            last_dts: dict[int, int] = {}
-
-            for fi, path in enumerate(paths):
-                if cancel_event and cancel_event.is_set():
-                    cancelled = True
-                    break
-                inp = av.open(path, "r", timeout=_INPUT_TIMEOUT)
-                try:
-                    src_streams = [
-                        s
-                        for s in inp.streams
-                        if s.type in ("video", "audio", "subtitle") and not _is_attached_picture(s)
-                    ]
-                    if fi == 0:
-                        for s in src_streams:
-                            out_by_pos.append(out.add_stream_from_template(s, opaque=True))
-                            tb_by_pos.append(_av_rational(s.time_base or Fraction(1, 1000)))
-
-                    # Boundary constant per stream: land one tick past the previous
-                    # file's final pts (computed on the FIRST packet of this file).
-                    shift: dict[int, int] = {}
-                    first_native: dict[int, int] = {}
-
-                    for packet in inp.demux(src_streams):
-                        if cancel_event and cancel_event.is_set():
-                            cancelled = True
-                            break
-                        if packet.size == 0 or (packet.pts is None and packet.dts is None):
-                            continue
-                        pos = src_streams.index(packet.stream)
-                        target_tb = tb_by_pos[pos]
-                        if packet.time_base != target_tb:
-                            packet.rescale_ts(target_tb)
-
-                        key = pos
-                        native_pts = packet.pts if packet.pts is not None else 0
-                        native_dts = packet.dts if packet.dts is not None else native_pts
-                        if key not in first_native:
-                            first_native[key] = native_pts
-                            prev_pts = last_pts.get(key)
-                            prev_dts = last_dts.get(key)
-                            shift[key] = max(
-                                prev_pts + 1 - native_pts if prev_pts is not None else 0,
-                                prev_dts + 1 - native_dts if prev_dts is not None else 0,
-                            )
-                        delta = shift.get(key, 0)
-                        if packet.pts is not None:
-                            packet.pts = packet.pts + delta
-                        if packet.dts is not None:
-                            packet.dts = packet.dts + delta
-                        if packet.pts is None:
-                            packet.pts = native_pts + delta
-                        if packet.dts is None:
-                            packet.dts = native_dts + delta
-                        previous_dts = last_dts.get(pos)
-                        if previous_dts is not None and packet.dts <= previous_dts:
-                            packet.dts = previous_dts + 1
-                        previous_pts = last_pts.get(pos)
-                        if previous_pts is not None and packet.pts <= previous_pts:
-                            packet.pts = previous_pts + 1
-                        # B-frame delay vs the DTS floor: a pushed-up DTS can
-                        # overtake this packet's PTS (muxer: "pts < dts").
-                        # Presentation can never precede decode — carry PTS up.
-                        if (
-                            packet.dts is not None
-                            and packet.pts is not None
-                            and packet.dts > packet.pts
-                        ):
-                            packet.pts = packet.dts
-                        last_pts[pos] = packet.pts
-                        last_dts[pos] = packet.dts
-
-                        packet.stream = out_by_pos[pos]
-                        # Manually clamped above (shift + last_pts/last_dts
-                        # floors) — no _MuxClamp needed on this path.
-                        out.mux(packet)
-
-                    if on_progress:
-                        on_progress(
-                            min(0.95, (fi + 1) / len(paths) * 0.95),
-                            f"Joining {Path(path).name}… ({fi + 1}/{len(paths)})",
-                        )
-                finally:
-                    _close_container(inp)
-
-            if not cancelled and on_progress:
-                on_progress(1.0, f"Joined {len(paths)} clips")
-        finally:
-            _close_container(out)
-
-        if cancelled or (cancel_event and cancel_event.is_set()):
-            _discard_cancelled(output_path)
-            raise InterruptedError("Join cancelled")
-        return output_path
+        """Lossless join: packets are rescaled onto the first clip's timeline."""
+        job = Job(
+            output_path=output_path,
+            inputs=[InputSpec(path=path) for path in paths],
+            output=OutputSpec(container=container_format, metadata=False),
+            chapters=CHAPTERS_SKIP,
+            timeline_shift=True,
+            progress_label="Joining",
+            complete_label=f"Joined {len(paths)} clips",
+            cancel_message="Join cancelled",
+        )
+        return run_copy_job(job, on_progress=on_progress, cancel_event=cancel_event)
 
     @staticmethod
     @_with_native_logs
@@ -3804,10 +3917,26 @@ class EngineService:
         except (OSError, ValueError) as exc:
             raise ValueError(f"Couldn't open URL: {exc}") from exc
 
+        job = Job(
+            output_path=output_path,
+            inputs=[InputSpec(path=input_url, format=container_format)],
+            input_containers=[inp],
+            output=OutputSpec(container=container_format, metadata=False),
+            chapters=CHAPTERS_SKIP,
+            zero_base=True,
+            bsf_codecs={
+                "h264": "h264_mp4toannexb",
+                "hevc": "hevc_mp4toannexb",
+            },
+            record_mode=True,
+            duration_cap_s=duration_s,
+            keep_data_streams=True,
+            progress_label="Recording",
+            complete_label="Recorded",
+            cancel_message="Recording stopped",
+        )
         try:
-            return EngineService._record_from(
-                inp, output_path, container_format, duration_s, on_progress, cancel_event
-            )
+            return run_copy_job(job, on_progress=on_progress, cancel_event=cancel_event)
         finally:
             inp.close()
             # https inputs are backed by a temp file this method created; the

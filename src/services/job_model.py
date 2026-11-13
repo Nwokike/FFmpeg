@@ -89,6 +89,7 @@ class OutputSpec:
     options: dict = field(default_factory=dict)
     metadata: bool = True
     chapters: bool = True
+    rotation: int | None = None  # display-matrix rotation for copy paths
 
 
 @dataclass
@@ -113,6 +114,32 @@ class Job:
     progress_label: str = "Processing"
     complete_label: str = "Complete"
     cancel_message: str = "Transcoding was cancelled"
+    # Packet-path (stream-copy) options.
+    drop_indices: list[int] = field(default_factory=list)
+    keep_attachments: bool = False
+    # None -> copy the source chapters; a list replaces them; SKIP leaves the
+    # output with no chapter set at all.
+    chapters: list[dict] | object | None = None
+    # Rebase pts/dts to zero (cut stream-copy, record).
+    zero_base: bool = False
+    # Carry PTS up to DTS after rebasing (cut stream-copy; record skips it).
+    repair_pts_dts: bool = False
+    # Multi-input timeline: shift each later input one tick past the previous.
+    timeline_shift: bool = False
+    # Bitstream filters by codec prefix (record: h264/hevc -> Annex-B).
+    bsf_codecs: dict[str, str] = field(default_factory=dict)
+    # Record semantics: live progress copy, cancel keeps the partial file,
+    # optional duration cap.
+    record_mode: bool = False
+    duration_cap_s: float | None = None
+    # Stream-copy extras.
+    snap_to_keyframe: bool = False  # snap the seek target (cut copy)
+    keep_data_streams: bool = False  # record keeps data tracks; remux/cut drop them
+    input_containers: list | None = None  # pre-opened containers (record/network)
     # Multi-input transitions (concat): added in the timeline step.
     transition: str | None = None  # None | "cut" | "crossfade"
     fade_s: float = 0.5
+
+
+# Sentinel: leave the output chapter set untouched.
+CHAPTERS_SKIP = object()
