@@ -8,7 +8,7 @@ back into the screens.
 from __future__ import annotations
 
 import ast
-import glob
+import contextlib
 from pathlib import Path
 
 import av
@@ -59,10 +59,8 @@ def test_codec_families_partition_constructible_codecs():
             assert name not in seen, f"{name} appears in two families"
             seen.add(name)
             for mode in ("r", "w"):
-                try:
+                with contextlib.suppress(Exception):
                     ids.add(av.codec.Codec(name, mode=mode).id)
-                except Exception:
-                    pass
         assert len(ids) == 1, f"family {members} does not share an AVCodecID: {ids}"
     assert seen == p.codecs, "some codecs did not land in any family"
 
@@ -103,11 +101,11 @@ def test_no_handwritten_codec_tables_in_screens():
         format_keys.update(e.lower() for e in meta.get("extensions", []))
     allow_list = {"license_view.py"}
     offenders: dict[str, list[tuple[str, int]]] = {}
-    for fname in sorted(glob.glob(str(SRC / "screens" / "*.py"))):
-        basename = Path(fname).name
+    for fname in sorted((SRC / "screens").glob("*.py")):
+        basename = fname.name
         if basename in allow_list:
             continue
-        tree = ast.parse(Path(fname).read_text(encoding="utf-8"))
+        tree = ast.parse(fname.read_text(encoding="utf-8"))
         for node in ast.walk(tree):
             if isinstance(node, ast.Constant) and isinstance(node.value, str):
                 value = node.value

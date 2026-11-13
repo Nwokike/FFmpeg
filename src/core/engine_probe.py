@@ -533,20 +533,19 @@ def _measure() -> EngineProbe:
             ctx = av.CodecContext.create(name, "w")
             options = list(ctx.supported_options.generic) + list(ctx.supported_options.private)
             p.encoder_options[name] = sorted({str(o.name) for o in options})
-            schema: list[dict] = []
-            for o in options:
-                schema.append(
-                    {
-                        "name": str(o.name),
-                        "type": str(getattr(o, "type", "")),
-                        "choices": [str(c) for c in (getattr(o, "choices", None) or [])],
-                        "default": str(getattr(o, "default", "") or ""),
-                        "min": getattr(o, "min", None),
-                        "max": getattr(o, "max", None),
-                        "help": str(getattr(o, "help", "") or ""),
-                        "is_array": bool(getattr(o, "is_array", False)),
-                    }
-                )
+            schema: list[dict] = [
+                {
+                    "name": str(o.name),
+                    "type": str(getattr(o, "type", "")),
+                    "choices": [str(c) for c in (getattr(o, "choices", None) or [])],
+                    "default": str(getattr(o, "default", "") or ""),
+                    "min": getattr(o, "min", None),
+                    "max": getattr(o, "max", None),
+                    "help": str(getattr(o, "help", "") or ""),
+                    "is_array": bool(getattr(o, "is_array", False)),
+                }
+                for o in options
+            ]
             if schema:
                 p.encoder_option_schema[name] = schema
         except Exception as exc:
@@ -740,7 +739,7 @@ def can_encode_format(fmt: str) -> bool:
     extensions, and one of the muxer's audio codecs (default or supported)
     must be encodable.
     """
-    p = probe()
+    probe()
     want = fmt.lower().lstrip(".")
     matrix = muxer_matrix()
     for name, entry in matrix.items():

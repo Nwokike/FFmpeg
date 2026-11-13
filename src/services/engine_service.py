@@ -41,6 +41,7 @@ from av.video.reformatter import VideoReformatter
 from core.engine_probe import codec_family, probe
 from core.state import ChapterInfo, MediaInfo, MediaStreamInfo
 from core.storage_paths import get_cache_dir, get_temp_dir
+from services.job_model import FilterChain, InputSpec, Job, OutputSpec, StreamSpec
 
 logger = logging.getLogger("EngineService")
 
@@ -367,6 +368,18 @@ def _resolve_codec(requested: str, kind: str) -> str:
     )
 
 
+def _resolve_or_raw(requested: str, kind: str) -> str:
+    """Resolve when the wheel can; otherwise pass the name through untouched.
+
+    Codec-less files must not fail on a codec they never use: the builder
+    resolves for real only when the stream exists (the old in-branch resolve).
+    """
+    try:
+        return _resolve_codec(requested, kind)
+    except EngineCapabilityError:
+        return requested
+
+
 def _resolve_video_codec(requested: str) -> str:
     return _resolve_codec(requested, "video")
 
@@ -399,9 +412,7 @@ def _derive_audio_codec_for_format(requested_format: str) -> str:
         supported = [c for c in match.get("audio", []) if _codec_supports_mode(c, "w")]
     for candidate in [default_codec, *(c for c in order if c in supported)]:
         if candidate:
-            logger.info(
-                "Derived audio codec %r for format %r", candidate, requested_format
-            )
+            logger.info("Derived audio codec %r for format %r", candidate, requested_format)
             return candidate
     if supported:
         return supported[0]
@@ -1072,6 +1083,304 @@ _WM_POSITIONS = {
 }
 
 
+def _graph_from_nodes(nodes: list[tuple[str, dict]], first_frame) -> av.filter.Graph:
+    """Static FilterChain nodes -> configured Graph (video or audio).
+
+    Mirrors the bespoke builders' wiring: buffer/abuffer source, named nodes
+    in order, buffersink/abuffersink sink, then configure().
+    """
+    g = av.filter.Graph()
+    if isinstance(first_frame, av.AudioFrame):
+        src = g.add_abuffer(
+            sample_rate=first_frame.sample_rate,
+            format=first_frame.format.name,
+            layout=first_frame.layout.name,
+        )
+        sink = g.add("abuffersink")
+    else:
+        src = g.add_buffer(template=first_frame)
+        sink = g.add("buffersink")
+    chain: list = [src]
+    for name, args in nodes:
+        chain.append(g.add(name, **(dict(args) if args else {})))
+    chain.append(sink)
+    g.link_nodes(*chain)
+    g.configure()
+    return g
+
+
+def run_encode_job(
+    job: Job,
+    on_progress: Callable[[float, str], None] | None = None,
+    cancel_event: Event | None = None,
+) -> str:
+    """The single generic encode loop: demux -> decode -> chain -> encode -> mux.
+
+    One monotonic-pts policy, one drain/flush sequence, one cancel/reconcile
+    path for every op that produces encoded output (convert, compress,
+    cut-reencode, extract_audio, gif, concat-reencode...). av owns timestamps;
+    this fixes only what the muxer genuinely requires.
+    """
+    spec_in = job.inputs[0]
+    inp = av.open(
+        spec_in.path,
+        "r",
+        format=spec_in.format,
+        timeout=spec_in.timeout,
+        options=spec_in.options,
+        hwaccel=spec_in.hwaccel,
+    )
+    try:
+        out = av.open(job.output_path, "w", format=job.output.container, options=job.output.options)
+    except Exception:
+        inp.close()
+        raise
+
+    try:
+        if job.output.metadata and inp.metadata:
+            out.metadata.update(inp.metadata)
+        if job.output.chapters:
+            try:
+                out.set_chapters(inp.chapters())
+            except Exception as exc:
+                logger.debug("Chapter copy skipped: %s", exc)
+
+        v_spec = next((s for s in job.streams if s.kind == "video"), None)
+        a_spec = next((s for s in job.streams if s.kind == "audio"), None)
+        in_video = inp.streams.best("video") if v_spec else None
+        in_audio = inp.streams.best("audio") if a_spec else None
+
+        out_video = None
+        if v_spec is not None and in_video is not None:
+            target_fps = v_spec.fps if v_spec.fps else _exact_rate(in_video.average_rate)
+            if v_spec.cap_fps:
+                target_fps = max(1, min(target_fps, 60))
+            chosen_vcodec = _resolve_video_codec(v_spec.codec)
+            need_vfilter = job.video_chain is not None
+            # setpts changes the effective frame rate (30fps sped 1.5x arrives
+            # as 45fps); declare it so the encoder's DTS model matches reality.
+            eff_rate = (
+                max(1, -(-round(target_fps * v_spec.speed * 1000) // 1000))
+                if need_vfilter and v_spec.speed > 0
+                else target_fps
+            )
+            out_video = out.add_stream(chosen_vcodec, rate=eff_rate)
+            target_w = v_spec.scale_width or in_video.width or 640
+            target_h = v_spec.scale_height or in_video.height or 360
+            # Crop defines the final size when no explicit scale is set —
+            # otherwise the post-graph reformat would upscale right back.
+            if (
+                v_spec.crop_aspect
+                and v_spec.crop_aspect != "original"
+                and v_spec.scale_width is None
+                and v_spec.scale_height is None
+            ):
+                target_w, target_h = _crop_dims(
+                    in_video.width or target_w,
+                    in_video.height or target_h,
+                    v_spec.crop_aspect,
+                )
+            if v_spec.rotation % 180 == 90:  # 90/270 transpose swaps w/h
+                target_w, target_h = target_h, target_w
+            target_w = (target_w // 2) * 2  # even dimensions for yuv420p
+            target_h = (target_h // 2) * 2
+            out_video.width = target_w
+            out_video.height = target_h
+            enc_pix_fmt = v_spec.pix_fmt or _encoder_pix_fmt(chosen_vcodec)
+            out_video.pix_fmt = enc_pix_fmt
+            out_video.time_base = (
+                _FINE_VIDEO_TB if v_spec.fine_time_base else Fraction(1, round(target_fps))
+            )
+            out_video.options = _supported_encoder_options(
+                chosen_vcodec,
+                dict(v_spec.encoder_options),
+            )
+
+        out_audio = None
+        if a_spec is not None and in_audio is not None:
+            chosen_acodec = _resolve_audio_codec(a_spec.codec)
+            # Opus is 48k-native; the stream resamples fed frames itself.
+            if a_spec.sample_rate:
+                a_rate = a_spec.sample_rate
+            elif chosen_acodec in ("opus", "libopus"):
+                a_rate = 48000
+            else:
+                a_rate = in_audio.rate or 44100
+            out_audio = out.add_stream(
+                chosen_acodec,
+                rate=a_rate,
+                **_encoder_open_kwargs(chosen_acodec),
+            )
+            n_ch = (
+                a_spec.channels if a_spec.channels is not None else min(2, in_audio.channels or 2)
+            )
+            layout = a_spec.layout or ("stereo" if n_ch >= 2 else "mono")
+            out_audio.layout = layout
+
+        video_reformatter = VideoReformatter()
+        last_video_pts = -1
+        last_audio_pts = -1
+        mux_clamp = _MuxClamp()
+
+        def _mux_packet(container, pkt) -> None:
+            mux_clamp.mux(container, pkt)
+
+        def _monotonic_video_pts(frame: av.VideoFrame) -> None:
+            nonlocal last_video_pts
+            out_tb = out_video.time_base or Fraction(1, 30)
+            candidate = None
+            if frame.pts is not None and frame.time_base:
+                candidate = round(Fraction(frame.pts) * frame.time_base / out_tb)
+            if candidate is None or candidate <= last_video_pts:
+                candidate = last_video_pts + 1
+            frame.pts = candidate
+            frame.time_base = out_tb
+            frame.pict_type = 0
+            frame.key_frame = False
+            last_video_pts = candidate
+
+        def _monotonic_audio_pts(frame: av.AudioFrame) -> None:
+            nonlocal last_audio_pts
+            out_tb = out_audio.time_base or Fraction(1, out_audio.rate or 44100)
+            candidate = None
+            if frame.pts is not None and frame.time_base:
+                candidate = round(Fraction(frame.pts) * frame.time_base / out_tb)
+            if candidate is None or candidate <= last_audio_pts:
+                candidate = last_audio_pts + max(1, frame.samples)
+            frame.pts = candidate
+            frame.time_base = out_tb
+            last_audio_pts = candidate
+
+        total_duration = float(inp.duration or 0) / float(av.time_base) if inp.duration else 1.0
+        last_report = 0.0
+        processed_pts = 0.0
+
+        streams_to_demux = [s for s, spec in ((in_video, v_spec), (in_audio, a_spec)) if s and spec]
+
+        video_graph = None
+        audio_graph = None
+        for packet in inp.demux(streams_to_demux):
+            _pause_hook(cancel_event)
+            if cancel_event and cancel_event.is_set():
+                logger.info("Transcode cancelled by user.")
+                break
+
+            if packet.size == 0 or (packet.pts is None and packet.dts is None):
+                continue
+
+            if in_video and packet.stream == in_video:
+                for frame in _decode_packet(packet):
+                    if cancel_event and cancel_event.is_set():
+                        break
+                    if frame.time:
+                        processed_pts = frame.time
+
+                    if job.video_chain is not None and video_graph is None:
+                        builder = job.video_chain.build
+                        if builder is not None:
+                            video_graph = builder(frame)
+                        elif job.video_chain.nodes:
+                            video_graph = _graph_from_nodes(job.video_chain.nodes, frame)
+
+                    out_frames = [frame]
+                    if video_graph is not None:
+                        _rebase_pts(frame, _FINE_VIDEO_TB)
+                        out_frames = _push_pull(video_graph, frame)
+
+                    for frame in out_frames:
+                        if out_video and (
+                            frame.width != out_video.width
+                            or frame.height != out_video.height
+                            or frame.format.name != enc_pix_fmt
+                        ):
+                            frame = video_reformatter.reformat(
+                                frame,
+                                width=out_video.width,
+                                height=out_video.height,
+                                format=enc_pix_fmt,
+                            )
+                        if out_video:
+                            _monotonic_video_pts(frame)
+                            for enc_pkt in out_video.encode(frame):
+                                _mux_packet(out, enc_pkt)
+
+            elif in_audio and packet.stream == in_audio:
+                for frame in _decode_packet(packet):
+                    if cancel_event and cancel_event.is_set():
+                        break
+                    if not out_audio:
+                        continue
+                    if job.audio_chain is not None and audio_graph is None:
+                        builder = job.audio_chain.build
+                        if builder is not None:
+                            audio_graph = builder(frame)
+                        elif job.audio_chain.nodes:
+                            audio_graph = _graph_from_nodes(job.audio_chain.nodes, frame)
+                    out_frames = [frame]
+                    if audio_graph is not None:
+                        out_frames = _push_pull(audio_graph, frame)
+                    for frame in out_frames:
+                        _monotonic_audio_pts(frame)
+                        for enc_pkt in out_audio.encode(frame):
+                            _mux_packet(out, enc_pkt)
+
+            now = time.monotonic()
+            if on_progress and (now - last_report >= 0.25):
+                last_report = now
+                progress = (
+                    min(0.99, max(0.01, processed_pts / total_duration))
+                    if total_duration > 0
+                    else 0.5
+                )
+                on_progress(progress, f"Processing... {int(progress * 100)}%")
+
+        cancelled = bool(cancel_event is not None and cancel_event.is_set())
+        if not cancelled and video_graph is not None and out_video:
+            for frame in _drain_graph(video_graph):
+                if (
+                    frame.width != out_video.width
+                    or frame.height != out_video.height
+                    or frame.format.name != out_video.pix_fmt
+                ):
+                    frame = video_reformatter.reformat(
+                        frame,
+                        width=out_video.width,
+                        height=out_video.height,
+                        format=out_video.pix_fmt,
+                    )
+                _monotonic_video_pts(frame)
+                for enc_pkt in out_video.encode(frame):
+                    _mux_packet(out, enc_pkt)
+        if not cancelled and audio_graph is not None and out_audio:
+            for frame in _drain_graph(audio_graph):
+                _monotonic_audio_pts(frame)
+                for enc_pkt in out_audio.encode(frame):
+                    _mux_packet(out, enc_pkt)
+        if not cancelled and out_video:
+            for enc_pkt in out_video.encode(None):
+                _mux_packet(out, enc_pkt)
+        if not cancelled and out_audio:
+            for enc_pkt in out_audio.encode(None):
+                _mux_packet(out, enc_pkt)
+
+        if on_progress:
+            on_progress(1.0, "Complete")
+
+    finally:
+        _close_container(inp)
+        _close_container(out)
+
+    if cancel_event and cancel_event.is_set():
+        if Path(job.output_path).exists():
+            try:
+                Path(job.output_path).unlink()
+            except OSError as e:
+                logging.getLogger(__name__).warning("Failed to remove cancelled output: %s", e)
+        raise InterruptedError("Transcoding was cancelled")
+
+    return job.output_path
+
+
 class EngineService:
     """Core media transformation engine powered by PyAV."""
 
@@ -1242,7 +1551,6 @@ class EngineService:
         )
 
     @staticmethod
-    @_with_native_logs
     def convert(
         input_path: str,
         output_path: str,
@@ -1274,305 +1582,88 @@ class EngineService:
     ) -> str:
         """Transcode video/audio with quality, scaling, filters, and transforms.
 
-        ``gop_size/max_b_frames/qmin/qmax/thread_count/profile/level`` are
-        optional encoder knobs: each flows through
-        :func:`_supported_encoder_options`, so keys the wheel's encoder lacks
-        drop with an info line instead of failing the job.
+        Preset over the generic encode builder (run_encode_job): encoder knobs
+        flow through _supported_encoder_options so keys the wheel's encoder
+        lacks drop with an info line instead of failing the job.
         """
         hwaccel = _hardware_decode(hardware_accel)
-        inp = av.open(input_path, "r", timeout=_INPUT_TIMEOUT, hwaccel=hwaccel)
-        try:
-            out = av.open(output_path, "w")
-        except Exception:
-            inp.close()
-            raise
+        need_vfilter = (
+            rotation % 360 != 0
+            or abs(speed - 1.0) > 1e-6
+            or bool(crop_aspect and crop_aspect != "original")
+            or bool(eq)
+            or bool(denoise and denoise != "off")
+            or bool(sharpen)
+            or bool(watermark)
+        )
+        need_afilter = volume_pct != 100 or abs(speed - 1.0) > 1e-6
 
-        try:
-            # Container metadata + chapters ride along — only remux used to keep them.
-            if inp.metadata:
-                out.metadata.update(inp.metadata)
-            try:
-                out.set_chapters(inp.chapters())
-            except Exception as exc:
-                logger.debug("Chapter copy skipped: %s", exc)
-
-            in_video = inp.streams.best("video")
-            in_audio = inp.streams.best("audio")
-
-            need_vfilter = (
-                rotation % 360 != 0
-                or abs(speed - 1.0) > 1e-6
-                or bool(crop_aspect and crop_aspect != "original")
-                or bool(eq)
-                or bool(denoise and denoise != "off")
-                or bool(sharpen)
-                or bool(watermark)
+        chosen_vcodec = _resolve_or_raw(video_codec, "video")
+        video_chain = (
+            FilterChain(
+                build=lambda frame: _build_video_filter_graph(
+                    frame,
+                    rotation,
+                    speed,
+                    crop_aspect=crop_aspect,
+                    eq=eq,
+                    denoise=denoise,
+                    sharpen=sharpen,
+                    watermark=watermark,
+                )
             )
-            need_afilter = volume_pct != 100 or abs(speed - 1.0) > 1e-6
-            video_graph: av.filter.Graph | None = None
-            audio_graph: av.filter.Graph | None = None
+            if need_vfilter
+            else None
+        )
+        audio_chain = (
+            FilterChain(build=lambda frame: _build_audio_filter_graph(frame, volume_pct, speed))
+            if need_afilter
+            else None
+        )
 
-            out_video = None
-            if in_video:
-                # Video stream setup (exact rate: 29.97 stays 30000/1001, not 29)
-                target_fps = fps if fps else _exact_rate(in_video.average_rate)
-                out_fps = max(1, min(target_fps, 60))
-
-                # Resolve against the wheel's verified encoder set so a mobile
-                # LGPL build reports a friendly error instead of crashing at
-                # add_stream with an UnknownCodecError.
-                chosen_vcodec = _resolve_video_codec(video_codec)
-
-                # setpts changes the effective frame rate (30fps sped 1.5x arrives
-                # as 45fps); declare it so the encoder's DTS model matches reality.
-                eff_rate = (
-                    max(1, -(-round(out_fps * speed * 1000) // 1000))
-                    if need_vfilter and speed > 0
-                    else out_fps
+        job = Job(
+            output_path=output_path,
+            inputs=[
+                InputSpec(
+                    path=input_path,
+                    options={},
+                    timeout=_INPUT_TIMEOUT,
+                    hwaccel=hwaccel,
                 )
-                out_video = out.add_stream(chosen_vcodec, rate=eff_rate)
-                target_w = scale_width or in_video.width
-                target_h = scale_height or in_video.height
-                # Crop defines the final size when no explicit scale is set —
-                # otherwise the post-graph reformat would upscale right back.
-                if (
-                    crop_aspect
-                    and crop_aspect != "original"
-                    and scale_width is None
-                    and scale_height is None
-                ):
-                    target_w, target_h = _crop_dims(
-                        in_video.width or target_w,
-                        in_video.height or target_h,
-                        crop_aspect,
-                    )
-                if rotation % 180 == 90:  # 90°/270° transposes swap width/height
-                    target_w, target_h = target_h, target_w
-                # Dimensions must be even
-                target_w = (target_w // 2) * 2
-                target_h = (target_h // 2) * 2
-
-                out_video.width = target_w
-                out_video.height = target_h
-                # Encoder-fitted pixel format: still codecs (png) reject yuv420p.
-                enc_pix_fmt = _encoder_pix_fmt(chosen_vcodec)
-                out_video.pix_fmt = enc_pix_fmt
-                # With the filter graph active, timestamps arrive on the fine
-                # 1/90000 tb with speed-warped spacing; bf=0 makes dts==pts so the
-                # muxer sees the same strict sequence the graph produced.
-                out_video.time_base = _FINE_VIDEO_TB if need_vfilter else Fraction(1, out_fps)
-                out_video.options = _supported_encoder_options(
-                    chosen_vcodec,
-                    {"crf": str(crf), "preset": preset}
-                    | ({"bf": "0"} if need_vfilter else {})
-                    | _optional_encoder_knobs(
-                        gop_size=gop_size,
-                        max_b_frames=max_b_frames,
-                        qmin=qmin,
-                        qmax=qmax,
-                        thread_count=thread_count,
-                        profile=profile,
-                        level=level,
+            ],
+            streams=[
+                StreamSpec(
+                    kind="video",
+                    codec=chosen_vcodec,
+                    fps=fps,
+                    speed=speed,
+                    fine_time_base=need_vfilter,
+                    scale_width=scale_width,
+                    scale_height=scale_height,
+                    crop_aspect=crop_aspect,
+                    rotation=rotation,
+                    encoder_options=_supported_encoder_options(
+                        chosen_vcodec,
+                        {"crf": str(crf), "preset": preset}
+                        | ({"bf": "0"} if need_vfilter else {})
+                        | _optional_encoder_knobs(
+                            gop_size=gop_size,
+                            max_b_frames=max_b_frames,
+                            qmin=qmin,
+                            qmax=qmax,
+                            thread_count=thread_count,
+                            profile=profile,
+                            level=level,
+                        ),
                     ),
-                )
-
-            out_audio = None
-            if in_audio:
-                chosen_acodec = _resolve_audio_codec(audio_codec)
-                # Opus is 48k-native; the stream resamples fed frames itself
-                # (verified: 44.1k frames into a 48k stream encode cleanly).
-                a_rate = 48000 if chosen_acodec in ("opus", "libopus") else (in_audio.rate or 44100)
-                out_audio = out.add_stream(
-                    chosen_acodec,
-                    rate=a_rate,
-                    **_encoder_open_kwargs(chosen_acodec),
-                )
-                # Installed wheel: channels is read-only; layout is the writable source of truth
-                n_ch = min(2, in_audio.channels or 2)
-                out_audio.layout = "stereo" if n_ch == 2 else "mono"
-
-            video_reformatter = VideoReformatter()
-            last_video_pts = -1
-            # Packet-level DTS/PTS floor per output stream (see _MuxClamp):
-            # the encoder can still emit identical stamps even when frame PTS
-            # is strictly monotonic. Shared by all encode sites below.
-            mux_clamp = _MuxClamp()
-
-            def _mux_packet(container, pkt) -> None:
-                mux_clamp.mux(container, pkt)
-
-            def _monotonic_video_pts(frame: av.VideoFrame) -> None:
-                """Rebase every output frame to the encoder time base.
-
-                Hardware decoders and VFR sources can hand FFmpeg duplicate or
-                backwards timestamps.  The MP4 muxer requires strict DTS
-                monotonicity, so preserve timing when possible and advance by
-                one tick when the source timestamp is not strictly increasing.
-                """
-                nonlocal last_video_pts
-                out_tb = out_video.time_base or Fraction(1, out_fps)
-                candidate = None
-                if frame.pts is not None and frame.time_base:
-                    candidate = round(Fraction(frame.pts) * frame.time_base / out_tb)
-                if candidate is None or candidate <= last_video_pts:
-                    candidate = last_video_pts + 1
-                frame.pts = candidate
-                frame.time_base = out_tb
-                # Decoder keyframe hints describe the source GOP, not the
-                # output encoder's GOP; forwarding them makes libx264 force
-                # extra I-frames (and can interact badly with hw decode).
-                frame.pict_type = 0
-                frame.key_frame = False
-                last_video_pts = candidate
-
-            last_audio_pts = -1
-
-            def _monotonic_audio_pts(frame: av.AudioFrame) -> None:
-                nonlocal last_audio_pts
-                out_tb = out_audio.time_base or Fraction(1, out_audio.rate or 44100)
-                candidate = None
-                if frame.pts is not None and frame.time_base:
-                    candidate = round(Fraction(frame.pts) * frame.time_base / out_tb)
-                if candidate is None or candidate <= last_audio_pts:
-                    candidate = last_audio_pts + max(1, frame.samples)
-                frame.pts = candidate
-                frame.time_base = out_tb
-                last_audio_pts = candidate
-
-            total_duration = float(inp.duration or 0) / float(av.time_base) if inp.duration else 1.0
-            last_report = 0.0
-            processed_pts = 0.0
-
-            streams_to_demux = [s for s in (in_video, in_audio) if s]
-
-            for packet in inp.demux(streams_to_demux):
-                _pause_hook(cancel_event)
-                if cancel_event and cancel_event.is_set():
-                    logger.info("Transcode cancelled by user.")
-                    break
-
-                if packet.size == 0 or (packet.pts is None and packet.dts is None):
-                    continue
-
-                if in_video and packet.stream == in_video:
-                    for frame in _decode_packet(packet):
-                        if cancel_event and cancel_event.is_set():
-                            break
-
-                        # Progress reads the INPUT timeline (before setpts re-times frames)
-                        if frame.time:
-                            processed_pts = frame.time
-
-                        if need_vfilter and video_graph is None:
-                            video_graph = _build_video_filter_graph(
-                                frame,
-                                rotation,
-                                speed,
-                                crop_aspect=crop_aspect,
-                                eq=eq,
-                                denoise=denoise,
-                                sharpen=sharpen,
-                                watermark=watermark,
-                            )
-
-                        out_frames = [frame]
-                        if video_graph is not None:
-                            _rebase_pts(frame, _FINE_VIDEO_TB)
-                            out_frames = _push_pull(video_graph, frame)
-
-                        for frame in out_frames:
-                            # Scale if needed
-                            if out_video and (
-                                frame.width != out_video.width
-                                or frame.height != out_video.height
-                                or frame.format.name != enc_pix_fmt
-                            ):
-                                frame = video_reformatter.reformat(
-                                    frame,
-                                    width=out_video.width,
-                                    height=out_video.height,
-                                    format=enc_pix_fmt,
-                                )
-
-                            if out_video:
-                                _monotonic_video_pts(frame)
-                                for enc_pkt in out_video.encode(frame):
-                                    _mux_packet(out, enc_pkt)
-
-                elif in_audio and packet.stream == in_audio:
-                    for frame in _decode_packet(packet):
-                        if cancel_event and cancel_event.is_set():
-                            break
-                        if not out_audio:
-                            continue
-                        if need_afilter and audio_graph is None:
-                            audio_graph = _build_audio_filter_graph(frame, volume_pct, speed)
-                        out_frames = [frame]
-                        if audio_graph is not None:
-                            out_frames = _push_pull(audio_graph, frame)
-                        for frame in out_frames:
-                            _monotonic_audio_pts(frame)
-                            for enc_pkt in out_audio.encode(frame):
-                                _mux_packet(out, enc_pkt)
-
-                now = time.monotonic()
-                if on_progress and (now - last_report >= 0.25):
-                    last_report = now
-                    progress = (
-                        min(0.99, max(0.01, processed_pts / total_duration))
-                        if total_duration > 0
-                        else 0.5
-                    )
-                    on_progress(progress, f"Processing... {int(progress * 100)}%")
-
-            # Drain filter graphs (EOF), then flush encoders — skipped when
-            # cancelled: drained packets would be muxed into a file that is
-            # about to be deleted, wasting seconds on large jobs.
-            cancelled = bool(cancel_event is not None and cancel_event.is_set())
-            if not cancelled and video_graph is not None and out_video:
-                for frame in _drain_graph(video_graph):
-                    if (
-                        frame.width != out_video.width
-                        or frame.height != out_video.height
-                        or frame.format.name != out_video.pix_fmt
-                    ):
-                        frame = video_reformatter.reformat(
-                            frame,
-                            width=out_video.width,
-                            height=out_video.height,
-                            format=out_video.pix_fmt,
-                        )
-                    _monotonic_video_pts(frame)
-                    for enc_pkt in out_video.encode(frame):
-                        _mux_packet(out, enc_pkt)
-            if not cancelled and audio_graph is not None and out_audio:
-                for frame in _drain_graph(audio_graph):
-                    _monotonic_audio_pts(frame)
-                    for enc_pkt in out_audio.encode(frame):
-                        _mux_packet(out, enc_pkt)
-            if not cancelled and out_video:
-                for enc_pkt in out_video.encode(None):
-                    _mux_packet(out, enc_pkt)
-            if not cancelled and out_audio:
-                for enc_pkt in out_audio.encode(None):
-                    _mux_packet(out, enc_pkt)
-
-            if on_progress:
-                on_progress(1.0, "Complete")
-
-        finally:
-            _close_container(inp)
-            _close_container(out)
-
-        if cancel_event and cancel_event.is_set():
-            if Path(output_path).exists():
-                try:
-                    Path(output_path).unlink()
-                except OSError as e:
-                    logging.getLogger(__name__).warning("Failed to remove cancelled output: %s", e)
-            raise InterruptedError("Transcoding was cancelled")
-
-        return output_path
+                ),
+                StreamSpec(kind="audio", codec=_resolve_or_raw(audio_codec, "audio")),
+            ],
+            output=OutputSpec(),
+            video_chain=video_chain,
+            audio_chain=audio_chain,
+        )
+        return run_encode_job(job, on_progress=on_progress, cancel_event=cancel_event)
 
     @staticmethod
     @_with_native_logs

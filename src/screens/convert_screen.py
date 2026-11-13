@@ -373,7 +373,8 @@ def ConvertScreen() -> ft.Control:
                         ]
                         if media_kind == "video"
                         and chosen_video not in (probe_info.encoder_lossless if probe_info else [])
-                        and chosen_video not in (probe_info.encoder_intra_only if probe_info else [])
+                        and chosen_video
+                        not in (probe_info.encoder_intra_only if probe_info else [])
                         else []
                     ),
                     # Resolution
