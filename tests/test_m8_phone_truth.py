@@ -194,8 +194,9 @@ def test_verifier_defects_closed():
     cut = (root / "src" / "screens" / "cut_screen.py").read_text(encoding="utf-8")
     join = (root / "src" / "screens" / "join_screen.py").read_text(encoding="utf-8")
 
-    # D1: _cut_reencode normalizes frames to the declared pix_fmt.
-    assert "frame.reformat(format=out_video.pix_fmt)" in engine
+    # D1: the generic builder normalizes every encoded frame to the declared
+    # pix_fmt (VideoReformatter, same guarantee the old cut re-encode had).
+    assert "format=enc_pix_fmt" in engine
     # D2: cut re-encode Start refuses on empty encoder list (both guard sites).
     assert "not available_video" in cut
     # D3: join Start is disabled with no encoder.

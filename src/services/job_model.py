@@ -26,6 +26,11 @@ class InputSpec:
     options: dict = field(default_factory=lambda: {"fflags": "+discardcorrupt"})
     timeout: tuple[float, float] = (5.0, 15.0)
     hwaccel: str | None = None
+    # Seconds into the input; converted with the video stream's time base.
+    seek_s: float | None = None
+    # Seconds into the input; the builder converts with the video stream's
+    # time base and tolerates containers whose index refuses the seek.
+    seek_s: float | None = None
 
 
 @dataclass
@@ -45,11 +50,18 @@ class StreamSpec:
     scale_height: int | None = None
     crop_aspect: str | None = None  # "original" or a W:H aspect string
     rotation: int = 0  # right-angle display rotation through transpose
+    even_align: bool = True  # round output dimensions down to even (yuv420p)
     layout: str | None = None  # audio layout override ("stereo"/"mono")
     channels: int | None = None
     sample_rate: int | None = None  # None -> source rate (opus preset may force 48k)
     # Encoder options merged after resolution: crf/preset/bf/threads/profile...
     encoder_options: dict = field(default_factory=dict)
+    # Timestamp policy: "monotonic" (builder floors) | "encoder" (pts=None).
+    pts_policy: str = "monotonic"
+    # Fixed-frame audio encoders need AudioFifo batching (AAC/MP3/FLAC).
+    audio_fifo: bool = False
+    # Bridge rate/layout with soxr (swr fallback) before the encoder.
+    audio_resample: bool = True
 
 
 @dataclass
@@ -89,6 +101,18 @@ class Job:
     output: OutputSpec = field(default_factory=OutputSpec)
     video_chain: FilterChain | None = None
     audio_chain: FilterChain | None = None
+    # Time window applied after decoding (seconds); None = whole input.
+    window: tuple[float | None, float | None] | None = None
+    # Progress copy per op family (builder messages otherwise say Processing/Complete).
+    progress_label: str = "Processing"
+    complete_label: str = "Complete"
+    cancel_message: str = "Transcoding was cancelled"
+    # Time window applied after decoding (seconds); None = whole input.
+    window: tuple[float | None, float | None] | None = None
+    # Progress copy per op family.
+    progress_label: str = "Processing"
+    complete_label: str = "Complete"
+    cancel_message: str = "Transcoding was cancelled"
     # Multi-input transitions (concat): added in the timeline step.
     transition: str | None = None  # None | "cut" | "crossfade"
     fade_s: float = 0.5
