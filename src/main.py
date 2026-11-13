@@ -1121,6 +1121,9 @@ def _build_job_dispatch(engine, state, job, _on_progress, cancel_evt):
             ),
             # Generic option panel (components/encoder_options.py): encoder keys
             # and muxer keys the user set. Both optional; absent = old behavior.
+            # video_filter/audio_filter are the Terminal's -vf/-af chains.
+            video_filter=p.get("video_filter"),
+            audio_filter=p.get("audio_filter"),
             encoder_options=p.get("encoder_options"),
             audio_encoder_options=p.get("audio_encoder_options"),
             container_options=p.get("container_options"),
@@ -1163,6 +1166,7 @@ def _build_job_dispatch(engine, state, job, _on_progress, cancel_evt):
             target_lufs=p.get("target_lufs"),
             channels=p.get("channels"),
             sample_rate=p.get("sample_rate"),
+            audio_filter=p.get("audio_filter"),
             encoder_options=p.get("encoder_options"),
             container_options=p.get("container_options"),
             on_progress=_on_progress,

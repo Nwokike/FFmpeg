@@ -1,8 +1,10 @@
 """Golden-command suite for the expert Terminal's ffmpeg → engine translator.
 
-Every test pins a real-world command line to the exact op + params the job
-dispatcher consumes — regressions here would silently mistranslate user
-commands, so refusals assert on the MESSAGE (loud, never silent).
+Command mode is a translator, not an emulation: every test pins a real-world
+command line to the exact op + params the job dispatcher consumes, and every
+refusal asserts on the MESSAGE (loud, never silent). The filter and option
+cases assert the *measured* contract — a filter passes through as a node, an
+option only lands where this build says it exists.
 """
 
 from __future__ import annotations
@@ -21,11 +23,7 @@ def media(tmp_path):
     return str(p), str(a)
 
 
-def test_plain_transcode_defaults(media, tmp_path):
-    src, _ = media
-    plan = parse_command(f"ffmpeg -i {src} {tmp_path / 'out.mp4'}")
-    assert plan.op == "convert"
-    assert plan.params == {}  # engine defaults everywhere — nothing guessed
+# ── tokenizer ───────────────────────────────────────────────────────────
 
 
 def test_tokenizer_keeps_backslash_paths_and_quotes():
@@ -36,40 +34,21 @@ def test_tokenizer_keeps_backslash_paths_and_quotes():
     assert toks[-1] == r"C:\out\final.mp4"
 
 
-def test_trim_stream_copy(media, tmp_path):
+def test_tokenizer_keeps_filter_arguments_together():
+    # A quoted -vf chain is ONE token; splitting it would shred the graph.
+    toks = tokenize('ffmpeg -i in.mp4 -vf "hqdn3d=4:3:6:4.5,unsharp=5:5:1.0" out.mp4')
+    assert toks[4] == "hqdn3d=4:3:6:4.5,unsharp=5:5:1.0"
+
+
+# ── routing by output extension ─────────────────────────────────────────
+
+
+def test_plain_transcode_defaults(media, tmp_path):
     src, _ = media
-    plan = parse_command(f"ffmpeg -ss 00:00:10 -t 5 -i {src} -c copy {tmp_path / 'clip.mkv'}")
-    assert plan.op == "cut"
-    assert plan.params == {
-        "start_seconds": 10.0,
-        "end_seconds": 15.0,
-        "stream_copy": True,
-    }
-    assert any("stream copy" in n for n in plan.notes)
-
-
-def test_trim_reencode_with_crf_flag(media, tmp_path):
-    src, _ = media
-    plan = parse_command(
-        f"ffmpeg -i {src} -ss 10 -to 20 -c:v libx264 -crf 18 {tmp_path / 'out.mp4'}"
-    )
-    assert plan.op == "cut"
-    assert plan.params["start_seconds"] == 10.0
-    assert plan.params["end_seconds"] == 20.0
-    assert plan.params["stream_copy"] is False
-    assert plan.params["crf"] == 18, "a -crf that forces re-encode is carried, not dropped"
-
-
-def test_trim_without_end_uses_probed_duration(media, tmp_path):
-    src, _ = media
-    plan = parse_command(f"ffmpeg -i {src} -ss 30 {tmp_path / 'tail.mkv'}", duration_s=120.0)
-    assert plan.params["end_seconds"] == 120.0
-
-
-def test_trim_without_end_or_duration_refuses(media, tmp_path):
-    src, _ = media
-    with pytest.raises(CommandError, match="duration"):
-        parse_command(f"ffmpeg -i {src} -ss 30 {tmp_path / 'tail.mkv'}")
+    plan = parse_command(f"ffmpeg -i {src} {tmp_path / 'out.mp4'}")
+    assert plan.op == "convert"
+    # Nothing guessed: no codec/crf/scale keys the user never typed.
+    assert plan.params == {}
 
 
 def test_extract_audio_via_vn(media, tmp_path):
@@ -91,73 +70,11 @@ def test_extract_audio_via_audio_extension(media, tmp_path):
     assert plan.params["format_name"] == "flac"
 
 
-def test_join_two_inputs(media, tmp_path):
-    _, second = media
-    first = media[0]
-    plan = parse_command(f"ffmpeg -i {first} -i {second} {tmp_path / 'joined.mp4'}")
-    assert plan.op == "concat"
-    assert plan.params["paths"] == [first, second]
-    assert plan.params["container"] == "mp4"
-
-
-def test_scale_and_codec_mapping(media, tmp_path):
+def test_vn_to_video_output_refused(media, tmp_path):
+    """-vn with a video target leaves nothing to write — refuse, don't guess."""
     src, _ = media
-    plan = parse_command(f"ffmpeg -i {src} -s 1280x720 -c:v libx264 -crf 23 {tmp_path / 'o.mp4'}")
-    assert plan.op == "convert"
-    assert plan.params["scale_width"] == 1280
-    assert plan.params["scale_height"] == 720
-    assert plan.params["video_codec"] == "libx264"
-    assert plan.params["crf"] == 23
-
-
-def test_vf_subset_maps_to_convert(media, tmp_path):
-    src, _ = media
-    plan = parse_command(f'ffmpeg -i {src} -vf "scale=1280:720,fps=30" {tmp_path / "o.mp4"}')
-    assert plan.params["scale_width"] == 1280
-    assert plan.params["fps"] == 30
-
-
-def test_vf_atempo_refused_audio_filter_in_video_chain(media, tmp_path):
-    src, _ = media
-    with pytest.raises(CommandError, match="-af atempo"):
-        parse_command(f'ffmpeg -i {src} -vf "atempo=1.5,atempo=1.2" {tmp_path / "o.mp4"}')
-
-
-def test_af_atempo_chain_multiplies(media, tmp_path):
-    src, _ = media
-    plan = parse_command(f'ffmpeg -i {src} -af "atempo=1.5,atempo=1.2" {tmp_path / "o.mp4"}')
-    assert plan.params["speed"] == pytest.approx(1.8)
-
-
-def test_af_loudnorm_sets_lufs(media, tmp_path):
-    src, _ = media
-    plan = parse_command(f'ffmpeg -i {src} -vn -af "loudnorm=I=-18:TP=-1.5" {tmp_path / "o.wav"}')
-    assert plan.op == "extract_audio"
-    assert plan.params["target_lufs"] == -18.0
-
-
-def test_lossless_copy_to_mkv_is_remux(media, tmp_path):
-    src, _ = media
-    plan = parse_command(f"ffmpeg -i {src} -c copy {tmp_path / 'o.mkv'}")
-    assert plan.op == "remux"
-
-
-def test_lossless_copy_to_mp4_refuses_with_suggestion(media, tmp_path):
-    src, _ = media
-    with pytest.raises(CommandError, match=r"\.mkv"):
-        parse_command(f"ffmpeg -i {src} -c copy {tmp_path / 'o.mp4'}")
-
-
-def test_gif_with_range_and_fps(media, tmp_path):
-    src, _ = media
-    plan = parse_command(f"ffmpeg -i {src} -ss 2 -t 3 -r 12 {tmp_path / 'loop.gif'}")
-    assert plan.op == "create_gif"
-    assert plan.params == {
-        "fps": 12,
-        "width": 480,
-        "start_s": 2.0,
-        "duration_s": 3.0,
-    }
+    with pytest.raises(CommandError, match="leaves nothing to write"):
+        parse_command(f"ffmpeg -i {src} -vn {tmp_path / 'o.mp4'}")
 
 
 def test_subtitle_extension(media, tmp_path):
@@ -167,22 +84,237 @@ def test_subtitle_extension(media, tmp_path):
     assert plan.params["format_name"] == "srt"
 
 
-def test_unknown_flag_refused_loudly(media, tmp_path):
+def test_gif_with_range_and_fps(media, tmp_path):
     src, _ = media
-    with pytest.raises(CommandError, match="unsupported flag"):
-        parse_command(f"ffmpeg -i {src} -quantizer x {tmp_path / 'o.mp4'}")
+    plan = parse_command(f"ffmpeg -i {src} -ss 2 -t 3 -r 12 {tmp_path / 'loop.gif'}")
+    assert plan.op == "create_gif"
+    assert plan.params == {"fps": 12, "width": 480, "start_s": 2.0, "duration_s": 3.0}
+
+
+def test_gif_reversed_range_refused(media, tmp_path):
+    src, _ = media
+    with pytest.raises(CommandError, match="empty GIF range"):
+        parse_command(f"ffmpeg -i {src} -ss 5 -to 3 {tmp_path / 'o.gif'}")
+
+
+def test_gif_open_range_honours_probed_duration(media, tmp_path):
+    src, _ = media
+    plan = parse_command(f"ffmpeg -i {src} -ss 2 {tmp_path / 'o.gif'}", duration_s=10.0)
+    assert plan.params["duration_s"] == pytest.approx(8.0)
+
+
+# ── cut / remux ─────────────────────────────────────────────────────────
+
+
+def test_trim_stream_copy(media, tmp_path):
+    src, _ = media
+    plan = parse_command(f"ffmpeg -ss 00:00:10 -t 5 -i {src} -c copy {tmp_path / 'clip.mkv'}")
+    assert plan.op == "cut"
+    assert plan.params == {"start_seconds": 10.0, "end_seconds": 15.0, "stream_copy": True}
+    assert any("stream copy" in n for n in plan.notes)
+
+
+def test_trim_reencode_with_crf_flag(media, tmp_path):
+    src, _ = media
+    plan = parse_command(
+        f"ffmpeg -i {src} -ss 10 -to 20 -c:v libx264 -crf 18 {tmp_path / 'out.mp4'}"
+    )
+    assert plan.op == "cut"
+    assert plan.params["stream_copy"] is False
+    assert plan.params["encoder_options"] == {"crf": "18"}
+
+
+def test_trim_without_end_uses_probed_duration(media, tmp_path):
+    src, _ = media
+    plan = parse_command(f"ffmpeg -i {src} -ss 30 {tmp_path / 'tail.mkv'}", duration_s=120.0)
+    assert plan.params["end_seconds"] == 120.0
+
+
+def test_trim_without_end_or_duration_refuses(media, tmp_path):
+    src, _ = media
+    with pytest.raises(CommandError, match="duration"):
+        parse_command(f"ffmpeg -i {src} -ss 30 {tmp_path / 'tail.mkv'}")
+
+
+def test_lossless_copy_is_remux(media, tmp_path):
+    src, _ = media
+    plan = parse_command(f"ffmpeg -i {src} -c copy {tmp_path / 'o.mkv'}")
+    assert plan.op == "remux"
+
+
+def test_c_v_copy_remuxes(media, tmp_path):
+    src, _ = media
+    plan = parse_command(f"ffmpeg -i {src} -c:v copy {tmp_path / 'o.mkv'}")
+    assert plan.op == "remux"
+    assert not any("re-encoded" in n for n in plan.notes)
+
+
+def test_copy_v_inside_a_trim_stream_copies(media, tmp_path):
+    """-c:v copy with a time range is a lossless (keyframe-snapped) cut."""
+    src, _ = media
+    plan = parse_command(f"ffmpeg -i {src} -ss 2 -t 2 -c:v copy {tmp_path / 'o.mp4'}")
+    assert plan.op == "cut"
+    assert plan.params["stream_copy"] is True
+    assert any("stream copy" in n for n in plan.notes)
+
+
+# ── filters are real passthroughs (no tables) ───────────────────────────
+
+
+def test_vf_chain_becomes_nodes_with_ffmpeg_argument_syntax(media, tmp_path):
+    src, _ = media
+    plan = parse_command(f'ffmpeg -i {src} -vf "unsharp=5:5:1.0,scale=160:90" {tmp_path / "o.mp4"}')
+    assert plan.video_filter == [
+        ["unsharp", "5:5:1.0"],
+        ["scale", "160:90"],
+    ]
+
+
+def test_vf_filter_the_build_has_passes_through(media, tmp_path):
+    src, _ = media
+    plan = parse_command(f'ffmpeg -i {src} -vf "drawbox=x=0:y=0:w=10:h=10" {tmp_path / "o.mp4"}')
+    assert plan.video_filter == [["drawbox", "x=0:y=0:w=10:h=10"]]
+
+
+def test_vf_filter_this_build_lacks_refuses_at_plan_time(media, tmp_path):
+    """A missing filter must fail the plan (naming the cause), not the encode."""
+    src, _ = media
+    with pytest.raises(CommandError, match="is not in this build"):
+        parse_command(f'ffmpeg -i {src} -vf "definitely_not_a_filter=1" {tmp_path / "o.mp4"}')
+
+
+def test_af_chain_becomes_nodes(media, tmp_path):
+    src, _ = media
+    plan = parse_command(f'ffmpeg -i {src} -af "volume=1.5,atempo=1.2" {tmp_path / "o.mp4"}')
+    assert plan.audio_filter == [["volume", "1.5"], ["atempo", "1.2"]]
 
 
 def test_filter_complex_refused_with_guidance(media, tmp_path):
+    """Non-linear graphs need the Filters screen — command mode is linear."""
     src, _ = media
     with pytest.raises(CommandError, match="vf/-af"):
         parse_command(f'ffmpeg -i {src} -filter_complex "scale=1280:-2" {tmp_path / "o.mp4"}')
 
 
-def test_hflip_refused_points_to_filters_screen(media, tmp_path):
+def test_vf_on_an_extraction_refused(media, tmp_path):
     src, _ = media
-    with pytest.raises(CommandError, match="Filters screen"):
-        parse_command(f"ffmpeg -i {src} -vf hflip {tmp_path / 'o.mp4'}")
+    with pytest.raises(CommandError, match="extraction has no video stream"):
+        parse_command(f"ffmpeg -i {src} -vf scale=640:480 {tmp_path / 'o.mp3'}")
+
+
+def test_af_on_an_extraction_rides_the_filter_chain(media, tmp_path):
+    src, _ = media
+    plan = parse_command(f'ffmpeg -i {src} -af "volume=0.5" {tmp_path / "o.wav"}')
+    assert plan.op == "extract_audio"
+    assert plan.params["audio_filter"] == [["volume", "0.5"]]
+
+
+# ── codecs, options and streams ─────────────────────────────────────────
+
+
+def test_scale_and_codec_are_their_own_params(media, tmp_path):
+    src, _ = media
+    plan = parse_command(f"ffmpeg -i {src} -s 1280x720 -c:v libx264 {tmp_path / 'o.mp4'}")
+    assert plan.op == "convert"
+    assert plan.params["scale_width"] == 1280
+    assert plan.params["scale_height"] == 720
+    assert plan.params["video_codec"] == "libx264"
+
+
+def test_pix_fmt_is_validated_against_the_named_encoder(media, tmp_path):
+    src, _ = media
+    plan = parse_command(f"ffmpeg -i {src} -c:v libx264 -pix_fmt yuv420p {tmp_path / 'o.mp4'}")
+    assert plan.params["pix_fmt"] == "yuv420p"
+    # gif only encodes rgb8 — the wheel's own format list says so.
+    with pytest.raises(CommandError, match="cannot encode"):
+        parse_command(f"ffmpeg -i {src} -c:v gif -pix_fmt yuv420p {tmp_path / 'o.gif'}")
+
+
+def test_unknown_encoder_refused_naming_the_wheel(media, tmp_path):
+    src, _ = media
+    with pytest.raises(CommandError, match="cannot encode"):
+        parse_command(f"ffmpeg -i {src} -c:v definitely_not_a_codec {tmp_path / 'o.mp4'}")
+
+
+def test_encoder_knobs_become_encoder_options(media, tmp_path):
+    src, _ = media
+    plan = parse_command(
+        f"ffmpeg -i {src} -c:v libx264 -tune film -profile:v high -level 4.1 {tmp_path / 'o.mp4'}"
+    )
+    assert plan.params["encoder_options"] == {
+        "tune": "film",
+        "profile": "high",
+        "level": "4.1",
+    }
+
+
+def test_bitrate_flags_take_their_real_slots(media, tmp_path):
+    src, _ = media
+    plan = parse_command(f"ffmpeg -i {src} -c:v libx264 -b:v 1M {tmp_path / 'o.mp4'}")
+    assert plan.params["encoder_options"]["b"] == "1000000"
+    plan = parse_command(f"ffmpeg -i {src} -vn -b:a 128k {tmp_path / 'o.mp3'}")
+    assert plan.params["bitrate_kbps"] == 128
+
+
+def test_unknown_flag_refused_with_what_this_encoder_accepts(media, tmp_path):
+    """av accepts unknown muxer options silently — so we refuse instead of
+    pretending a typo became a setting."""
+    src, _ = media
+    with pytest.raises(CommandError, match="not an option of"):
+        parse_command(f"ffmpeg -i {src} -quantizer x {tmp_path / 'o.mp4'}")
+
+
+def test_movflags_is_the_one_muxer_flag(media, tmp_path):
+    src, _ = media
+    plan = parse_command(f"ffmpeg -i {src} -movflags +faststart {tmp_path / 'o.mp4'}")
+    assert plan.params["container_options"] == {"movflags": "+faststart"}
+
+
+def test_map_selectors_use_the_absolute_stream_index(media, tmp_path):
+    src, _ = media
+    plan = parse_command(f"ffmpeg -i {src} -map 0:v:1 -map 0:a:0 {tmp_path / 'o.mp4'}")
+    assert plan.params["video_stream"] == 1
+    assert plan.params["audio_stream"] == 0
+
+
+def test_an_drops_the_audio_stream(media, tmp_path):
+    src, _ = media
+    plan = parse_command(f"ffmpeg -i {src} -an {tmp_path / 'o.mp4'}")
+    assert plan.op == "convert"
+    assert "audio_codec" not in plan.params
+
+
+def test_vn_extraction_uses_the_named_format(media, tmp_path):
+    src, _ = media
+    plan = parse_command(f"ffmpeg -i {src} -vn -c:a libmp3lame {tmp_path / 'o.mp3'}")
+    assert plan.op == "extract_audio"
+    assert plan.params["format_name"] == "mp3"
+
+
+# ── joins ───────────────────────────────────────────────────────────────
+
+
+def test_join_two_inputs(media, tmp_path):
+    src, second = media
+    plan = parse_command(f"ffmpeg -i {src} -i {second} {tmp_path / 'joined.mp4'}")
+    assert plan.op == "concat"
+    assert plan.params["paths"] == [src, second]
+    assert plan.params["container"] == "mp4"
+
+
+def test_concat_with_encode_flags_refused(media, tmp_path):
+    src, second = media
+    with pytest.raises(CommandError, match="would be ignored"):
+        parse_command(f"ffmpeg -i {src} -i {second} -crf 20 {tmp_path / 'o.mp4'}")
+
+
+def test_join_with_stream_flags_refused(media, tmp_path):
+    src, second = media
+    with pytest.raises(CommandError, match="-vn"):
+        parse_command(f"ffmpeg -i {src} -i {second} -vn {tmp_path / 'o.mp4'}")
+
+
+# ── refusals that must stay loud ────────────────────────────────────────
 
 
 def test_missing_input_refused(tmp_path):
@@ -201,19 +333,19 @@ def test_bare_invocation_lists_help():
         parse_command("ffmpeg")
 
 
-def test_help_text_mentions_refusals():
+def test_help_flag_answers_with_the_builds_surface():
+    with pytest.raises(CommandError, match="real FFmpeg syntax"):
+        parse_command("ffmpeg -h")
+
+
+def test_help_text_is_generated_from_this_build():
     text = help_text()
-    assert "-filter_complex" in text
-    assert "PyAV" in text
+    assert "this wheel:" in text
+    assert "encoders" in text and "filters" in text
+    assert "movflags" in text
 
 
-def test_vn_to_video_output_refused(media, tmp_path):
-    src, _ = media
-    with pytest.raises(CommandError, match="name an audio output"):
-        parse_command(f"ffmpeg -i {src} -vn {tmp_path / 'o.mp4'}")
-
-
-def test_duplicate_flags_refused(media, tmp_path):
+def test_duplicate_single_valued_flags_refused(media, tmp_path):
     src, _ = media
     with pytest.raises(CommandError, match="duplicate -ss"):
         parse_command(f"ffmpeg -i {src} -ss 10 -ss 20 -t 5 {tmp_path / 'o.mp4'}")
@@ -221,117 +353,7 @@ def test_duplicate_flags_refused(media, tmp_path):
         parse_command(f"ffmpeg -i {src} -crf 20 -crf 23 {tmp_path / 'o.mp4'}")
 
 
-def test_concat_with_encode_flags_refused(media, tmp_path):
-    src, second = media
-    with pytest.raises(CommandError, match="would be ignored"):
-        parse_command(f"ffmpeg -i {src} -i {second} -crf 20 {tmp_path / 'o.mp4'}")
-
-
-def test_c_v_copy_remuxes(media, tmp_path):
-    src, _ = media
-    plan = parse_command(f"ffmpeg -i {src} -c:v copy {tmp_path / 'o.mkv'}")
-    assert plan.op == "remux"
-
-
-def test_volume_linear_and_db(media, tmp_path):
-    src, _ = media
-    plan = parse_command(f'ffmpeg -i {src} -af "volume=1.5" {tmp_path / "o.mp4"}')
-    assert plan.params["volume_pct"] == 150
-    plan = parse_command(f'ffmpeg -i {src} -af "volume=6dB" {tmp_path / "o.mp4"}')
-    assert plan.params["volume_pct"] == pytest.approx(200, abs=1)
-
-
-def test_fps_rounds_not_truncates(media, tmp_path):
-    src, _ = media
-    plan = parse_command(f"ffmpeg -i {src} -r 29.97 {tmp_path / 'o.mp4'}")
-    assert plan.params["fps"] == 30
-
-
-def test_transpose_pure_rotations_map_flip_carriers_refuse(media, tmp_path):
-    # ffmpeg transpose truth: 1/clock = 90 CW, 2/cclock = 90 CCW, while 0/3
-    # carry a vertical flip the engine cannot reproduce — those refuse
-    # instead of returning a video facing the wrong way.
-    src, _ = media
-    plan = parse_command(f"ffmpeg -i {src} -vf transpose=1 {tmp_path / 'o.mp4'}")
-    assert plan.params["rotation"] == 90
-    plan = parse_command(f"ffmpeg -i {src} -vf transpose=2 {tmp_path / 'o.mp4'}")
-    assert plan.params["rotation"] == 270
-    plan = parse_command(f"ffmpeg -i {src} -vf transpose=clock {tmp_path / 'o.mp4'}")
-    assert plan.params["rotation"] == 90
-    plan = parse_command(f"ffmpeg -i {src} -vf transpose=cclock {tmp_path / 'o.mp4'}")
-    assert plan.params["rotation"] == 270
-    for raw in ("0", "3"):
-        with pytest.raises(CommandError, match="flip"):
-            parse_command(f"ffmpeg -i {src} -vf transpose={raw} {tmp_path / 'o.mp4'}")
-
-
-def test_an_sn_refused_with_dossier_pointer(media, tmp_path):
-    # convert/cut always carry the best audio track — -an would be silently
-    # ignored, so it refuses with the screen that CAN drop tracks.
-    src, _ = media
-    with pytest.raises(CommandError, match=r"[Dd]ossier"):
-        parse_command(f"ffmpeg -i {src} -an {tmp_path / 'o.mp4'}")
-    with pytest.raises(CommandError, match=r"[Dd]ossier"):
-        parse_command(f"ffmpeg -i {src} -sn {tmp_path / 'o.mp4'}")
-    with pytest.raises(CommandError, match=r"[Dd]ossier"):
-        parse_command(f"ffmpeg -i {src} -ss 2 -t 2 -an {tmp_path / 'o.mp4'}")
-
-
-def test_join_with_stream_flags_refused(media, tmp_path):
-    src, second = media
-    with pytest.raises(CommandError, match="-vn"):
-        parse_command(f"ffmpeg -i {src} -i {second} -vn {tmp_path / 'o.mp4'}")
-
-
-def test_gif_reversed_range_refused(media, tmp_path):
-    src, _ = media
-    with pytest.raises(CommandError, match="empty GIF range"):
-        parse_command(f"ffmpeg -i {src} -ss 5 -to 3 {tmp_path / 'o.gif'}")
-
-
-def test_copy_note_only_on_transcode_paths(media, tmp_path):
-    # -c:v copy to .mkv remuxes — the plan must NOT carry the "re-encoded"
-    # note that the transcode paths add.
-    src, _ = media
-    plan = parse_command(f"ffmpeg -i {src} -c:v copy {tmp_path / 'o.mkv'}")
-    assert plan.op == "remux"
-    assert not any("re-encoded" in n for n in plan.notes)
-    # Same flag WITH a time range re-encodes (copy needs bare -c copy) —
-    # the note fires exactly there.
-    plan = parse_command(f"ffmpeg -i {src} -ss 2 -t 2 -c:v copy {tmp_path / 'o.mp4'}")
-    assert plan.op == "cut"
-    assert plan.params["stream_copy"] is False
-    assert any("re-encoded" in n for n in plan.notes)
-
-
-def test_gif_end_zero_is_valid(media, tmp_path):
-    src, _ = media
-    plan = parse_command(f"ffmpeg -i {src} -ss 0 -to 0 {tmp_path / 'o.gif'}", duration_s=10.0)
-    assert plan.op == "create_gif"
-    assert plan.params["duration_s"] == pytest.approx(0.0)
-
-
-def test_gif_open_range_honours_probed_duration(media, tmp_path):
-    src, _ = media
-    plan = parse_command(f"ffmpeg -i {src} -ss 2 {tmp_path / 'o.gif'}", duration_s=10.0)
-    assert plan.params["duration_s"] == pytest.approx(8.0)
-
-
-def test_extraction_with_time_range_refused(media, tmp_path):
-    src, _ = media
-    with pytest.raises(CommandError, match="cut first"):
-        parse_command(f"ffmpeg -i {src} -ss 5 -t 5 {tmp_path / 'o.mp3'}")
-    with pytest.raises(CommandError, match="cut first"):
-        parse_command(f"ffmpeg -i {src} -ss 5 -t 5 {tmp_path / 'o.srt'}")
-
-
-def test_extraction_with_shaping_refused(media, tmp_path):
-    src, _ = media
-    with pytest.raises(CommandError, match="shaping"):
-        parse_command(f"ffmpeg -i {src} -vf scale=640:480 {tmp_path / 'o.mp3'}")
-
-
-def test_input_equals_output_refused(media, tmp_path):
+def test_input_equals_output_refused(media):
     src, _ = media
     with pytest.raises(CommandError, match="same file"):
         parse_command(f"ffmpeg -i {src} {src}")
@@ -350,7 +372,9 @@ def test_bad_timestamps_refused(media, tmp_path):
         parse_command(f"ffmpeg -i {src} -ss -5 -t 5 {tmp_path / 'o.mp4'}")
 
 
-def test_sslide_names_dossier(media, tmp_path):
+def test_extraction_with_time_range_refused(media, tmp_path):
     src, _ = media
-    with pytest.raises(CommandError, match=r"[Dd]ossier"):
-        parse_command(f"ffmpeg -i {src} -sslide 2 {tmp_path / 'o.mp4'}")
+    with pytest.raises(CommandError, match="cut first"):
+        parse_command(f"ffmpeg -i {src} -ss 5 -t 5 {tmp_path / 'o.mp3'}")
+    with pytest.raises(CommandError, match="cut first"):
+        parse_command(f"ffmpeg -i {src} -ss 5 -t 5 {tmp_path / 'o.srt'}")

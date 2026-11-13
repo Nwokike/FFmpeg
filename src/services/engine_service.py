@@ -1124,6 +1124,55 @@ _WM_POSITIONS = {
 }
 
 
+def _chain_declared_size(nodes) -> tuple[int, int] | None:
+    """The frame size a linear filter chain declares, if it declares one.
+
+    Walks the chain in order: ``scale``/``crop`` with literal integer arguments
+    set the geometry, ``transpose`` swaps it. Expressions (``-2``, ``iw/2``) and
+    every other filter leave the geometry unknown (None) — the caller keeps the
+    input's size.
+    """
+    if not nodes:
+        return None
+    size: tuple[int, int] | None = None
+    for node in nodes:
+        name = str(node[0])
+        args = str(node[1]) if len(node) > 1 else ""
+        parts = [part.strip() for part in args.replace(";", ":").split(":") if part.strip()]
+        if name in ("scale", "crop"):
+            if len(parts) < 2:
+                return None
+            try:
+                width, height = int(parts[0]), int(parts[1])
+            except ValueError:
+                return None
+            if width <= 0 or height <= 0:
+                return None
+            size = (width, height)
+        elif name == "transpose" and size is not None:
+            size = (size[1], size[0])
+    return size
+
+
+def _select_stream(container, spec, kind: str):
+    """The input stream one StreamSpec maps from: ``selector`` or the best of kind.
+
+    ``selector`` is ``"best"`` (default) or an absolute stream index — the
+    ``-map 0:v:1`` shape. An index that is not there (or is the wrong type)
+    falls back to the best of kind, so a hand-written job cannot crash on a
+    stream that does not exist.
+    """
+    selector = getattr(spec, "selector", "best")
+    if isinstance(selector, int) and not isinstance(selector, bool):
+        try:
+            stream = container.streams[selector]
+        except (IndexError, ValueError):
+            stream = None
+        if stream is not None and (kind == "any" or stream.type == kind):
+            return stream
+    return container.streams.best(kind)
+
+
 def _graph_from_nodes(nodes: list[tuple[str, dict]], first_frame) -> av.filter.Graph:
     """Static FilterChain nodes -> configured Graph (video or audio).
 
@@ -1143,7 +1192,13 @@ def _graph_from_nodes(nodes: list[tuple[str, dict]], first_frame) -> av.filter.G
         sink = g.add("buffersink")
     chain: list = [src]
     for name, args in nodes:
-        chain.append(g.add(name, **(dict(args) if args else {})))
+        if isinstance(args, str):
+            # FFmpeg's own filter-argument syntax ("4:3:6:4.5", "I=-16") —
+            # handed to avfilter_init_str untouched, so every filter this build
+            # ships accepts exactly what `ffmpeg -vf` accepts.
+            chain.append(g.add(name, args) if args else g.add(name))
+        else:
+            chain.append(g.add(name, **(dict(args) if args else {})))
     chain.append(sink)
     g.link_nodes(*chain)
     g.configure()
@@ -1195,8 +1250,8 @@ def run_encode_job(
 
         v_spec = next((s for s in job.streams if s.kind == "video"), None)
         a_spec = next((s for s in job.streams if s.kind == "audio"), None)
-        in_video = first_inp.streams.best("video") if v_spec else None
-        in_audio = first_inp.streams.best("audio") if a_spec else None
+        in_video = _select_stream(first_inp, v_spec, "video") if v_spec else None
+        in_audio = _select_stream(first_inp, a_spec, "audio") if a_spec else None
 
         out_video = None
         if v_spec is not None and in_video is not None:
@@ -1213,8 +1268,22 @@ def run_encode_job(
                 else target_fps
             )
             out_video = out.add_stream(chosen_vcodec, rate=eff_rate)
-            target_w = v_spec.scale_width or in_video.width or 640
-            target_h = v_spec.scale_height or in_video.height or 360
+            # A caller-supplied filter chain can change the frame size (scale,
+            # crop, transpose…). FFmpeg sizes the encoder from the chain's
+            # output, and so must we: the codec context opens on the first
+            # encode() of ANY stream, so the size has to be known up front.
+            # A chain's scale/crop with literal arguments declares it (readable
+            # without decoding); anything else keeps the input geometry and the
+            # runtime check below refuses loudly rather than upscaling silently.
+            caller_chain = bool(job.video_chain is not None and job.video_chain.nodes)
+            graph_owns_size = caller_chain and not (v_spec.scale_width or v_spec.scale_height)
+            declared = _chain_declared_size(job.video_chain.nodes) if graph_owns_size else None
+            target_w = (
+                v_spec.scale_width or (declared[0] if declared else 0) or in_video.width or 640
+            )
+            target_h = (
+                v_spec.scale_height or (declared[1] if declared else 0) or in_video.height or 360
+            )
             # Crop defines the final size when no explicit scale is set —
             # otherwise the post-graph reformat would upscale right back.
             if (
@@ -1228,7 +1297,7 @@ def run_encode_job(
                     in_video.height or target_h,
                     v_spec.crop_aspect,
                 )
-            if v_spec.rotation % 180 == 90:  # 90/270 transpose swaps w/h
+            if v_spec.rotation % 180 == 90 and declared is None:  # 90/270 transpose swaps w/h
                 target_w, target_h = target_h, target_w
             if v_spec.even_align:
                 target_w = (target_w // 2) * 2  # even dimensions for yuv420p
@@ -1242,6 +1311,9 @@ def run_encode_job(
             out_video.time_base = (
                 _FINE_VIDEO_TB if v_spec.fine_time_base else Fraction(1, round(target_fps))
             )
+            # The graph runs on the encoder's clock (see the push site): a filter
+            # that relabels a frame's time_base then cannot stretch the timeline.
+            graph_tb = out_video.time_base
             out_video.options = _supported_encoder_options(
                 chosen_vcodec,
                 dict(v_spec.encoder_options),
@@ -1415,8 +1487,8 @@ def run_encode_job(
                     hwaccel=spec_i.hwaccel,
                 )
             try:
-                in_video = inp.streams.best("video") if v_spec else None
-                in_audio = inp.streams.best("audio") if a_spec else None
+                in_video = _select_stream(inp, v_spec, "video") if v_spec else None
+                in_audio = _select_stream(inp, a_spec, "audio") if a_spec else None
                 total_duration = (
                     float(inp.duration or 0) / float(av.time_base) if inp.duration else 1.0
                 )
@@ -1453,19 +1525,54 @@ def run_encode_job(
                             if frame.time:
                                 processed_pts = frame.time
 
-                            if job.video_chain is not None and video_graph is None:
-                                builder = job.video_chain.build
-                                if builder is not None:
-                                    video_graph = builder(frame)
-                                elif job.video_chain.nodes:
-                                    video_graph = _graph_from_nodes(job.video_chain.nodes, frame)
-
-                            out_frames = [frame]
-                            if video_graph is not None:
-                                _rebase_pts(frame, _FINE_VIDEO_TB)
-                                out_frames = _push_pull(video_graph, frame)
+                            if job.video_chain is not None:
+                                # Rebase BEFORE building the graph: the buffer
+                                # source takes its time base from the first
+                                # frame, and the graph must be driven on the
+                                # encoder's clock (a filter that relabels a
+                                # frame's time_base — scale does — would
+                                # otherwise stretch the timeline).
+                                _rebase_pts(frame, graph_tb)
+                                if video_graph is None:
+                                    builder = job.video_chain.build
+                                    if builder is not None:
+                                        video_graph = builder(frame)
+                                    elif job.video_chain.nodes:
+                                        video_graph = _graph_from_nodes(
+                                            job.video_chain.nodes, frame
+                                        )
+                                out_frames = (
+                                    _push_pull(video_graph, frame)
+                                    if video_graph is not None
+                                    else [frame]
+                                )
+                                from_graph = video_graph is not None
+                            else:
+                                out_frames = [frame]
+                                from_graph = False
 
                             for frame in out_frames:
+                                if out_video and graph_owns_size and from_graph:
+                                    # The chain's geometry was declared up front
+                                    # (or the input's); a chain that produces
+                                    # something else cannot be re-fitted now —
+                                    # refuse instead of upscaling or crashing
+                                    # inside av's "codec is open" guard.
+                                    want_w = (
+                                        (frame.width // 2) * 2 if v_spec.even_align else frame.width
+                                    )
+                                    want_h = (
+                                        (frame.height // 2) * 2
+                                        if v_spec.even_align
+                                        else frame.height
+                                    )
+                                    if (want_w, want_h) != (out_video.width, out_video.height):
+                                        raise ValueError(
+                                            f"the filter chain produced {frame.width}x{frame.height} "
+                                            f"but the encoder was opened for "
+                                            f"{out_video.width}x{out_video.height} — end the chain "
+                                            "with a literal scale=W:H (or pass an explicit size)"
+                                        )
                                 if out_video and (
                                     frame.width != out_video.width
                                     or frame.height != out_video.height
@@ -2155,6 +2262,11 @@ class EngineService:
         thread_count: int | None = None,
         profile: str | None = None,
         level: str | None = None,
+        pix_fmt: str | None = None,
+        video_stream: int | None = None,
+        audio_stream: int | None = None,
+        video_filter: list | None = None,
+        audio_filter: list | None = None,
         encoder_options: dict | None = None,
         audio_encoder_options: dict | None = None,
         container_options: dict | None = None,
@@ -2169,7 +2281,9 @@ class EngineService:
         drops with an info line instead of failing the job. ``audio_encoder_options``
         do the same for the audio stream (a separate encoder, so a separate dict).
         ``container_options`` go to the muxer through ``OutputSpec.options``
-        (``av.open(options=...)``).
+        (``av.open(options=...)``). ``video_stream``/``audio_stream`` are
+        absolute input stream indices (the ``-map 0:v:1`` shape); ``pix_fmt``
+        overrides the encoder-fitted pixel format.
         """
         hwaccel = _hardware_decode(hardware_accel)
         need_vfilter = (
@@ -2180,30 +2294,42 @@ class EngineService:
             or bool(denoise and denoise != "off")
             or bool(sharpen)
             or bool(watermark)
+            or bool(video_filter)
         )
         need_afilter = volume_pct != 100 or abs(speed - 1.0) > 1e-6
 
         chosen_vcodec = _resolve_or_raw(video_codec, "video")
+        # A caller-supplied filter chain (the Terminal's -vf/-af passthrough) is
+        # the real chain; the built-in graph below only runs when no nodes came
+        # in. Nodes are (filter, args-string) pairs handed to FFmpeg untouched.
         video_chain = (
-            FilterChain(
-                build=lambda frame: _build_video_filter_graph(
-                    frame,
-                    rotation,
-                    speed,
-                    crop_aspect=crop_aspect,
-                    eq=eq,
-                    denoise=denoise,
-                    sharpen=sharpen,
-                    watermark=watermark,
+            FilterChain(nodes=[(str(n), str(a)) for n, a in video_filter])
+            if video_filter
+            else (
+                FilterChain(
+                    build=lambda frame: _build_video_filter_graph(
+                        frame,
+                        rotation,
+                        speed,
+                        crop_aspect=crop_aspect,
+                        eq=eq,
+                        denoise=denoise,
+                        sharpen=sharpen,
+                        watermark=watermark,
+                    )
                 )
+                if need_vfilter
+                else None
             )
-            if need_vfilter
-            else None
         )
         audio_chain = (
-            FilterChain(build=lambda frame: _build_audio_filter_graph(frame, volume_pct, speed))
-            if need_afilter
-            else None
+            FilterChain(nodes=[(str(n), str(a)) for n, a in audio_filter])
+            if audio_filter
+            else (
+                FilterChain(build=lambda frame: _build_audio_filter_graph(frame, volume_pct, speed))
+                if need_afilter
+                else None
+            )
         )
 
         job = Job(
@@ -2219,6 +2345,7 @@ class EngineService:
             streams=[
                 StreamSpec(
                     kind="video",
+                    selector=video_stream if video_stream is not None else "best",
                     codec=chosen_vcodec,
                     fps=fps,
                     speed=speed,
@@ -2227,6 +2354,7 @@ class EngineService:
                     scale_height=scale_height,
                     crop_aspect=crop_aspect,
                     rotation=rotation,
+                    pix_fmt=pix_fmt,
                     encoder_options=_supported_encoder_options(
                         chosen_vcodec,
                         {"crf": str(crf), "preset": preset}
@@ -2245,6 +2373,7 @@ class EngineService:
                 ),
                 StreamSpec(
                     kind="audio",
+                    selector=audio_stream if audio_stream is not None else "best",
                     codec=_resolve_or_raw(audio_codec, "audio"),
                     encoder_options=_supported_encoder_options(
                         _resolve_or_raw(audio_codec, "audio"),
@@ -2500,6 +2629,7 @@ class EngineService:
         target_lufs: float | None = None,
         channels: int | None = None,
         sample_rate: int | None = None,
+        audio_filter: list | None = None,
         encoder_options: dict | None = None,
         container_options: dict | None = None,
         on_progress: Callable[[float, str], None] | None = None,
@@ -2507,8 +2637,9 @@ class EngineService:
     ) -> str:
         """Extract audio with optional LUFS mastering, channel mix, and soxr resampling.
 
-        ``encoder_options``/``container_options`` are the generic option-panel
-        values: encoder keys merge last and pass through
+        ``audio_filter`` is a caller-supplied ``(filter, args)`` chain (the
+        Terminal's ``-af``); ``encoder_options``/``container_options`` are the
+        generic option-panel values: encoder keys merge last and pass through
         :func:`_supported_encoder_options`, container keys reach the muxer.
         """
         # Do not create a partial output while the serial queue is paused.
@@ -2572,6 +2703,11 @@ class EngineService:
                 return lg
 
             loud_chain = FilterChain(build=_loudnorm_build)
+        elif audio_filter:
+            # A caller-supplied chain (the Terminal's -af passthrough): the same
+            # (filter, args-string) nodes the video path uses, so any filter this
+            # build ships works here too.
+            loud_chain = FilterChain(nodes=[(str(n), str(a)) for n, a in audio_filter])
 
         job = Job(
             output_path=output_path,

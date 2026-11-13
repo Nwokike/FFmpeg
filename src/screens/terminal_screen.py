@@ -1,10 +1,12 @@
 """Expert Terminal — typed ffmpeg command lines → validated plan → queued job.
 
 Two-step confirm (parse → review plan + notes → Run) because command mode must
-never silently approximate: every approximation note lands in the pane before
-the job enqueues. The AI-mode chip is VISIBLE but LOCKED per the owner's
-credits model — it unlocks with the Kiri Router credit rollout (premium x10),
-never dead-ends silently.
+never silently approximate: every substitution or dropped flag lands in the pane
+before the job enqueues. The parser accepts real ffmpeg syntax and validates it
+against this build (filters through av.filter, codecs and options through the
+capability probe), so the plan names exactly what will run. The AI-mode chip is
+VISIBLE but LOCKED per the owner's credits model — it unlocks with the Kiri
+Router credit rollout (premium x10), never dead-ends silently.
 """
 
 from __future__ import annotations
@@ -18,7 +20,7 @@ from core.state import Job, use_app_state
 from core.styles import card_container, section_header
 from core.theme import ACCENT_AMBER, PRIMARY, TEXT_MUTED_DARK, TEXT_MUTED_LIGHT, is_dark_mode
 from core.tokens import FONT_LG, FONT_MD, FONT_SM, RADIUS_MD, SPACE_LG, SPACE_MD, SPACE_SM
-from core.versions import pyav_version
+from core.versions import ffmpeg_version, pyav_version
 from services.command_parser import CommandError, OpPlan, help_text, parse_command, tokenize
 from state.controller_ctx import use_controller
 from state.service_ctx import use_services
@@ -158,12 +160,13 @@ def TerminalScreen() -> ft.Control:
                                 ft.Column(
                                     controls=[
                                         ft.Text(
-                                            "ffmpeg (subset)",
+                                            "real ffmpeg syntax",
                                             size=FONT_MD,
                                             weight=ft.FontWeight.W_600,
                                         ),
                                         ft.Text(
-                                            f"pyav-{pyav_version()} — FFmpeg libraries, no binary",
+                                            f"pyav-{pyav_version()} · FFmpeg {ffmpeg_version()}"
+                                            " — every filter and encoder this build has",
                                             size=FONT_SM,
                                             color=muted,
                                         ),
@@ -204,7 +207,7 @@ def TerminalScreen() -> ft.Control:
                 ),
             ),
             section_header(
-                "Command", "classic ffmpeg syntax, engine-verified subset", is_dark=is_dark
+                "Command", "real ffmpeg syntax, validated against this build", is_dark=is_dark
             ),
             ft.Row(
                 controls=[
