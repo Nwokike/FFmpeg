@@ -216,7 +216,7 @@ platform-layer concerns.
 
 # Part C — phases
 
-Product decision: the app is renamed **FFmpeg Lite → FFmpeg AV**. The wrap is
+Product decision: the app is renamed **FFmpeg Lite → FFmpeg AV**. The generic engine that Phase 3 builds is documented separately in [docs/engine-architecture.md](engine-architecture.md). The wrap is
 1:1 against `av`; the name follows the wrapped library.
 
 ## Phase 1 — FFmpeg AV on the full mobile FFmpeg

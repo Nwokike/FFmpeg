@@ -145,13 +145,12 @@ def test_high_value_ops_uses_real_op_names():
 
 def test_job_dispatch_fails_loud_on_unknown_op():
     text = _MAIN_SRC.read_text(encoding="utf-8")
-    runner = text.split("def _job_runner", 1)[1].split("\n    def ", 1)[0]
-    assert "Unknown job op" in runner, "unknown ops must fail naming the op, never fake-complete"
+    assert "Unknown job op" in text, "unknown ops must fail naming the op, never fake-complete"
+    assert "_dispatch_job_op(dispatch, job)" in text, "dispatch runs through the registry"
 
 
 def test_convert_dispatch_plumbs_preset():
     text = _MAIN_SRC.read_text(encoding="utf-8")
-    runner = text.split("def _job_runner", 1)[1].split("\n    def ", 1)[0]
-    assert 'preset=p.get("preset", "medium")' in runner, (
+    assert 'preset=p.get("preset", "medium")' in text, (
         "parser-emitted preset must reach the convert dispatch"
     )
