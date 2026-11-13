@@ -152,5 +152,6 @@ def test_job_dispatch_fails_loud_on_unknown_op():
 def test_convert_dispatch_plumbs_preset():
     text = _MAIN_SRC.read_text(encoding="utf-8")
     runner = text.split("def _job_runner", 1)[1].split("\n    def ", 1)[0]
-    convert_call = runner.split("engine.convert(", 1)[1].split("elif job.op", 1)[0]
-    assert "preset" in convert_call, "parser-emitted preset must reach engine.convert"
+    assert 'preset=p.get("preset", "medium")' in runner, (
+        "parser-emitted preset must reach the convert dispatch"
+    )

@@ -628,7 +628,8 @@ async def main(page: ft.Page) -> None:
 
         try:
             p = job.params
-            if job.op == "convert":
+
+            def _run_convert():
                 engine.convert(
                     input_path=job.input_path,
                     output_path=job.output_path,
@@ -656,7 +657,8 @@ async def main(page: ft.Page) -> None:
                     on_progress=_on_progress,
                     cancel_event=cancel_evt,
                 )
-            elif job.op == "compress":
+
+            def _run_compress():
                 engine.compress_to_target(
                     input_path=job.input_path,
                     output_path=job.output_path,
@@ -665,7 +667,8 @@ async def main(page: ft.Page) -> None:
                     on_progress=_on_progress,
                     cancel_event=cancel_evt,
                 )
-            elif job.op == "cut":
+
+            def _run_cut():
                 engine.cut_trim(
                     input_path=job.input_path,
                     output_path=job.output_path,
@@ -676,7 +679,8 @@ async def main(page: ft.Page) -> None:
                     on_progress=_on_progress,
                     cancel_event=cancel_evt,
                 )
-            elif job.op == "extract_audio":
+
+            def _run_extract_audio():
                 engine.extract_audio(
                     input_path=job.input_path,
                     output_path=job.output_path,
@@ -688,7 +692,8 @@ async def main(page: ft.Page) -> None:
                     on_progress=_on_progress,
                     cancel_event=cancel_evt,
                 )
-            elif job.op == "extract_frames":
+
+            def _run_extract_frames():
                 engine.extract_frames(
                     input_path=job.input_path,
                     output_dir=job.output_path,
@@ -697,7 +702,8 @@ async def main(page: ft.Page) -> None:
                     on_progress=_on_progress,
                     cancel_event=cancel_evt,
                 )
-            elif job.op == "extract_subtitles":
+
+            def _run_extract_subtitles():
                 engine.extract_subtitles(
                     input_path=job.input_path,
                     output_path=job.output_path,
@@ -706,7 +712,8 @@ async def main(page: ft.Page) -> None:
                     on_progress=_on_progress,
                     cancel_event=cancel_evt,
                 )
-            elif job.op == "record":
+
+            def _run_record():
                 # Per-download override (streams "Download anyway") is stored on
                 # the job, not the setting: None lifts the cap for this take.
                 cap_override = p.get("ignore_hls_cap", False)
@@ -721,7 +728,8 @@ async def main(page: ft.Page) -> None:
                         None if cap_override else state.settings.get("max_hls_download_mb", 2048)
                     ),
                 )
-            elif job.op == "concat":
+
+            def _run_concat():
                 engine.concat(
                     paths=p.get("paths", [job.input_path]),
                     output_path=job.output_path,
@@ -732,7 +740,8 @@ async def main(page: ft.Page) -> None:
                     on_progress=_on_progress,
                     cancel_event=cancel_evt,
                 )
-            elif job.op == "remux":
+
+            def _run_remux():
                 engine.remux(
                     input_path=job.input_path,
                     output_path=job.output_path,
@@ -740,7 +749,8 @@ async def main(page: ft.Page) -> None:
                     on_progress=_on_progress,
                     cancel_event=cancel_evt,
                 )
-            elif job.op == "create_gif":
+
+            def _run_create_gif():
                 engine.create_gif(
                     input_path=job.input_path,
                     output_path=job.output_path,
@@ -751,12 +761,29 @@ async def main(page: ft.Page) -> None:
                     on_progress=_on_progress,
                     cancel_event=cancel_evt,
                 )
-            else:
+
+            # One place listing every op with an engine path; screens enqueue by
+            # name, retry clones params verbatim, and unknown ops fail loudly.
+            JOB_DISPATCH = {
+                "convert": _run_convert,
+                "compress": _run_compress,
+                "cut": _run_cut,
+                "extract_audio": _run_extract_audio,
+                "extract_frames": _run_extract_frames,
+                "extract_subtitles": _run_extract_subtitles,
+                "record": _run_record,
+                "concat": _run_concat,
+                "remux": _run_remux,
+                "create_gif": _run_create_gif,
+            }
+            run = JOB_DISPATCH.get(job.op)
+            if run is None:
                 # Unknown op: fail LOUDLY naming the op. Falling through to
                 # completed-doing-nothing once faked success for a typo'd op.
                 raise ValueError(  # noqa: TRY301 — dispatch-level guard, no inner function to host it
                     f"Unknown job op {job.op!r} — no engine path dispatches it"
                 )
+            run()
 
             _set_worker_field(job, "status", "completed")
             _set_worker_field(job, "progress", 1.0)
