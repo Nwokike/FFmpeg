@@ -261,10 +261,24 @@ Replace the hardcoded tables with a schema generated from the wheel:
 
 ## Phase 4 — Generic UI
 
-- One control factory renders any `CodecOption`/filter option.
-- Codec/container/filter pickers, disposition badges and stream tables render
-  from the schema; delete the per-screen choice tables.
-- Validation at the storage-load and job-build boundaries.
+- One control factory renders any `CodecOption`/filter option. **(done)**
+  `components/encoder_options.py`: `EncoderOptionPanel` renders every option the
+  installed wheel declares for the chosen encoder — typed controls, help text,
+  search, and a "this encoder / all options" switch; `ContainerOptionRows` is
+  the free-form muxer key/value surface (av exposes no muxer option list).
+- Option values are applied, not just displayed. **(done)** They reach the
+  encoder through `_supported_encoder_options` (generic ∪ private, wire
+  strings) and the muxer through `OutputSpec.options`; unsupported keys drop
+  with one info line. Measured while building this: the old private-only filter
+  silently dropped `b`/`g`/`bf`/`threads`/`qmin`, and av rejects non-`str`
+  option values — both fixed.
+- Panels wired into Convert (video + audio encoders, muxer), Compress, Cut
+  (re-encode), Audio Studio and Extract (audio/gif). **(done)**
+- Codec/container pickers render from the schema; `containers_for_kind()`
+  replaces the convert screen's hardcoded container tables. **(done)**
+- Validation at the storage-load and job-build boundaries. Filter pickers,
+  disposition badges and stream tables are already probe-driven; what remains is
+  a saved-spec re-validation pass on load (Phase 5).
 
 ## Phase 5 — Cleanup
 

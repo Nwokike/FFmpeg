@@ -26,8 +26,6 @@ class InputSpec:
     options: dict = field(default_factory=lambda: {"fflags": "+discardcorrupt"})
     timeout: tuple[float, float] = (5.0, 15.0)
     hwaccel: str | None = None
-    # Seconds into the input; converted with the video stream's time base.
-    seek_s: float | None = None
     # Seconds into the input; the builder converts with the video stream's
     # time base and tolerates containers whose index refuses the seek.
     seek_s: float | None = None
@@ -105,12 +103,6 @@ class Job:
     # Time window applied after decoding (seconds); None = whole input.
     window: tuple[float | None, float | None] | None = None
     # Progress copy per op family (builder messages otherwise say Processing/Complete).
-    progress_label: str = "Processing"
-    complete_label: str = "Complete"
-    cancel_message: str = "Transcoding was cancelled"
-    # Time window applied after decoding (seconds); None = whole input.
-    window: tuple[float | None, float | None] | None = None
-    # Progress copy per op family.
     progress_label: str = "Processing"
     complete_label: str = "Complete"
     cancel_message: str = "Transcoding was cancelled"

@@ -1,8 +1,9 @@
-# Engine architecture (Phase 3)
+# Engine architecture (Phase 3 + Phase 4 option panels)
 
 Status: Phase 3 complete (commits `f1cfc29`…`929b64e`) — generic builders,
 multi-input concat, dispatch registry, and worker-process containment (opt-in,
-regression-tested in tests/test_job_process.py).
+regression-tested in tests/test_job_process.py). Phase 4's generic option panel
+is documented below; its tests are tests/test_encoder_option_panel.py.
 
 ## The problem this solves
 
@@ -92,6 +93,47 @@ clip's time base) -> optional BSF (record: h264/hevc -> Annex-B) -> clamp-mux
 `main._job_runner` builds one closure per op over `JOB_DISPATCH` (module-level in
 `main.py`), looks it up by `job.op`, and fails loudly on unknown ops. Retry
 clones params verbatim, so every op keeps its own param contract.
+
+## Option panels — every setting the wheel exposes (Phase 4)
+
+The capability schema measures each encoder's full AVOption list; the panel is
+what makes it reachable.
+
+- **Source of truth.** `probe().encoder_option_schema` (generic + private
+  AVOptions, with type/choices/default/min/max/help) and
+  `probe().common_encoder_options` — the names *every* encoder in this wheel
+  declares (109 today: `b`, `g`, `bf`, `flags`, `threads`, `qmin`…). Both are
+  measured, cached on the FFmpeg build identity (`caps6`), never written.
+- **Controls.** `components/encoder_options.py` renders one settings row per
+  option: bool → `Switch`, string+choices → `Dropdown` (choices carry their own
+  help text), bounded int/float → `Slider` + live readout, flags → a checkbox
+  group that writes `+flag+flag`, anything else → numeric/text `TextField`.
+  The panel opens on the encoder-specific short list (3–46 options), with a
+  "This encoder / All" switch and a search over names and help text.
+- **Wire format.** av's option dict is `dict[str, str]`: an int or float value
+  raises `TypeError` at `add_stream`. `OptionValues` stores wire strings, so the
+  panel can hand over typed values and the engine cannot be fed a bool.
+- **Touched only.** A control shows the schema default but only *touched* keys
+  are sent (`OptionValues.as_dict`), so an untouched option keeps FFmpeg's own
+  default instead of the nominal AVOption default.
+- **Validation.** `_supported_encoder_options` keeps the options the encoder's
+  context advertises — **generic ∪ private** (the generic AVCodecContext
+  options are applied by `avcodec_open2` just the same; the old private-only
+  filter silently dropped `b`/`g`/`bf`/`threads`/`qmin`) — and coerces every
+  value to its wire string. An unsupported key drops with one info line.
+- **Where it applies.** `run_encode_job` sets `StreamSpec.encoder_options` on
+  the video stream and merges them into the audio stream's options (never
+  replacing the open-time options `add_stream` set — vorbis needs
+  `strict=-2`). `OutputSpec.options` reach the muxer through
+  `av.open(options=…)`.
+- **Muxer options are free-form.** av does not enumerate muxer AVOptions (an
+  `OutputContainer.options` is only what you passed), so `ContainerOptionRows`
+  is a key/value list; FFmpeg validates the pair at mux time and a bad one
+  fails the job with its own message.
+- **Per-op params.** `convert` (`encoder_options`, `audio_encoder_options`,
+  `container_options`), `compress_to_target`, `cut_trim`/`_cut_reencode`
+  (encoder options on the re-encode path only), `extract_audio`, `create_gif` —
+  all default `None`, and the screens send only what the user touched.
 
 ## Worker-process containment (implemented; opt-in)
 

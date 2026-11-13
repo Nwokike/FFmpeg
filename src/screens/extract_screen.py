@@ -6,6 +6,7 @@ from pathlib import Path
 
 import flet as ft
 
+from components.encoder_options import ContainerOptionRows, EncoderOptionPanel, OptionValues
 from components.tool_job_status import tool_job_row
 from core.engine_probe import can_encode_format
 from core.state import Job, use_app_state
@@ -19,23 +20,25 @@ from state.controller_ctx import use_controller
 _EXTRACT_MODES = ("audio", "frames", "gif", "subtitles")
 
 
-def extract_mode_availability(info) -> dict[str, bool]:
+def extract_mode_availability(info, probe_info=None) -> dict[str, bool]:
     """Engine-truth availability of each extract mode for probed media.
 
     Each mode names the stream it needs and the engine raises for a missing
     stream mid-job — offering Frames on an audio file (or Audio on muted
     video) used to pass the UI and fail inside the queue. A None info stays
     permissive: the load gate guarantees a probe before the screen opens.
+    ``probe_info`` adds the wheel-level gates (GIF needs a gif encoder).
     """
+    gif_ok = probe_info.gif_ok if probe_info is not None else True
     if info is None:
-        return {"audio": True, "frames": True, "gif": True, "subtitles": False}
+        return {"audio": True, "frames": True, "gif": gif_ok, "subtitles": False}
     has_audio = info.audio_stream is not None
     is_video = info.kind == "video"
     subs = any(s.stream_type == "subtitle" for s in info.streams)
     return {
         "audio": has_audio,
         "frames": is_video,
-        "gif": is_video,
+        "gif": is_video and gif_ok,
         "subtitles": subs,
     }
 
@@ -69,6 +72,10 @@ def ExtractScreen() -> ft.Control:
     gif_duration, set_gif_duration = ft.use_state(min(5.0, duration_s))
     sub_fmt, set_sub_fmt = ft.use_state("srt")
     sub_sel, set_sub_sel = ft.use_state(0)  # index into sub_streams
+    muxer_rows, set_muxer_rows = ft.use_state([])
+    # Touched encoder settings per codec (ref: mutated in place by the panel,
+    # read once at Start — no re-render per keystroke).
+    option_values = ft.use_ref({})
 
     # Live pipeline: derived from the queue, never a stuck local flag.
     running_job = (
@@ -93,7 +100,7 @@ def ExtractScreen() -> ft.Control:
     # Mode availability is engine truth (see extract_mode_availability): a
     # mode the file cannot support is disabled, never offered into a doomed
     # queue job.
-    mode_ok = extract_mode_availability(info)
+    mode_ok = extract_mode_availability(info, app_state.probe_info)
     # Derived clamp (never written back): a mode the previous file allowed
     # shows as the first usable mode for THIS file instead of gating only at
     # Start.
@@ -179,6 +186,15 @@ def ExtractScreen() -> ft.Control:
                 else 0,
             )
 
+        # Generic option panels: only what the user actually touched, and only
+        # for the modes that encode (audio / gif).
+        encoder_opts = _values_for(mode_codec).as_dict() if mode_codec else {}
+        if encoder_opts:
+            job.params["encoder_options"] = encoder_opts
+        muxer_opts = {str(row[0]): str(row[1]) for row in muxer_rows if str(row[0]).strip()}
+        if muxer_opts:
+            job.params["container_options"] = muxer_opts
+
         ctrl.start_job(job)
 
     # Audio formats — measured against the installed wheel, not assumed. The
@@ -199,6 +215,46 @@ def ExtractScreen() -> ft.Control:
     start_blocked_reason: str | None = None
     if active_mode == "audio" and not audio_formats:
         start_blocked_reason = "This build has no audio encoders — extraction is unavailable."
+
+    # Generic option panel data: the encoder each mode actually uses (audio is
+    # derived from the chosen format; GIF is the wheel's gif encoder).
+    from services.engine_service import audio_codec_for_format
+
+    encoder_schemas = (
+        app_state.probe_info.encoder_option_schema if app_state.probe_info else {}
+    ) or {}
+    common_options = list(
+        app_state.probe_info.common_encoder_options if app_state.probe_info else []
+    )
+    mode_codec = (
+        audio_codec_for_format(chosen_audio_fmt)
+        if active_mode == "audio"
+        else ("gif" if active_mode == "gif" else None)
+    )
+
+    def _values_for(codec: str | None) -> OptionValues:
+        store = option_values.current
+        if not codec:
+            return OptionValues("")
+        values = store.get(codec)
+        if values is None:
+            values = OptionValues(codec)
+            store[codec] = values
+        return values
+
+    def _codec_panel() -> list:
+        if not mode_codec:
+            return []
+        return [
+            EncoderOptionPanel(
+                mode_codec,
+                encoder_schemas.get(mode_codec) or [],
+                _values_for(mode_codec),
+                common_options=common_options,
+                is_dark=is_dark,
+                title="Advanced encoder settings",
+            )
+        ]
 
     return ft.ListView(
         controls=[
@@ -424,6 +480,10 @@ def ExtractScreen() -> ft.Control:
                 if active_mode == "gif"
                 else []
             ),
+            # Every encoder setting this build exposes for the mode's codec
+            # (audio: the derived format encoder; gif: the gif encoder).
+            *_codec_panel(),
+            ContainerOptionRows(muxer_rows, set_muxer_rows, is_dark=is_dark),
             *(
                 [ft.Text(start_blocked_reason, size=FONT_SM, color="#EF4444")]
                 if start_blocked_reason

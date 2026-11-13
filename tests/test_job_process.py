@@ -12,6 +12,7 @@ import multiprocessing
 import os
 import threading
 from fractions import Fraction
+from pathlib import Path
 
 import av
 import pytest
@@ -62,7 +63,13 @@ def test_process_mode_output_matches_thread_mode(tmp_path):
         op="convert",
         input_path=src,
         output_path=thread_out,
-        params={"video_codec": "mpeg4", "crf": 23},
+        params={
+            "video_codec": "mpeg4",
+            "crf": 23,
+            # Generic option panel values must survive both runners verbatim.
+            "encoder_options": {"b": "400000"},
+            "container_options": {"movflags": "+faststart"},
+        },
     )
     _run_dispatch_in_thread(job, threading.Event())
     assert job.status == "completed", job.error_message
@@ -71,7 +78,12 @@ def test_process_mode_output_matches_thread_mode(tmp_path):
         op="convert",
         input_path=src,
         output_path=proc_out,
-        params={"video_codec": "mpeg4", "crf": 23},
+        params={
+            "video_codec": "mpeg4",
+            "crf": 23,
+            "encoder_options": {"b": "400000"},
+            "container_options": {"movflags": "+faststart"},
+        },
     )
     main_mod._execute_isolated(lambda j, e: None, job2, threading.Event())
     assert job2.status == "completed", job2.error_message
@@ -141,7 +153,7 @@ def test_cancel_mid_run_marks_cancelled_and_removes_output(tmp_path):
     threading.Thread(target=_cancel_on_first_progress, daemon=True).start()
     main_mod._execute_isolated(lambda j, e: None, job, evt)
     assert job.status == "cancelled"
-    assert not os.path.exists(out)
+    assert not Path(out).exists()
 
 
 @requires_fork

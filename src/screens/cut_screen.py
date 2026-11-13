@@ -9,6 +9,7 @@ from pathlib import Path
 
 import flet as ft
 
+from components.encoder_options import ContainerOptionRows, EncoderOptionPanel, OptionValues
 from components.tool_job_status import tool_job_row
 from core.engine_probe import codec_label
 from core.notify import ERROR, show_snack
@@ -74,6 +75,10 @@ def CutScreen() -> ft.Control:
     ft.use_effect(_clamp_window, [total_dur])
     stream_copy, set_stream_copy = ft.use_state(True)
     v_codec, set_v_codec = ft.use_state("")
+    muxer_rows, set_muxer_rows = ft.use_state([])
+    # Touched encoder settings for the re-encode path (ref: mutated in place by
+    # the panel, read once at Start — no re-render per keystroke).
+    option_values = ft.use_ref({})
 
     # Re-encode needs a verified encoder (stream-copy needs none): the same
     # wheel-measured pick as Compress — the phone offers mpeg4, never H.264.
@@ -251,6 +256,39 @@ def CutScreen() -> ft.Control:
         set_end_s(b)
         _scrub_to(a)
 
+    # Generic option panel data: measured for THIS build, never a written table.
+    encoder_schemas = (
+        app_state.probe_info.encoder_option_schema if app_state.probe_info else {}
+    ) or {}
+    common_options = list(
+        app_state.probe_info.common_encoder_options if app_state.probe_info else []
+    )
+
+    def _values_for(codec: str | None) -> OptionValues:
+        store = option_values.current
+        if not codec:
+            return OptionValues("")
+        values = store.get(codec)
+        if values is None:
+            values = OptionValues(codec)
+            store[codec] = values
+        return values
+
+    def _video_panel() -> list:
+        """Re-encode only: a stream copy has no encoder to configure."""
+        if stream_copy or not chosen_video:
+            return []
+        return [
+            EncoderOptionPanel(
+                chosen_video,
+                encoder_schemas.get(chosen_video) or [],
+                _values_for(chosen_video),
+                common_options=common_options,
+                is_dark=is_dark,
+                title="Advanced encoder settings",
+            )
+        ]
+
     def _start_cut(_):
         if not media_path or cut_duration <= 0.05:
             return
@@ -282,6 +320,11 @@ def CutScreen() -> ft.Control:
         out_name = unique_temp_name(f"{Path(media_path).stem}_trimmed", ext)
         out_path = str(get_temp_dir() / out_name)
 
+        # Generic option panels: only what the user actually touched. A stream
+        # copy has no encoder, so encoder options only ride the re-encode path.
+        encoder_opts = {} if stream_copy else _values_for(chosen_video).as_dict()
+        muxer_opts = {str(row[0]): str(row[1]) for row in muxer_rows if str(row[0]).strip()}
+
         job = Job(
             op="cut",
             input_path=media_path,
@@ -291,6 +334,8 @@ def CutScreen() -> ft.Control:
                 "end_seconds": float(end_s),
                 "stream_copy": bool(stream_copy),
                 **({} if stream_copy else {"video_codec": chosen_video}),
+                **({"encoder_options": encoder_opts} if encoder_opts else {}),
+                **({"container_options": muxer_opts} if muxer_opts else {}),
             },
             original_size_bytes=Path(media_path).stat().st_size if Path(media_path).exists() else 0,
         )
@@ -630,6 +675,10 @@ def CutScreen() -> ft.Control:
                 if not stream_copy
                 else []
             ),
+            # Every encoder setting this build exposes for the re-encode codec
+            # (re-encode only — a stream copy configures nothing).
+            *_video_panel(),
+            ContainerOptionRows(muxer_rows, set_muxer_rows, is_dark=is_dark),
             # Action button
             *([tool_job_row(running_job, ctrl, is_dark=is_dark)] if running_job else []),
             ft.FilledButton(

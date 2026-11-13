@@ -7,6 +7,7 @@ from pathlib import Path
 
 import flet as ft
 
+from components.encoder_options import ContainerOptionRows, EncoderOptionPanel, OptionValues
 from components.tool_job_status import tool_job_row
 from core.engine_probe import can_encode_format
 from core.state import Job, use_app_state
@@ -69,6 +70,10 @@ def AudioScreen() -> ft.Control:
     sample_rate, set_sample_rate = ft.use_state(48000)
     audio_format, set_audio_format = ft.use_state("m4a")
     bitrate_key, set_bitrate_key = ft.use_state("Standard 192k")
+    muxer_rows, set_muxer_rows = ft.use_state([])
+    # Touched encoder settings for the derived encoder (ref: mutated in place
+    # by the panel, read once at Start — no re-render per keystroke).
+    option_values = ft.use_ref({})
 
     # Live pipeline: derived from the queue, never a stuck local flag.
     running_job = (
@@ -93,6 +98,43 @@ def AudioScreen() -> ft.Control:
     bitrate_kbps = next((v for k, v in _BITRATE_CHOICES if k == bitrate_key), 192)
 
     rates = [48000, 44100, 32000]
+
+    # The encoder the engine derives for the chosen format, so the option panel
+    # configures the codec that will actually run (aac for m4a, libmp3lame for
+    # mp3, pcm for wav…). Measured, never assumed.
+    from services.engine_service import audio_codec_for_format
+
+    derived_codec = audio_codec_for_format(chosen_audio_format)
+    encoder_schemas = (
+        app_state.probe_info.encoder_option_schema if app_state.probe_info else {}
+    ) or {}
+    common_options = list(
+        app_state.probe_info.common_encoder_options if app_state.probe_info else []
+    )
+
+    def _values_for(codec: str | None) -> OptionValues:
+        store = option_values.current
+        if not codec:
+            return OptionValues("")
+        values = store.get(codec)
+        if values is None:
+            values = OptionValues(codec)
+            store[codec] = values
+        return values
+
+    def _codec_panel() -> list:
+        if not derived_codec:
+            return []
+        return [
+            EncoderOptionPanel(
+                derived_codec,
+                encoder_schemas.get(derived_codec) or [],
+                _values_for(derived_codec),
+                common_options=common_options,
+                is_dark=is_dark,
+                title="Advanced encoder settings",
+            )
+        ]
 
     def _toggle_audition(_=None) -> None:
         player = audition_ref.current
@@ -218,6 +260,10 @@ def AudioScreen() -> ft.Control:
         out_name = unique_temp_name(f"{stem}_mastered", chosen_audio_format)
         out_path = str(get_temp_dir() / out_name)
 
+        # Generic option panels: only what the user actually touched.
+        encoder_opts = _values_for(derived_codec).as_dict()
+        muxer_opts = {str(row[0]): str(row[1]) for row in muxer_rows if str(row[0]).strip()}
+
         job = Job(
             op="extract_audio",
             input_path=media_path,
@@ -228,6 +274,8 @@ def AudioScreen() -> ft.Control:
                 **({"target_lufs": float(lufs_target)} if lufs_target is not None else {}),
                 "channels": 2 if channel_layout == "stereo" else 1,
                 "sample_rate": int(sample_rate),
+                **({"encoder_options": encoder_opts} if encoder_opts else {}),
+                **({"container_options": muxer_opts} if muxer_opts else {}),
             },
             original_size_bytes=Path(media_path).stat().st_size if Path(media_path).exists() else 0,
         )
@@ -449,6 +497,9 @@ def AudioScreen() -> ft.Control:
                 wrap=True,
                 spacing=SPACE_SM,
             ),
+            # Every encoder setting this build exposes for the derived codec.
+            *_codec_panel(),
+            ContainerOptionRows(muxer_rows, set_muxer_rows, is_dark=is_dark),
             # Bitrate (lossy only — WAV ignores it, FLAC treats it as a hint).
             *(
                 [

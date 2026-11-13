@@ -53,8 +53,13 @@ built configure string, so a silently reduced build cannot ship.
 
 - `src/screens/engine_info_screen.py` header is derived from `av.ffmpeg_version_info`
   (no hardcoded "FFmpeg 8").
-- The probe (`engine_probe.py`) now enumerates the full wheel — new encoders
-  appear automatically in Engine Info, Convert and the format pickers; the
-  display tables still need Phase 4's derived rendering for the long tail.
+- The probe (`engine_probe.py`) enumerates the full wheel — new encoders appear
+  automatically in Engine Info, Convert and the format pickers. **Closed in
+  Phase 4:** every encoder setting is reachable too — the advanced panel renders
+  the measured AVOption schema (typed controls, per-option help, search) and the
+  values are applied to the encoder and the muxer.
+- Muxer options are the one surface av cannot enumerate (an `OutputContainer`'s
+  `options` is only what you passed), so they are entered as key/value pairs and
+  validated by FFmpeg at mux time — a gap in the library, not the app.
 - HTTPS: the app still fetches HLS via httpx (Phase 5 deletes that once the
   native TLS path is the only one); plain `https://` via `av.open` now works.

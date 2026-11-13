@@ -1119,6 +1119,11 @@ def _build_job_dispatch(engine, state, job, _on_progress, cancel_evt):
                     state.settings.get("hardware_accel", True),
                 )
             ),
+            # Generic option panel (components/encoder_options.py): encoder keys
+            # and muxer keys the user set. Both optional; absent = old behavior.
+            encoder_options=p.get("encoder_options"),
+            audio_encoder_options=p.get("audio_encoder_options"),
+            container_options=p.get("container_options"),
             on_progress=_on_progress,
             cancel_event=cancel_evt,
         )
@@ -1129,6 +1134,8 @@ def _build_job_dispatch(engine, state, job, _on_progress, cancel_evt):
             output_path=job.output_path,
             target_size_mb=p.get("target_size_mb", 16.0),
             video_codec=p.get("video_codec"),
+            encoder_options=p.get("encoder_options"),
+            container_options=p.get("container_options"),
             on_progress=_on_progress,
             cancel_event=cancel_evt,
         )
@@ -1141,6 +1148,8 @@ def _build_job_dispatch(engine, state, job, _on_progress, cancel_evt):
             end_seconds=p.get("end_seconds", 10.0),
             stream_copy=p.get("stream_copy", True),
             video_codec=p.get("video_codec"),
+            encoder_options=p.get("encoder_options"),
+            container_options=p.get("container_options"),
             on_progress=_on_progress,
             cancel_event=cancel_evt,
         )
@@ -1154,6 +1163,8 @@ def _build_job_dispatch(engine, state, job, _on_progress, cancel_evt):
             target_lufs=p.get("target_lufs"),
             channels=p.get("channels"),
             sample_rate=p.get("sample_rate"),
+            encoder_options=p.get("encoder_options"),
+            container_options=p.get("container_options"),
             on_progress=_on_progress,
             cancel_event=cancel_evt,
         )
@@ -1223,6 +1234,8 @@ def _build_job_dispatch(engine, state, job, _on_progress, cancel_evt):
             width=p.get("width", 480),
             start_s=p.get("start_s", 0.0),
             duration_s=p.get("duration_s", 5.0),
+            encoder_options=p.get("encoder_options"),
+            container_options=p.get("container_options"),
             on_progress=_on_progress,
             cancel_event=cancel_evt,
         )
@@ -1269,10 +1282,8 @@ def _isolated_child_entry(
         class _ProgressPipe:
             # Matches the dispatch's on_progress(pct, message) protocol.
             def put_nowait(self, pct, message) -> None:
-                try:
+                with contextlib.suppress(Exception):
                     send_conn.send((float(pct), str(message)))
-                except Exception:
-                    pass
 
             def put(self, *a, **k) -> None:
                 self.put_nowait(*a)
@@ -1284,16 +1295,12 @@ def _isolated_child_entry(
         dispatch = _build_job_dispatch(EngineService(), state, job, pipe.put_nowait, cancel_evt)
         _dispatch_job_op(dispatch, job)
     except BaseException as exc:
-        try:
+        with contextlib.suppress(Exception):
             send_conn.send(("error", friendly_job_error(exc)))
-        except Exception:
-            pass
         raise
     finally:
-        try:
+        with contextlib.suppress(Exception):
             send_conn.close()
-        except Exception:
-            pass
 
 
 def _execute_isolated(thread_runner, job: Job, cancel_evt: threading.Event) -> None:

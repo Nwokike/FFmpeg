@@ -6,8 +6,9 @@ from pathlib import Path
 
 import flet as ft
 
+from components.encoder_options import ContainerOptionRows, EncoderOptionPanel, OptionValues
 from components.tool_job_status import tool_job_row
-from core.engine_probe import codec_family, codec_label, container_label
+from core.engine_probe import codec_family, codec_label, container_label, containers_for_kind
 from core.notify import ERROR, show_snack
 from core.state import Job, use_app_state
 from core.storage_paths import format_bytes, get_temp_dir, unique_temp_name
@@ -24,18 +25,11 @@ from core.tokens import (
 from services.engine_service import check_pair
 from state.controller_ctx import use_controller
 
-_VIDEO_CONTAINERS = ("mp4", "mkv", "mov", "webm", "avi")
-_AUDIO_CONTAINERS = ("mp3", "m4a", "flac", "wav")
-_IMAGE_CONTAINERS = ("jpg", "png", "webp")
-
-
-def _containers_for(kind: str) -> tuple[str, ...]:
-    """Output containers that make sense for the kind of file being converted."""
-    return {
-        "image": _IMAGE_CONTAINERS,
-        "audio": _AUDIO_CONTAINERS,
-        "video": _VIDEO_CONTAINERS,
-    }.get(kind, _VIDEO_CONTAINERS)
+# Still-image containers are the one list the wheel cannot classify (see
+# engine_probe.containers_for_kind: av does not tag still-image muxers, and
+# intra-only video codecs like dnxhd are not still images). Presentation only —
+# the encoder itself is still measured per build.
+_IMAGE_CONTAINERS = ("png", "jpg", "webp")
 
 
 @ft.component
@@ -90,14 +84,21 @@ def ConvertScreen() -> ft.Control:
     a_codec, set_a_codec = ft.use_state("aac")
     crf_val, set_crf_val = ft.use_state(23)
     res_choice, set_res_choice = ft.use_state("original")
+    muxer_rows, set_muxer_rows = ft.use_state([])
+    # Touched encoder settings per codec (video and audio are separate
+    # encoders with separate option sets). A ref: the panel mutates the value
+    # object in place, and only Start reads it — no re-render per keystroke.
+    option_values = ft.use_ref({})
 
-    default_container = {"image": "png", "audio": "m4a", "video": "mp4"}.get(media_kind, "mp4")
-    allowed_containers = _containers_for(media_kind)
+    # Output containers come from the wheel's own muxer matrix (name,
+    # extensions, default codecs): the app offers what this build can write,
+    # in a presentation order that puts the familiar targets first.
+    containers = containers_for_kind(media_kind) if media_kind != "image" else []
+    allowed_containers = [entry["container"] for entry in containers] or list(_IMAGE_CONTAINERS)
+    default_container = allowed_containers[0] if allowed_containers else "mp4"
     chosen_container = container_fmt if container_fmt in allowed_containers else default_container
-    # Clamp the selection onto something this build can actually encode — the
-    # default (libx264) is meaningless on a wheel that only ships LGPL codecs.
-    # The clamp is DERIVED (not written back): the UI always shows the
-    # effective value, so stale state can never silently resurrect.
+    # The clamp is DERIVED (not written back): the UI always shows the effective
+    # value, so stale state can never silently resurrect.
     # Wheel-measured audio encoders, shared by every kind branch below.
     visible_audio = list(available_audio)
 
@@ -142,6 +143,37 @@ def ConvertScreen() -> ft.Control:
     # job before that means guessing the encoder — the phone log showed
     # H.264-encode jobs failing on the LGPL wheel for exactly this reason.
     probing = app_state.probe_info is None
+
+    # Generic option panel data: the schema measured for THIS build (never a
+    # written table) plus the generic-option set the panel hides by default.
+    encoder_schemas = (probe_info.encoder_option_schema if probe_info else {}) or {}
+    common_options = list(probe_info.common_encoder_options if probe_info else [])
+
+    def _values_for(codec: str | None) -> OptionValues:
+        """The touched-settings store for one encoder, created on first use."""
+        store = option_values.current
+        if not codec:
+            return OptionValues("")
+        values = store.get(codec)
+        if values is None:
+            values = OptionValues(codec)
+            store[codec] = values
+        return values
+
+    def _panel(codec: str | None, label: str) -> list:
+        """The advanced-settings panel for one encoder (empty when unknown)."""
+        if not codec:
+            return []
+        return [
+            EncoderOptionPanel(
+                codec,
+                encoder_schemas.get(codec) or [],
+                _values_for(codec),
+                common_options=common_options,
+                is_dark=is_dark,
+                title=label,
+            )
+        ]
 
     # Container↔codec matrix: pairs the wheel's muxers reject (vp9+mp4,
     # aac-in-.mp3…) refuse BEFORE Start, not after a full encode.
@@ -220,6 +252,19 @@ def ConvertScreen() -> ft.Control:
             # Still image: the still encoder carries the transcode; no
             # video bitrate/scale params apply.
             params.update({"video_codec": chosen_video})
+
+        # Generic option panels: only what the user actually touched.
+        if chosen_video:
+            video_opts = _values_for(chosen_video).as_dict()
+            if video_opts:
+                params["encoder_options"] = video_opts
+        if chosen_audio:
+            audio_opts = _values_for(chosen_audio).as_dict()
+            if audio_opts:
+                params["audio_encoder_options"] = audio_opts
+        muxer_opts = {str(row[0]): str(row[1]) for row in (muxer_rows or []) if str(row[0]).strip()}
+        if muxer_opts:
+            params["container_options"] = muxer_opts
 
         job = Job(
             op="convert",
@@ -300,8 +345,11 @@ def ConvertScreen() -> ft.Control:
             ft.Dropdown(
                 value=chosen_container,
                 options=container_options,
+                disabled=not container_options,
                 on_select=lambda e: set_container_fmt(e.control.value),
             ),
+            # Muxer settings (free-form: av does not enumerate muxer options).
+            ContainerOptionRows(muxer_rows, set_muxer_rows, is_dark=is_dark),
             # Audio codec picker (was hardcoded aac — AAC-in-.mp3 mismatched).
             *(
                 [
@@ -311,6 +359,7 @@ def ConvertScreen() -> ft.Control:
                         options=audio_options,
                         on_select=lambda e: set_a_codec(e.control.value),
                     ),
+                    *_panel(chosen_audio, "Advanced audio settings"),
                 ]
                 if media_kind in ("video", "audio")
                 else []
@@ -354,6 +403,9 @@ def ConvertScreen() -> ft.Control:
                             )
                         ]
                     ),
+                    # Every encoder setting this build exposes for the chosen
+                    # video codec — measured from the wheel, nothing written.
+                    *_panel(chosen_video, "Advanced video settings"),
                     # Quality & CRF (lossy codecs only — vacuous for
                     # lossless prores/ffv1/mjpeg, so hidden there).
                     *(

@@ -26,6 +26,7 @@ from errno import EAGAIN
 from fractions import Fraction
 from pathlib import Path
 from threading import Event
+from typing import Any
 from urllib.parse import urljoin
 
 import av
@@ -429,6 +430,18 @@ def _derive_audio_codec_for_format(requested_format: str) -> str:
     )
 
 
+def audio_codec_for_format(requested_format: str) -> str | None:
+    """The encoder the engine will use for one audio format (None when it cannot).
+
+    The screens need the same answer the engine derives, so the option panel
+    shows the settings of the encoder that will actually run — not a guess.
+    """
+    try:
+        return _derive_audio_codec_for_format(requested_format)
+    except Exception:
+        return None
+
+
 def friendly_job_error(exc: BaseException) -> str:
     """Render a job exception as a message a person can act on.
 
@@ -530,18 +543,39 @@ def _exact_rate(value, default: int = 30):
     return rate
 
 
-def _supported_encoder_options(codec_name: str, requested: dict[str, str]) -> dict[str, str]:
-    """Keep only options advertised by this wheel's encoder context."""
+def _wire_option_value(value: Any) -> str:
+    """One encoder-option value in the form av accepts.
+
+    av's option dict is ``dict[str, str]``: passing an int or float raises
+    ``TypeError: Argument 'value' has incorrect type`` at add_stream time, so
+    every caller funnels through here.
+    """
+    if isinstance(value, bool):
+        return "1" if value else "0"
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return "+".join(str(item).lstrip("+-") for item in value if str(item).strip())
+    return str(value)
+
+
+def _supported_encoder_options(codec_name: str, requested: dict[str, Any]) -> dict[str, str]:
+    """Keep only options this wheel's encoder context advertises, as wire strings.
+
+    Both option sets are legal: the generic ones (b/g/bf/threads/qmin/flags) are
+    the AVCodecContext class options every encoder shares, and av hands the dict
+    to avcodec_open2, which applies generic and private alike. Keeping private
+    only (the old filter) silently dropped most of what a UI can offer.
+    """
     try:
         ctx = av.CodecContext.create(codec_name, "w")
-        valid = {str(option.name) for option in ctx.supported_options.private}
+        valid = {str(option.name) for option in ctx.supported_options.generic}
+        valid |= {str(option.name) for option in ctx.supported_options.private}
     except Exception as exc:
         logger.debug("Could not inspect options for %s: %s", codec_name, exc)
-        return requested
+        return {str(key): _wire_option_value(value) for key, value in requested.items()}
     dropped = sorted(set(requested) - valid)
     if dropped:
         logger.info("Dropping unsupported %s encoder options: %s", codec_name, ", ".join(dropped))
-    return {key: value for key, value in requested.items() if key in valid}
+    return {str(key): _wire_option_value(value) for key, value in requested.items() if key in valid}
 
 
 def _optional_encoder_knobs(
@@ -1146,7 +1180,6 @@ def run_encode_job(
         first_inp.close()
         raise
 
-    in_video_early = first_inp.streams.best("video")
     if first_spec.seek_s:
         # container.seek defaults to AV_TIME_BASE (microseconds) units.
         _safe_seek(first_inp, max(0, int(first_spec.seek_s * av.time_base)))
@@ -1236,6 +1269,15 @@ def run_encode_job(
             )
             layout = a_spec.layout or ("stereo" if n_ch >= 2 else "mono")
             out_audio.layout = layout
+            # Audio encoder options ride the same validation as video: a key the
+            # wheel's encoder lacks drops with an info line, never fails the job.
+            # Merge, never replace: add_stream may have set open-time options
+            # (vorbis needs strict=-2), and those must survive.
+            audio_opts = _supported_encoder_options(chosen_acodec, dict(a_spec.encoder_options))
+            if audio_opts:
+                merged_opts = dict(getattr(out_audio, "options", None) or {})
+                merged_opts.update(audio_opts)
+                out_audio.options = merged_opts
 
         # Fixed-frame encoders (AAC/MP3/FLAC) need AudioFifo batching; the
         # encoder is pre-opened so its real frame_size is visible before the
@@ -1344,8 +1386,8 @@ def run_encode_job(
             frame.time_base = out_tb
             last_audio_pts = candidate
 
-        multi_input = len(job.inputs) > 1
         cancelled_any = False
+        multi_input = len(job.inputs) > 1
         for fi, spec_i in enumerate(job.inputs):
             if (
                 fi > 0
@@ -1660,10 +1702,8 @@ def run_copy_job(
                         # add_stream_from_template is a NO-OP for metadata/
                         # disposition on this build — copy them explicitly.
                         out_s.metadata.update(s.metadata)
-                        try:
+                        with contextlib.suppress(Exception):
                             out_s.disposition = int(s.disposition)
-                        except Exception:
-                            pass
                         stream_map[s] = out_s
                         out_by_pos.append(out_s)
                         tb_by_pos.append(_av_rational(s.time_base or Fraction(1, 1000)))
@@ -1737,17 +1777,23 @@ def run_copy_job(
                 total_s = float(inp.duration or 0) / float(av.time_base) if inp.duration else 0.0
                 last_report = 0.0
 
-                def _emit(packet) -> None:
+                def _emit(
+                    packet,
+                    _fi=fi,
+                    _stream_map=stream_map_local,
+                    _src_streams=src_streams,
+                    _out=out,
+                ) -> None:
                     nonlocal bytes_out
-                    if _timeline_state["fi"] != fi:
-                        _timeline_state["fi"] = fi
+                    if _timeline_state["fi"] != _fi:
+                        _timeline_state["fi"] = _fi
                         _timeline_state["seen_pos"].clear()
                     if packet.size == 0 or (packet.pts is None and packet.dts is None):
                         return
                     src_key = packet.stream.index if packet.stream is not None else -1
                     # Rescale onto the target stream's clock when they differ
                     # (template streams normally share the input time base).
-                    _out_s_pre = stream_map_local.get(packet.stream)
+                    _out_s_pre = _stream_map.get(packet.stream)
                     if (
                         _out_s_pre is not None
                         and _out_s_pre.time_base
@@ -1765,12 +1811,16 @@ def run_copy_job(
                             packet.pts = max(0, packet.pts - base_pts[src_key])
                         if packet.dts is not None:
                             packet.dts = max(0, packet.dts - base_dts[src_key])
-                        if job.repair_pts_dts and packet.dts is not None and packet.pts is not None:
-                            if packet.dts > packet.pts:
-                                packet.pts = packet.dts
+                        if (
+                            job.repair_pts_dts
+                            and packet.dts is not None
+                            and packet.pts is not None
+                            and packet.dts > packet.pts
+                        ):
+                            packet.pts = packet.dts
                     elif job.timeline_shift:
                         pos = next(
-                            (p for p, s in enumerate(src_streams) if s.index == src_key),
+                            (p for p, s in enumerate(_src_streams) if s.index == src_key),
                             None,
                         )
                         if pos is not None:
@@ -1806,9 +1856,9 @@ def run_copy_job(
                             last_pts[pos] = packet.pts
                             last_dts[pos] = packet.dts
 
-                    out_s = stream_map_local.get(packet.stream)
+                    out_s = _stream_map.get(packet.stream)
                     if out_s is None:
-                        for src, mapped in stream_map_local.items():
+                        for src, mapped in _stream_map.items():
                             if src.index == src_key:
                                 out_s = mapped
                                 break
@@ -1818,9 +1868,9 @@ def run_copy_job(
                         pkt.stream = out_s
                         if job.timeline_shift:
                             # Timeline path self-manages monotonicity above.
-                            out.mux(pkt)
+                            _out.mux(pkt)
                         else:
-                            mux_clamp.mux(out, pkt)
+                            mux_clamp.mux(_out, pkt)
                             bytes_out += max(0, pkt.size or 0)
 
                 for packet in inp.demux(src_streams):
@@ -1832,12 +1882,12 @@ def run_copy_job(
                             )
                             break
                         break
-                    if job.duration_cap_s is not None:
-                        if time.monotonic() - start >= job.duration_cap_s:
-                            logger.info(
-                                "Recording reached duration cap (%.1fs)", job.duration_cap_s
-                            )
-                            break
+                    if (
+                        job.duration_cap_s is not None
+                        and time.monotonic() - start >= job.duration_cap_s
+                    ):
+                        logger.info("Recording reached duration cap (%.1fs)", job.duration_cap_s)
+                        break
                     ts = packet.pts if packet.pts is not None else packet.dts
                     if ts is None:
                         continue
@@ -1900,7 +1950,7 @@ def run_copy_job(
         if out is not None:
             _close_container(out)
 
-    if cancel_event and cancel_event.is_set() and not job.record_mode:
+    if (cancelled_any or (cancel_event and cancel_event.is_set())) and not job.record_mode:
         _discard_cancelled(job.output_path)
         raise InterruptedError(job.cancel_message)
     if job.record_mode and not Path(job.output_path).exists():
@@ -2105,14 +2155,21 @@ class EngineService:
         thread_count: int | None = None,
         profile: str | None = None,
         level: str | None = None,
+        encoder_options: dict | None = None,
+        audio_encoder_options: dict | None = None,
+        container_options: dict | None = None,
         on_progress: Callable[[float, str], None] | None = None,
         cancel_event: Event | None = None,
     ) -> str:
         """Transcode video/audio with quality, scaling, filters, and transforms.
 
-        Preset over the generic encode builder (run_encode_job): encoder knobs
-        flow through _supported_encoder_options so keys the wheel's encoder
-        lacks drop with an info line instead of failing the job.
+        Preset over the generic encode builder (run_encode_job): the fixed knobs
+        and ``encoder_options`` merge into one option set that passes through
+        :func:`_supported_encoder_options`, so a key this wheel's encoder lacks
+        drops with an info line instead of failing the job. ``audio_encoder_options``
+        do the same for the audio stream (a separate encoder, so a separate dict).
+        ``container_options`` go to the muxer through ``OutputSpec.options``
+        (``av.open(options=...)``).
         """
         hwaccel = _hardware_decode(hardware_accel)
         need_vfilter = (
@@ -2182,12 +2239,20 @@ class EngineService:
                             thread_count=thread_count,
                             profile=profile,
                             level=level,
-                        ),
+                        )
+                        | dict(encoder_options or {}),  # user options last: they win
                     ),
                 ),
-                StreamSpec(kind="audio", codec=_resolve_or_raw(audio_codec, "audio")),
+                StreamSpec(
+                    kind="audio",
+                    codec=_resolve_or_raw(audio_codec, "audio"),
+                    encoder_options=_supported_encoder_options(
+                        _resolve_or_raw(audio_codec, "audio"),
+                        dict(audio_encoder_options or {}),
+                    ),
+                ),
             ],
-            output=OutputSpec(),
+            output=OutputSpec(options=dict(container_options or {})),
             video_chain=video_chain,
             audio_chain=audio_chain,
         )
@@ -2200,6 +2265,8 @@ class EngineService:
         output_path: str,
         target_size_mb: float,
         video_codec: str | None = None,
+        encoder_options: dict | None = None,
+        container_options: dict | None = None,
         on_progress: Callable[[float, str], None] | None = None,
         cancel_event: Event | None = None,
     ) -> str:
@@ -2209,6 +2276,9 @@ class EngineService:
         offers only verified encoders, mpeg4-first on LGPL wheels). None keeps
         the legacy auto choice. The resolver raises EngineCapabilityError for
         anything the wheel cannot encode — a refuse-before-Start at the UI.
+        ``encoder_options``/``container_options`` are the generic option-panel
+        values: encoder keys merge last and pass through
+        :func:`_supported_encoder_options`, container keys reach the muxer.
         """
         info = EngineService.probe(input_path)
         duration = max(1.0, info.duration_s)
@@ -2248,7 +2318,9 @@ class EngineService:
                     cap_fps=False,
                     scale_width=scale_w,
                     scale_height=scale_h,
-                    encoder_options=_supported_encoder_options(chosen_vcodec, {"preset": "fast"}),
+                    encoder_options=_supported_encoder_options(
+                        chosen_vcodec, {"preset": "fast"} | dict(encoder_options or {})
+                    ),
                 ),
                 StreamSpec(
                     kind="audio",
@@ -2257,7 +2329,7 @@ class EngineService:
                     layout="stereo",
                 ),
             ],
-            output=OutputSpec(chapters=False),
+            output=OutputSpec(chapters=False, options=dict(container_options or {})),
             progress_label="Compressing",
             complete_label="Compressed",
             cancel_message="Compression cancelled",
@@ -2274,6 +2346,8 @@ class EngineService:
         end_seconds: float,
         stream_copy: bool = True,
         video_codec: str | None = None,
+        encoder_options: dict | None = None,
+        container_options: dict | None = None,
         on_progress: Callable[[float, str], None] | None = None,
         cancel_event: Event | None = None,
     ) -> str:
@@ -2281,11 +2355,19 @@ class EngineService:
 
         ``video_codec`` is the screen's wheel-measured pick for the re-encode
         path (None = legacy auto). The resolver raises EngineCapabilityError
-        for anything the wheel cannot encode.
+        for anything the wheel cannot encode. ``encoder_options`` apply to the
+        re-encode path only (a stream copy has no encoder); ``container_options``
+        reach the muxer on both.
         """
         if stream_copy:
             return EngineService._cut_stream_copy(
-                input_path, output_path, start_seconds, end_seconds, on_progress, cancel_event
+                input_path,
+                output_path,
+                start_seconds,
+                end_seconds,
+                container_options,
+                on_progress,
+                cancel_event,
             )
         return EngineService._cut_reencode(
             input_path,
@@ -2293,6 +2375,8 @@ class EngineService:
             start_seconds,
             end_seconds,
             video_codec,
+            encoder_options,
+            container_options,
             on_progress,
             cancel_event,
         )
@@ -2326,13 +2410,14 @@ class EngineService:
         output_path: str,
         start_s: float,
         end_s: float,
+        container_options: dict | None = None,
         on_progress: Callable[[float, str], None] | None = None,
         cancel_event: Event | None = None,
     ) -> str:
         job = Job(
             output_path=output_path,
             inputs=[InputSpec(path=input_path, seek_s=start_s)],
-            output=OutputSpec(metadata=True),
+            output=OutputSpec(metadata=True, options=dict(container_options or {})),
             snap_to_keyframe=True,
             zero_base=True,
             repair_pts_dts=True,
@@ -2350,13 +2435,14 @@ class EngineService:
         start_s: float,
         end_s: float,
         video_codec: str | None = None,
+        encoder_options: dict | None = None,
+        container_options: dict | None = None,
         on_progress: Callable[[float, str], None] | None = None,
         cancel_event: Event | None = None,
     ) -> str:
         chosen_vcodec = (
             _resolve_or_raw(video_codec, "video") if video_codec else _pick_video_encoder()
         )
-        duration = max(0.1, end_s - start_s)
         job = Job(
             output_path=output_path,
             inputs=[InputSpec(path=input_path, seek_s=max(0.0, start_s - 2.0))],
@@ -2366,12 +2452,15 @@ class EngineService:
                     codec=chosen_vcodec,
                     cap_fps=False,
                     encoder_options=_supported_encoder_options(
-                        chosen_vcodec, {"crf": "20", "preset": "fast"}
+                        chosen_vcodec,
+                        {"crf": "20", "preset": "fast"} | dict(encoder_options or {}),
                     ),
                 ),
                 StreamSpec(kind="audio", codec="aac", layout="stereo"),
             ],
-            output=OutputSpec(metadata=False, chapters=False),
+            output=OutputSpec(
+                metadata=False, chapters=False, options=dict(container_options or {})
+            ),
             window=(start_s, end_s),
             progress_label="Encoding cut",
             complete_label="Cut Complete",
@@ -2411,10 +2500,17 @@ class EngineService:
         target_lufs: float | None = None,
         channels: int | None = None,
         sample_rate: int | None = None,
+        encoder_options: dict | None = None,
+        container_options: dict | None = None,
         on_progress: Callable[[float, str], None] | None = None,
         cancel_event: Event | None = None,
     ) -> str:
-        """Extract audio with optional LUFS mastering, channel mix, and soxr resampling."""
+        """Extract audio with optional LUFS mastering, channel mix, and soxr resampling.
+
+        ``encoder_options``/``container_options`` are the generic option-panel
+        values: encoder keys merge last and pass through
+        :func:`_supported_encoder_options`, container keys reach the muxer.
+        """
         # Do not create a partial output while the serial queue is paused.
         _pause_hook(cancel_event)
         requested_format = format_name.lower()
@@ -2491,9 +2587,14 @@ class EngineService:
                     pts_policy="encoder",
                     audio_fifo=True,
                     audio_resample=True,
+                    encoder_options=_supported_encoder_options(
+                        chosen_codec, dict(encoder_options or {})
+                    ),
                 )
             ],
-            output=OutputSpec(metadata=False, chapters=False),
+            output=OutputSpec(
+                metadata=False, chapters=False, options=dict(container_options or {})
+            ),
             audio_chain=loud_chain,
             progress_label="Extracting Audio",
             complete_label="Audio Extracted",
@@ -2577,10 +2678,16 @@ class EngineService:
         width: int = 480,
         start_s: float = 0.0,
         duration_s: float = 5.0,
+        encoder_options: dict | None = None,
+        container_options: dict | None = None,
         on_progress: Callable[[float, str], None] | None = None,
         cancel_event: Event | None = None,
     ) -> str:
-        """Generate a palette-optimized animated GIF from a video segment."""
+        """Generate a palette-optimized animated GIF from a video segment.
+
+        ``encoder_options`` reach the gif encoder (lossy LZW/palette knobs);
+        ``container_options`` reach the muxer.
+        """
         info = EngineService.probe(input_path)
         if info.video_stream is None:
             raise ValueError("No video stream found")
@@ -2628,9 +2735,15 @@ class EngineService:
                     scale_height=out_h,
                     even_align=False,
                     pts_policy="encoder",
+                    encoder_options=_supported_encoder_options("gif", dict(encoder_options or {})),
                 )
             ],
-            output=OutputSpec(container="gif", metadata=False, chapters=False),
+            output=OutputSpec(
+                container="gif",
+                metadata=False,
+                chapters=False,
+                options=dict(container_options or {}),
+            ),
             video_chain=FilterChain(build=_palette_chain_build),
             window=(start_s, end_s),
             progress_label="Creating GIF",

@@ -93,6 +93,10 @@ class EngineProbe:
     # [{name, type, choices, default, min, max, help, flags, is_array}]. This is
     # what Phase 4's UI renders — every setting the engine actually has.
     encoder_option_schema: dict[str, list[dict]] = field(default_factory=dict)
+    # Option names every encoder in this wheel declares (the generic AVOptions:
+    # b/g/bf/flags/threads...). The panel hides these behind "All options" —
+    # per-encoder settings are the short list worth showing first.
+    common_encoder_options: list[str] = field(default_factory=list)
     # Codec families keyed by AVCodecID (as str for JSON): same id = same codec
     # (h264 decoder, libx264 encoder, h264_nvenc...). Replaces alias maps.
     codec_families: dict[str, list[str]] = field(default_factory=dict)
@@ -162,7 +166,8 @@ class EngineProbe:
             f" | decoders (verified): {len(self.decoders)} | families: {len(self.codec_families)}",
             f"filters: {self.filter_count} | formats: {self.format_count}"
             f" | bitstream filters: {len(self.bitstream_filters)}",
-            f"encoders with option schema: {len(self.encoder_option_schema)}",
+            f"encoders with option schema: {len(self.encoder_option_schema)}"
+            f" (generic options: {len(self.common_encoder_options)})",
             f"video encoders (verified): {', '.join(self.video_encoder_picks) or 'NONE'}",
             f"audio encoders (verified): {', '.join(self.audio_encoder_picks) or 'NONE'}",
             f"hw devices: {', '.join(sorted(self.hw_devices)) or 'none detected'}",
@@ -292,7 +297,7 @@ def _ffmpeg_build_identity() -> str:
 
 
 def _probe_cache_path() -> Path:
-    return get_cache_dir() / f"engine_probe_{av.__version__}_{_ffmpeg_build_identity()}_caps5.json"
+    return get_cache_dir() / f"engine_probe_{av.__version__}_{_ffmpeg_build_identity()}_caps6.json"
 
 
 def _load_cached() -> EngineProbe | None:
@@ -537,7 +542,17 @@ def _measure() -> EngineProbe:
                 {
                     "name": str(o.name),
                     "type": str(getattr(o, "type", "")),
-                    "choices": [str(c) for c in (getattr(o, "choices", None) or [])],
+                    # Choice objects stringify as their repr
+                    # ("CodecOptionChoice(name='cgop', help='closed GOP')"), which is
+                    # useless in a picker: keep the plain names and their help apart.
+                    "choices": [
+                        str(getattr(c, "name", c)) for c in (getattr(o, "choices", None) or [])
+                    ],
+                    "choice_help": {
+                        str(getattr(c, "name", c)): str(getattr(c, "help", "") or "")
+                        for c in (getattr(o, "choices", None) or [])
+                        if getattr(c, "help", "")
+                    },
                     "default": str(getattr(o, "default", "") or ""),
                     "min": getattr(o, "min", None),
                     "max": getattr(o, "max", None),
@@ -550,6 +565,15 @@ def _measure() -> EngineProbe:
                 p.encoder_option_schema[name] = schema
         except Exception as exc:
             logger.debug("Encoder option probe failed for %s: %s", name, exc)
+
+    # Generic surface: options every encoder declares (measured, not assumed —
+    # a future wheel with extra generic options moves this set by itself).
+    if p.encoder_option_schema:
+        common: set[str] | None = None
+        for schema in p.encoder_option_schema.values():
+            names = {str(o["name"]) for o in schema}
+            common = names if common is None else (common & names)
+        p.common_encoder_options = sorted(common or set())
 
     # ── boot-tier muxer defaults (the common write targets) ────────────────
     for muxer in _BOOT_MUXERS:
@@ -835,7 +859,32 @@ def containers_for_kind(kind: str) -> list[dict]:
                 "label": (entry.get("long_name") or name).split(" (")[0],
             },
         )
-    return list(seen.values())
+    return sorted(seen.values(), key=lambda entry: _container_sort_key(entry["container"]))
+
+
+# Presentation order only: which derived container is OFFERED FIRST. Never a
+# capability gate — every derived container is offered whatever its position.
+_CONTAINER_DISPLAY_ORDER = (
+    "mp4",
+    "mkv",
+    "mov",
+    "webm",
+    "avi",
+    "m4a",
+    "mp3",
+    "aac",
+    "flac",
+    "opus",
+    "ogg",
+    "wav",
+)
+
+
+def _container_sort_key(container: str) -> tuple[int, str]:
+    try:
+        return (_CONTAINER_DISPLAY_ORDER.index(container), container)
+    except ValueError:
+        return (len(_CONTAINER_DISPLAY_ORDER), container)
 
 
 def _still_image_codecs() -> set[str]:

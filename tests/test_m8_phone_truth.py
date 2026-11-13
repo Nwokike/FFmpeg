@@ -60,6 +60,32 @@ def test_compress_cut_join_accept_video_codec_param():
         assert sig.parameters["video_codec"].default is None
 
 
+def test_option_params_exist_on_every_encode_op():
+    """The generic option panels feed every encode op; all default to None.
+
+    Absent panels must keep the old behavior exactly (no empty option dicts
+    reaching the encoder, no muxer options invented).
+    """
+    import inspect as _inspect
+
+    from services.engine_service import EngineService
+
+    for fn_name in (
+        "convert",
+        "compress_to_target",
+        "cut_trim",
+        "extract_audio",
+        "create_gif",
+    ):
+        sig = _inspect.signature(getattr(EngineService, fn_name))
+        for param in ("encoder_options", "container_options"):
+            assert param in sig.parameters, f"{fn_name} missing {param}"
+            assert sig.parameters[param].default is None
+    # convert encodes two streams: the audio encoder needs its own option set.
+    convert_sig = _inspect.signature(EngineService.convert)
+    assert convert_sig.parameters["audio_encoder_options"].default is None
+
+
 # ── Ticker generation guard (mic resume double-increment race) ───────────────
 
 

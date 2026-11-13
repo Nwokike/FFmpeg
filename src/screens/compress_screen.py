@@ -6,6 +6,7 @@ from pathlib import Path
 
 import flet as ft
 
+from components.encoder_options import ContainerOptionRows, EncoderOptionPanel, OptionValues
 from components.tool_job_status import tool_job_row
 from core.engine_probe import codec_label
 from core.notify import ERROR, show_snack
@@ -39,6 +40,10 @@ def CompressScreen() -> ft.Control:
 
     target_mb, set_target_mb = ft.use_state(16.0)  # Default 16MB (WhatsApp)
     v_codec, set_v_codec = ft.use_state("")
+    muxer_rows, set_muxer_rows = ft.use_state([])
+    # Touched encoder settings for the chosen codec (ref: mutated in place by
+    # the panel, read once at Start — no re-render per keystroke).
+    option_values = ft.use_ref({})
 
     # Encoder-empty guard mirrors Convert: without verified video encoders
     # Start would fail late in _pick_video_encoder instead of refusing here.
@@ -53,6 +58,38 @@ def CompressScreen() -> ft.Control:
         v_codec if v_codec in available_video else (available_video[0] if available_video else "")
     )
     chosen_label = codec_label(chosen_video) if chosen_video else "—"
+
+    # Generic option panel data: measured for THIS build, never a written table.
+    encoder_schemas = (
+        app_state.probe_info.encoder_option_schema if app_state.probe_info else {}
+    ) or {}
+    common_options = list(
+        app_state.probe_info.common_encoder_options if app_state.probe_info else []
+    )
+
+    def _values_for(codec: str | None) -> OptionValues:
+        store = option_values.current
+        if not codec:
+            return OptionValues("")
+        values = store.get(codec)
+        if values is None:
+            values = OptionValues(codec)
+            store[codec] = values
+        return values
+
+    def _video_panel() -> list:
+        if not chosen_video:
+            return []
+        return [
+            EncoderOptionPanel(
+                chosen_video,
+                encoder_schemas.get(chosen_video) or [],
+                _values_for(chosen_video),
+                common_options=common_options,
+                is_dark=is_dark,
+                title="Advanced encoder settings",
+            )
+        ]
 
     # Live pipeline: derived from the queue, never a stuck local flag.
     running_job = (
@@ -91,11 +128,20 @@ def CompressScreen() -> ft.Control:
         out_name = unique_temp_name(f"{Path(media_path).stem}_compressed_{target_mb:.1f}MB", ".mp4")
         out_path = str(get_temp_dir() / out_name)
 
+        # Generic option panels: only what the user actually touched.
+        encoder_opts = _values_for(chosen_video).as_dict()
+        muxer_opts = {str(row[0]): str(row[1]) for row in muxer_rows if str(row[0]).strip()}
+
         job = Job(
             op="compress",
             input_path=media_path,
             output_path=out_path,
-            params={"target_size_mb": float(target_mb), "video_codec": chosen_video},
+            params={
+                "target_size_mb": float(target_mb),
+                "video_codec": chosen_video,
+                **({"encoder_options": encoder_opts} if encoder_opts else {}),
+                **({"container_options": muxer_opts} if muxer_opts else {}),
+            },
             original_size_bytes=orig_bytes,
         )
         ctrl.start_job(job)
@@ -172,6 +218,9 @@ def CompressScreen() -> ft.Control:
                 wrap=True,
                 spacing=SPACE_SM,
             ),
+            # Every encoder setting this build exposes for the chosen codec.
+            *_video_panel(),
+            ContainerOptionRows(muxer_rows, set_muxer_rows, is_dark=is_dark),
             # Kind gate: compress needs a video timeline.
             *(
                 [
