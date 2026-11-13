@@ -1,7 +1,8 @@
 # Engine architecture (Phase 3)
 
-Status: the generic builders are in place (commits `f1cfc29`…`f57c2a1`); worker-process
-containment is designed below and tracked as the final Phase 3 item.
+Status: Phase 3 complete (commits `f1cfc29`…`929b64e`) — generic builders,
+multi-input concat, dispatch registry, and worker-process containment (opt-in,
+regression-tested in tests/test_job_process.py).
 
 ## The problem this solves
 
@@ -92,7 +93,7 @@ clip's time base) -> optional BSF (record: h264/hevc -> Annex-B) -> clamp-mux
 `main.py`), looks it up by `job.op`, and fails loudly on unknown ops. Retry
 clones params verbatim, so every op keeps its own param contract.
 
-## Worker-process containment (designed; NOT yet implemented)
+## Worker-process containment (implemented; opt-in)
 
 Native crashes (segfault in libavcodec on a corrupt file) kill the whole app in
 thread mode. This is the remaining Phase 3 item. Design (refined while
@@ -117,7 +118,7 @@ consolidating the dispatch builder):
   cancelled child follows today's cancelled path.
 - **POSIX fork only** (`multiprocessing.get_context("fork")`); other platforms
   keep the in-thread runner, with a runtime fallback if fork fails at spawn.
-- **Required regression net before enabling**: identical-output test (same clip
-  through both runners), crash test (child `os._exit`), cancel test, progress
-  delivery test. Default stays OFF until that net exists and the device smoke
-  passes.
+- **Regression net (done)**: tests/test_job_process.py — identical output vs
+  thread mode, child crash (os._exit), child exception message, deterministic
+  mid-run cancel, progress delivery. Default stays OFF until the device smoke
+  (Engine Info full encoder set, one encode, one extraction) passes.
