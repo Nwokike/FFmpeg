@@ -1627,7 +1627,8 @@ def run_copy_job(
                     if effective_seek_s:
                         _safe_seek(inp, max(0, int(effective_seek_s * av.time_base)))
                     out = av.open(
-                        job.output_path, "w",
+                        job.output_path,
+                        "w",
                         format=job.output.container or "matroska",
                         options=job.output.options,
                     )
@@ -1722,24 +1723,18 @@ def run_copy_job(
                                             out_s,
                                         )
                                     except Exception as exc:
-                                        logger.warning(
-                                            "BSF %s unavailable: %s", bsf_name, exc
-                                        )
+                                        logger.warning("BSF %s unavailable: %s", bsf_name, exc)
 
                 src_streams = _kept_streams(inp)
                 if fi > 0:
                     # Later inputs map positionally onto the first clip's
                     # template streams; time bases stay the FIRST clip's
                     # (every input is rescaled onto that timeline in _emit).
-                    stream_map_local = {
-                        s: out_by_pos[pos] for pos, s in enumerate(src_streams)
-                    }
+                    stream_map_local = {s: out_by_pos[pos] for pos, s in enumerate(src_streams)}
                 else:
                     stream_map_local = stream_map
 
-                total_s = (
-                    float(inp.duration or 0) / float(av.time_base) if inp.duration else 0.0
-                )
+                total_s = float(inp.duration or 0) / float(av.time_base) if inp.duration else 0.0
                 last_report = 0.0
 
                 def _emit(packet) -> None:
@@ -1775,18 +1770,12 @@ def run_copy_job(
                                 packet.pts = packet.dts
                     elif job.timeline_shift:
                         pos = next(
-                            (
-                                p
-                                for p, s in enumerate(src_streams)
-                                if s.index == src_key
-                            ),
+                            (p for p, s in enumerate(src_streams) if s.index == src_key),
                             None,
                         )
                         if pos is not None:
                             native_pts = packet.pts if packet.pts is not None else 0
-                            native_dts = (
-                                packet.dts if packet.dts is not None else native_pts
-                            )
+                            native_dts = packet.dts if packet.dts is not None else native_pts
                             if pos not in _timeline_state["seen_pos"]:
                                 # First packet of THIS input: land one tick past
                                 # the previous input's final pts (continuity).
@@ -1838,12 +1827,16 @@ def run_copy_job(
                     _pause_hook(cancel_event)
                     if cancel_event and cancel_event.is_set():
                         if job.record_mode:
-                            logger.info("Recording stopped by user (%d bytes) — keeping output", bytes_out)
+                            logger.info(
+                                "Recording stopped by user (%d bytes) — keeping output", bytes_out
+                            )
                             break
                         break
                     if job.duration_cap_s is not None:
                         if time.monotonic() - start >= job.duration_cap_s:
-                            logger.info("Recording reached duration cap (%.1fs)", job.duration_cap_s)
+                            logger.info(
+                                "Recording reached duration cap (%.1fs)", job.duration_cap_s
+                            )
                             break
                     ts = packet.pts if packet.pts is not None else packet.dts
                     if ts is None:
@@ -1872,11 +1865,7 @@ def run_copy_job(
                                 f"Recording… {elapsed:.0f}s • {bytes_out // 1024} KB",
                             )
                         else:
-                            prog = (
-                                min(0.99, max(0.01, pkt_time / total_s))
-                                if total_s > 0
-                                else 0.5
-                            )
+                            prog = min(0.99, max(0.01, pkt_time / total_s)) if total_s > 0 else 0.5
                             label = (
                                 f"Joining {Path(spec_in.path).name}… ({fi + 1}/{len(job.inputs)})"
                                 if job.timeline_shift
@@ -1918,7 +1907,6 @@ def run_copy_job(
         # Zero-packet stops never trigger the muxer's lazy header write.
         Path(job.output_path).touch(exist_ok=True)
     return job.output_path
-
 
 
 class EngineService:
@@ -2864,9 +2852,7 @@ class EngineService:
         job = Job(
             output_path=output_path,
             inputs=[InputSpec(path=input_path)],
-            output=OutputSpec(
-                container="matroska", metadata=True, rotation=rotation
-            ),
+            output=OutputSpec(container="matroska", metadata=True, rotation=rotation),
             drop_indices=list(drop_indices or []),
             keep_attachments=True,
             chapters=chapters,
@@ -3052,9 +3038,7 @@ class EngineService:
         out_fps = max(1, min(int(fv.fps or 30), 60))
         out_w = max(2, (fv.width or 640) // 2 * 2)
         out_h = max(2, (fv.height or 360) // 2 * 2)
-        chosen_v = (
-            _resolve_or_raw(video_codec, "video") if video_codec else _pick_video_encoder()
-        )
+        chosen_v = _resolve_or_raw(video_codec, "video") if video_codec else _pick_video_encoder()
         job = Job(
             output_path=output_path,
             inputs=[InputSpec(path=path) for path in paths],

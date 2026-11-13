@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import logging
 import math
+import os
 import sys
 import threading
 import time
@@ -53,6 +54,58 @@ except ImportError:  # pragma: no cover
     _HAS_PERM_HANDLER = False
 
 logger = logging.getLogger(__name__)
+
+# ── worker-process containment (Phase 3 step 5) ─────────────────────────────
+# Jobs may run in a forked child so a native crash (segfault in libavcodec)
+# cannot kill the app. POSIX fork only; thread fallback everywhere else.
+# Off by default — the in-thread path stays the release behavior until the
+# isolated path has its own regression net (tests/test_job_process.py).
+JOB_PROCESS_ISOLATION = False
+
+_PROGRESS_QUEUE: Queue[tuple[Job | None, float, str]] = Queue(maxsize=1)
+
+
+def _emit_progress(job: Job, pct: float, message: str) -> None:
+    item = (job, pct, message)
+    try:
+        _PROGRESS_QUEUE.put_nowait(item)
+    except Full:
+        with contextlib.suppress(Empty):
+            _PROGRESS_QUEUE.get_nowait()
+        with contextlib.suppress(Full):
+            _PROGRESS_QUEUE.put_nowait(item)
+
+
+def _apply_run_fields(
+    job: Job, cancel_evt: threading.Event, exc: BaseException | None = None
+) -> None:
+    """Apply terminal job fields after a run. exc=None = success."""
+    if exc is None:
+        object.__setattr__(job, "status", "completed")
+        object.__setattr__(job, "progress", 1.0)
+        object.__setattr__(job, "status_message", "Completed")
+        object.__setattr__(job, "finished_at", time.time())
+        out_p = Path(job.output_path)
+        if out_p.exists() and out_p.is_file():
+            object.__setattr__(job, "output_size_bytes", out_p.stat().st_size)
+        return
+    if isinstance(exc, InterruptedError):
+        object.__setattr__(job, "status", "cancelled")
+        object.__setattr__(job, "status_message", "Cancelled")
+        object.__setattr__(job, "finished_at", time.time())
+        logger.info("Job %s cancelled", job.id)
+        return
+    cancelled = cancel_evt.is_set()
+    message = friendly_job_error(exc)
+    object.__setattr__(job, "status", "cancelled" if cancelled else "failed")
+    object.__setattr__(job, "error_message", message)
+    object.__setattr__(job, "status_message", "Cancelled" if cancelled else f"Failed: {message}")
+    object.__setattr__(job, "finished_at", time.time())
+    if isinstance(exc, EngineCapabilityError):
+        logger.warning("Job %s needs a capability this build lacks: %s", job.id, message)
+    else:
+        logger.exception("Job %s execution failed", job.id)
+
 
 # Bump when the terms text changes — every user is re-prompted on next boot.
 TERMS_VERSION = "1"
@@ -584,14 +637,7 @@ async def main(page: ft.Page) -> None:
             logger.debug("UI task skipped after page teardown: %s", exc)
 
     def _post_progress(job: Job, pct: float, message: str) -> None:
-        item = (job, pct, message)
-        try:
-            _progress_events.put_nowait(item)
-        except Full:
-            with contextlib.suppress(Empty):
-                _progress_events.get_nowait()
-            with contextlib.suppress(Full):
-                _progress_events.put_nowait(item)
+        _emit_progress(job, pct, message)
 
     async def _drain_progress() -> None:
         while True:
@@ -629,37 +675,12 @@ async def main(page: ft.Page) -> None:
         try:
             dispatch = _build_job_dispatch(engine, state, job, _on_progress, cancel_evt)
             _dispatch_job_op(dispatch, job)
+            _apply_run_fields(job, cancel_evt)
 
-            _set_worker_field(job, "status", "completed")
-            _set_worker_field(job, "progress", 1.0)
-            _set_worker_field(job, "status_message", "Completed")
-            _set_worker_field(job, "finished_at", time.time())
-            out_p = Path(job.output_path)
-            if out_p.exists() and out_p.is_file():
-                _set_worker_field(job, "output_size_bytes", out_p.stat().st_size)
-
-        except InterruptedError:
-            _set_worker_field(job, "status", "cancelled")
-            _set_worker_field(job, "status_message", "Cancelled")
-            _set_worker_field(job, "finished_at", time.time())
-            logger.info("Job %s cancelled", job.id)
+        except InterruptedError as exc:
+            _apply_run_fields(job, cancel_evt, exc)
         except Exception as exc:
-            cancelled = cancel_evt.is_set()
-            message = friendly_job_error(exc)
-            _set_worker_field(job, "status", "cancelled" if cancelled else "failed")
-            _set_worker_field(job, "error_message", message)
-            _set_worker_field(
-                job,
-                "status_message",
-                "Cancelled" if cancelled else f"Failed: {message}",
-            )
-            _set_worker_field(job, "finished_at", time.time())
-            if isinstance(exc, EngineCapabilityError):
-                # Expected on the LGPL Android wheel — a real failure, but not a
-                # crash, so it belongs in the log as context rather than a traceback.
-                logger.warning("Job %s needs a capability this build lacks: %s", job.id, message)
-            else:
-                logger.exception("Job %s execution failed", job.id)
+            _apply_run_fields(job, cancel_evt, exc)
         finally:
             _schedule_ui(_set_wakelock, False)
 
@@ -1206,19 +1227,18 @@ def _build_job_dispatch(engine, state, job, _on_progress, cancel_evt):
             cancel_event=cancel_evt,
         )
 
-
     return {
-    # name, retry clones params verbatim, and unknown ops fail loudly.
-    "convert": _run_convert,
-    "compress": _run_compress,
-    "cut": _run_cut,
-    "extract_audio": _run_extract_audio,
-    "extract_frames": _run_extract_frames,
-    "extract_subtitles": _run_extract_subtitles,
-    "record": _run_record,
-    "concat": _run_concat,
-    "remux": _run_remux,
-    "create_gif": _run_create_gif,
+        # name, retry clones params verbatim, and unknown ops fail loudly.
+        "convert": _run_convert,
+        "compress": _run_compress,
+        "cut": _run_cut,
+        "extract_audio": _run_extract_audio,
+        "extract_frames": _run_extract_frames,
+        "extract_subtitles": _run_extract_subtitles,
+        "record": _run_record,
+        "concat": _run_concat,
+        "remux": _run_remux,
+        "create_gif": _run_create_gif,
     }
 
 
@@ -1228,10 +1248,164 @@ def _dispatch_job_op(dispatch, job):
     if run is None:
         # Unknown op: fail LOUDLY naming the op. Falling through to
         # completed-doing-nothing once faked success for a typo'd op.
-        raise ValueError(
-            f"Unknown job op {job.op!r} — no engine path dispatches it"
-        )
+        raise ValueError(f"Unknown job op {job.op!r} — no engine path dispatches it")
     run()
+
+
+def _isolated_child_entry(
+    job: Job,
+    cancel_evt: threading.Event,
+    pause_evt: threading.Event,
+    send_conn,
+) -> None:
+    """Child side: run only the dispatch, report progress through the pipe.
+
+    No Flet/page/history calls happen here — the parent applies terminal
+    fields and surfs the result.
+    """
+    try:
+        import services.engine_service as _es
+
+        class _ProgressPipe:
+            # Matches the dispatch's on_progress(pct, message) protocol.
+            def put_nowait(self, pct, message) -> None:
+                try:
+                    send_conn.send((float(pct), str(message)))
+                except Exception:
+                    pass
+
+            def put(self, *a, **k) -> None:
+                self.put_nowait(*a)
+
+        # The engine's pause hook reads this module global at packet time;
+        # rebind it to the parent-mirrored event for this child.
+        _es.ENGINE_PAUSE_EVENT = pause_evt
+        pipe = _ProgressPipe()
+        dispatch = _build_job_dispatch(EngineService(), state, job, pipe.put_nowait, cancel_evt)
+        _dispatch_job_op(dispatch, job)
+    except BaseException as exc:
+        try:
+            send_conn.send(("error", friendly_job_error(exc)))
+        except Exception:
+            pass
+        raise
+    finally:
+        try:
+            send_conn.close()
+        except Exception:
+            pass
+
+
+def _execute_isolated(thread_runner, job: Job, cancel_evt: threading.Event) -> None:
+    """Run one job in a forked child; fall back to the thread runner when
+    fork is unavailable (Windows) or fails at spawn."""
+    if os.name != "posix":
+        thread_runner(job, cancel_evt)
+        return
+    try:
+        import multiprocessing as mp
+
+        ctx = mp.get_context("fork")
+    except (ImportError, ValueError):
+        thread_runner(job, cancel_evt)
+        return
+
+    recv, send = ctx.Pipe(duplex=False)
+    child_cancel = ctx.Event()
+    child_pause = ctx.Event()
+    try:
+        proc = ctx.Process(
+            target=_isolated_child_entry,
+            args=(job, child_cancel, child_pause, send),
+            daemon=True,
+        )
+        proc.start()
+    except Exception as exc:
+        logger.warning("job process isolation unavailable (%s); running in-thread", exc)
+        with contextlib.suppress(Exception):
+            recv.close()
+            send.close()
+        thread_runner(job, cancel_evt)
+        return
+    send.close()
+
+    import services.engine_service as _es
+
+    parent_pause = _es.ENGINE_PAUSE_EVENT
+    child_error: str | None = None
+    try:
+        while True:
+            if cancel_evt.is_set():
+                child_cancel.set()
+            if parent_pause is not None and parent_pause.is_set():
+                child_pause.set()
+            else:
+                child_pause.clear()
+            if recv.poll(0.05):
+                try:
+                    msg = recv.recv()
+                except EOFError:
+                    break
+                if isinstance(msg, tuple) and msg and msg[0] == "error":
+                    child_error = str(msg[1])
+                    continue
+                if isinstance(msg, tuple) and len(msg) == 2:
+                    try:
+                        _PROGRESS_QUEUE.put_nowait((job, float(msg[0]), str(msg[1])))
+                    except Full:
+                        with contextlib.suppress(Empty):
+                            _PROGRESS_QUEUE.get_nowait()
+                        with contextlib.suppress(Full):
+                            _PROGRESS_QUEUE.put_nowait((job, float(msg[0]), str(msg[1])))
+            if proc.exitcode is not None:
+                while recv.poll(0):
+                    try:
+                        msg = recv.recv()
+                        if isinstance(msg, tuple) and msg and msg[0] == "error":
+                            child_error = str(msg[1])
+                    except EOFError:
+                        break
+                break
+    finally:
+        with contextlib.suppress(Exception):
+            recv.close()
+
+    proc.join(timeout=5)
+    if proc.is_alive():
+        proc.terminate()
+        proc.join(timeout=2)
+
+    if cancel_evt.is_set():
+        # Thread-mode parity: the engine deletes the partial output and raises
+        # InterruptedError; if the child exited before noticing the cancel,
+        # do the same cleanup here so a cancelled job never leaves a file.
+        if job.op != "record":
+            try:
+                from services.engine_service import _discard_cancelled
+
+                _discard_cancelled(job.output_path)
+            except Exception:
+                pass
+        _apply_run_fields(job, cancel_evt, InterruptedError())
+        return
+    if proc.exitcode != 0:
+        _apply_run_fields(
+            job,
+            cancel_evt,
+            RuntimeError(child_error or f"job process exited with code {proc.exitcode}"),
+        )
+        return
+    _apply_run_fields(job, cancel_evt)
+
+
+def _isolated_runner_factory(thread_runner):
+    """Queue-runner that wraps the in-thread runner in process isolation."""
+
+    def _runner(job: Job, cancel_evt: threading.Event) -> None:
+        _execute_isolated(thread_runner, job, cancel_evt)
+
+    return _runner
+
 
 if __name__ == "__main__":
     assets_dir = str(Path(__file__).resolve().parent / "assets")
