@@ -18,7 +18,6 @@ def test_https_routes_through_httpx_only_on_a_tls_less_wheel(monkeypatch):
     That is the stock bare-LGPL flet-libffmpeg (and the old Mobile Forge build);
     the capability probe decides, not the platform.
     """
-    import services.engine_service as es
 
     sentinel = MagicMock()
     monkeypatch.setattr("services.engine_service.options._TLS_OK", False)
@@ -57,7 +56,6 @@ def test_http_routes_straight_to_native_av_open(monkeypatch):
 
 def test_https_uses_av_open_when_the_wheel_has_tls(monkeypatch):
     """Our wrap wheel ships TLS: https goes straight to av.open."""
-    import services.engine_service as es
 
     container = MagicMock()
     monkeypatch.setattr("services.engine_service.options._TLS_OK", True)

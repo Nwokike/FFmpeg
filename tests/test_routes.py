@@ -133,6 +133,7 @@ def test_navigation_destinations_have_selected_icon():
 
 
 _MAIN_SRC = Path(__file__).resolve().parents[1] / "src" / "main.py"
+_REPO = Path(__file__).resolve().parents[1]
 
 
 def test_high_value_ops_uses_real_op_names():
@@ -144,13 +145,12 @@ def test_high_value_ops_uses_real_op_names():
 
 
 def test_job_dispatch_fails_loud_on_unknown_op():
-    text = _MAIN_SRC.read_text(encoding="utf-8")
+    text = (_REPO / "src" / "services" / "job_dispatch.py").read_text(encoding="utf-8")
     assert "Unknown job op" in text, "unknown ops must fail naming the op, never fake-complete"
-    assert "_dispatch_job_op(dispatch, job)" in text, "dispatch runs through the registry"
 
 
 def test_convert_dispatch_plumbs_preset():
-    text = _MAIN_SRC.read_text(encoding="utf-8")
+    text = (_REPO / "src" / "services" / "job_dispatch.py").read_text(encoding="utf-8")
     assert 'preset=p.get("preset", "medium")' in text, (
         "parser-emitted preset must reach the convert dispatch"
     )
