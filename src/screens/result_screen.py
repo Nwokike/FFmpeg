@@ -25,9 +25,11 @@ from core.tokens import (
     FONT_SM,
     FONT_XS,
     RADIUS_LG,
+    RING_MD,
     SPACE_LG,
     SPACE_MD,
     SPACE_SM,
+    STAGE_H,
 )
 from state.controller_ctx import use_controller
 
@@ -399,7 +401,7 @@ def ResultScreen() -> ft.Control:
                         [
                             ft.Container(
                                 content=video_control,
-                                height=240,
+                                height=STAGE_H,
                                 bgcolor=STAGE_BLACK,
                                 border_radius=RADIUS_LG,
                             )
@@ -409,7 +411,7 @@ def ResultScreen() -> ft.Control:
                             ft.Container(
                                 content=ft.Row(
                                     controls=[
-                                        ft.ProgressRing(width=22, height=22),
+                                        ft.ProgressRing(width=RING_MD, height=RING_MD),
                                         ft.Text(
                                             "Preparing preview…",
                                             size=FONT_SM,
@@ -420,7 +422,7 @@ def ResultScreen() -> ft.Control:
                                     spacing=SPACE_SM,
                                 ),
                                 alignment=ft.Alignment.CENTER,
-                                height=240,
+                                height=STAGE_H,
                                 bgcolor=STAGE_BLACK,
                                 border_radius=RADIUS_LG,
                             )
@@ -483,7 +485,7 @@ def ResultScreen() -> ft.Control:
             content=ft.Image(
                 src=out_path,
                 fit=ft.BoxFit.CONTAIN,
-                height=240,
+                height=STAGE_H,
             ),
             alignment=ft.Alignment.CENTER,
             padding=SPACE_SM,

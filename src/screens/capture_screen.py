@@ -41,6 +41,7 @@ from core.tokens import (
     RADIUS_MD,
     SPACE_MD,
     SPACE_SM,
+    STAGE_H,
 )
 from state.controller_ctx import use_controller
 from state.service_ctx import use_services
@@ -1224,7 +1225,7 @@ def CaptureScreen() -> ft.Control:
         )
         preview = ft.Container(
             content=inner,
-            height=300 if preview_aspect is None else None,
+            height=STAGE_H if preview_aspect is None else None,
             aspect_ratio=preview_aspect,
             border_radius=RADIUS_LG,
             clip_behavior=ft.ClipBehavior.ANTI_ALIAS,

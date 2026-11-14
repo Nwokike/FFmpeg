@@ -1,6 +1,6 @@
 # Ability matrix
 
-_Wheel: av 19.0.2 · FFmpeg 9.0.2 · build cbcc9a8fb0e4 · generated 2026-11-14 10:56 UTC · 794/1095 abilities green, 0 failed, 301 skipped_
+_Wheel: av 19.0.2 · FFmpeg 9.0.2 · build cbcc9a8fb0e4 · generated 2026-11-14 13:42 UTC · 792/1095 abilities green, 0 failed, 303 skipped_
 
 One row per ability; the test id is the ability. Run `uv run python scripts/ability_report.py` to regenerate.
 
@@ -98,6 +98,7 @@ One row per ability; the test id is the ability. Run `uv run python scripts/abil
 | `test_muxer[a64]` | a64: raw stream written, not self-describing ([Errno 1094995529] Invalid data found when processing input: '/t |
 | `test_muxer[ac4]` | ac4: no encodable default codec in this wheel |
 | `test_muxer[aea]` | aea: no encodable default codec in this wheel |
+| `test_muxer[alp]` | alp: Invalid argument: '/tmp/pytest-of-maikel/pytest-111/ability182/mux_alp.tun' returned 22; last error log:  |
 | `test_muxer[alsa]` | alsa: a raw/pseudo target with no file extension |
 | `test_muxer[amr]` | amr: no encodable default codec in this wheel |
 | `test_muxer[amv]` | amv: Invalid argument: 'avcodec_open2("adpcm_ima_amv", {})' returned 22; last error log: [adpcm_ima_amv] 22050 |
@@ -118,11 +119,11 @@ One row per ability; the test id is the ability. Run `uv run python scripts/abil
 | `test_muxer[crc]` | crc: a raw/pseudo target with no file extension |
 | `test_muxer[dash]` | dash: [Errno 1313558101] Unknown error occurred: 'avcodec_open2("h264_amf", {})'; last error log: [h264_amf] F |
 | `test_muxer[data]` | data: no encodable default codec in this wheel |
-| `test_muxer[daud]` | daud: Invalid argument: '/tmp/pytest-of-maikel/pytest-58/ability196/mux_daud.daud' returned 22; last error log |
+| `test_muxer[daud]` | daud: Invalid argument: '/tmp/pytest-of-maikel/pytest-111/ability196/mux_daud.302' returned 22; last error log |
 | `test_muxer[dirac]` | dirac: Invalid argument: 'avcodec_send_frame()' returned 22 |
 | `test_muxer[dnxhd]` | dnxhd: Invalid argument: 'avcodec_open2("dnxhd", {})' returned 22; last error log: [dnxhd] Frame size: 1440x10 |
 | `test_muxer[dts]` | dts: no encodable default codec in this wheel |
-| `test_muxer[dv]` | dv: [Errno 1094995529] Invalid data found when processing input: '/tmp/pytest-of-maikel/pytest-58/ability200/m |
+| `test_muxer[dv]` | dv: [Errno 1094995529] Invalid data found when processing input: '/tmp/pytest-of-maikel/pytest-111/ability200/ |
 | `test_muxer[evc]` | evc: no encodable default codec in this wheel |
 | `test_muxer[f32be]` | f32be: a raw/pseudo target with no file extension |
 | `test_muxer[f32le]` | f32le: a raw/pseudo target with no file extension |
@@ -131,8 +132,8 @@ One row per ability; the test id is the ability. Run `uv run python scripts/abil
 | `test_muxer[fbdev]` | fbdev: a raw/pseudo target with no file extension |
 | `test_muxer[ffmetadata]` | ffmetadata: no encodable default codec in this wheel |
 | `test_muxer[fifo]` | fifo: no encodable default codec in this wheel |
-| `test_muxer[film_cpk]` | film_cpk: Invalid argument: '/tmp/pytest-of-maikel/pytest-58/ability204/mux_film_cpk.cpk' returned 22; last er |
-| `test_muxer[filmstrip]` | filmstrip: [Errno 1094995529] Invalid data found when processing input: '/tmp/pytest-of-maikel/pytest-58/abili |
+| `test_muxer[film_cpk]` | film_cpk: Invalid argument: '/tmp/pytest-of-maikel/pytest-111/ability204/mux_film_cpk.cpk' returned 22; last e |
+| `test_muxer[filmstrip]` | filmstrip: [Errno 1094995529] Invalid data found when processing input: '/tmp/pytest-of-maikel/pytest-111/abil |
 | `test_muxer[framecrc]` | framecrc: a raw/pseudo target with no file extension |
 | `test_muxer[framehash]` | framehash: a raw/pseudo target with no file extension |
 | `test_muxer[framemd5]` | framemd5: a raw/pseudo target with no file extension |
@@ -141,7 +142,7 @@ One row per ability; the test id is the ability. Run `uv run python scripts/abil
 | `test_muxer[g726]` | g726: a raw/pseudo target with no file extension |
 | `test_muxer[g726le]` | g726le: a raw/pseudo target with no file extension |
 | `test_muxer[gsm]` | gsm: no encodable default codec in this wheel |
-| `test_muxer[gxf]` | gxf: Invalid argument: '/tmp/pytest-of-maikel/pytest-58/ability212/mux_gxf.gxf' returned 22; last error log: [ |
+| `test_muxer[gxf]` | gxf: Invalid argument: '/tmp/pytest-of-maikel/pytest-111/ability212/mux_gxf.gxf' returned 22; last error log:  |
 | `test_muxer[h261]` | h261: Invalid argument: 'avcodec_open2("h261", {})' returned 22; last error log: [h261] The specified picture  |
 | `test_muxer[h263]` | h263: Invalid argument: 'avcodec_open2("h263", {})' returned 22; last error log: [h263] The specified picture  |
 | `test_muxer[h264]` | h264: [Errno 1313558101] Unknown error occurred: 'avcodec_open2("h264_amf", {})'; last error log: [h264_amf] F |
@@ -149,10 +150,10 @@ One row per ability; the test id is the ability. Run `uv run python scripts/abil
 | `test_muxer[hds]` | hds: a raw/pseudo target with no file extension |
 | `test_muxer[hevc]` | hevc: [Errno 1313558101] Unknown error occurred: 'avcodec_open2("hevc_amf", {})'; last error log: [hevc_amf] F |
 | `test_muxer[hls]` | hls: [Errno 1313558101] Unknown error occurred: 'avcodec_open2("h264_amf", {})'; last error log: [h264_amf] Fa |
-| `test_muxer[iamf]` | iamf: Invalid argument: '/tmp/pytest-of-maikel/pytest-58/ability218/mux_iamf.iamf' returned 22; last error log |
-| `test_muxer[ico]` | ico: Invalid argument: '/tmp/pytest-of-maikel/pytest-58/ability219/mux_ico.ico' returned 22; last error log: [ |
+| `test_muxer[iamf]` | iamf: Invalid argument: '/tmp/pytest-of-maikel/pytest-111/ability218/mux_iamf.iamf' returned 22; last error lo |
+| `test_muxer[ico]` | ico: Invalid argument: '/tmp/pytest-of-maikel/pytest-111/ability219/mux_ico.ico' returned 22; last error log:  |
 | `test_muxer[ilbc]` | ilbc: no encodable default codec in this wheel |
-| `test_muxer[image2]` | image2: Invalid argument: '/tmp/pytest-of-maikel/pytest-58/ability220/mux_image2.tiff' returned 22; last error |
+| `test_muxer[image2]` | image2: Invalid argument: '/tmp/pytest-of-maikel/pytest-111/ability220/mux_image2.pfm' returned 22; last error |
 | `test_muxer[image2pipe]` | image2pipe: a raw/pseudo target with no file extension |
 | `test_muxer[ivf]` | ivf: [Errno 1313558101] Unknown error occurred: 'avcodec_open2("av1_amf", {})'; last error log: [av1_amf] Fail |
 | `test_muxer[jacosub]` | jacosub: no encodable default codec in this wheel |
@@ -163,20 +164,20 @@ One row per ability; the test id is the ability. Run `uv run python scripts/abil
 | `test_muxer[microdvd]` | microdvd: no encodable default codec in this wheel |
 | `test_muxer[mkvtimestamp_v2]` | mkvtimestamp_v2: a raw/pseudo target with no file extension |
 | `test_muxer[mlp]` | mlp: no encodable default codec in this wheel |
-| `test_muxer[mmf]` | mmf: Invalid argument: '/tmp/pytest-of-maikel/pytest-58/ability230/mux_mmf.mmf' returned 22; last error log: [ |
-| `test_muxer[mxf]` | mxf: [Errno 1] Operation not permitted: '/tmp/pytest-of-maikel/pytest-58/ability241/mux_mxf.mxf'; last error l |
+| `test_muxer[mmf]` | mmf: Invalid argument: '/tmp/pytest-of-maikel/pytest-111/ability230/mux_mmf.mmf' returned 22; last error log:  |
+| `test_muxer[mxf]` | mxf: [Errno 1] Operation not permitted: '/tmp/pytest-of-maikel/pytest-111/ability241/mux_mxf.mxf'; last error  |
 | `test_muxer[mxf_d10]` | mxf_d10: a raw/pseudo target with no file extension |
 | `test_muxer[mxf_opatom]` | mxf_opatom: Invalid argument: 'avcodec_open2("dnxhd", {})' returned 22; last error log: [dnxhd] Frame size: 14 |
 | `test_muxer[null]` | null: a raw/pseudo target with no file extension |
 | `test_muxer[obu]` | obu: [Errno 1313558101] Unknown error occurred: 'avcodec_open2("av1_amf", {})'; last error log: [av1_amf] Fail |
-| `test_muxer[oma]` | oma: Invalid argument: '/tmp/pytest-of-maikel/pytest-58/ability248/mux_oma.oma' returned 22; last error log: [ |
+| `test_muxer[oma]` | oma: Invalid argument: '/tmp/pytest-of-maikel/pytest-111/ability248/mux_oma.aa3' returned 22; last error log:  |
 | `test_muxer[oss]` | oss: a raw/pseudo target with no file extension |
 | `test_muxer[pdv]` | pdv: [Errno 733130664] Experimental feature: 'avcodec_open2("pdv", {})'; last error log: [pdv] The encoder 'pd |
-| `test_muxer[psp]` | psp: Invalid argument: '/tmp/pytest-of-maikel/pytest-58/ability251/mux_psp.psp' returned 22; last error log: [ |
-| `test_muxer[rawvideo]` | rawvideo: raw stream written, not self-describing (Invalid argument: '/tmp/pytest-of-maikel/pytest-58/ability2 |
+| `test_muxer[psp]` | psp: Invalid argument: '/tmp/pytest-of-maikel/pytest-111/ability251/mux_psp.psp' returned 22; last error log:  |
+| `test_muxer[rawvideo]` | rawvideo: raw stream written, not self-describing (Invalid argument: '/tmp/pytest-of-maikel/pytest-111/ability |
 | `test_muxer[rcwt]` | rcwt: no encodable default codec in this wheel |
 | `test_muxer[roq]` | roq: Invalid argument: 'avcodec_open2("roq_dpcm", {})' returned 22; last error log: [roq_dpcm] Audio must be 2 |
-| `test_muxer[rso]` | rso: [Errno 1094995529] Invalid data found when processing input: '/tmp/pytest-of-maikel/pytest-58/ability255/ |
+| `test_muxer[rso]` | rso: [Errno 1094995529] Invalid data found when processing input: '/tmp/pytest-of-maikel/pytest-111/ability255 |
 | `test_muxer[rtp]` | rtp: a raw/pseudo target with no file extension |
 | `test_muxer[rtp_mpegts]` | rtp_mpegts: a raw/pseudo target with no file extension |
 | `test_muxer[rtsp]` | rtsp: a raw/pseudo target with no file extension |
@@ -223,32 +224,33 @@ One row per ability; the test id is the ability. Run `uv run python scripts/abil
 | `test_container[video:avif]` | avif: [Errno 1313558101] Unknown error occurred: 'avcodec_open2("av1_amf", {})'; last error log: [av1_amf] Fai |
 | `test_container[video:drc]` | drc: Invalid argument: 'avcodec_send_frame()' returned 22 |
 | `test_container[video:f4v]` | f4v: [Errno 1313558101] Unknown error occurred: 'avcodec_open2("h264_amf", {})'; last error log: [h264_amf] Fa |
-| `test_container[video:gxf]` | gxf: Invalid argument: '/tmp/pytest-of-maikel/pytest-58/ability295/container_gxf.gxf' returned 22; last error  |
+| `test_container[video:gxf]` | gxf: Invalid argument: '/tmp/pytest-of-maikel/pytest-111/ability295/container_gxf.gxf' returned 22; last error |
 | `test_container[video:h261]` | h261: Invalid argument: 'avcodec_open2("h261", {})' returned 22; last error log: [h261] The specified picture  |
 | `test_container[video:h263]` | h263: Invalid argument: 'avcodec_open2("h263", {})' returned 22; last error log: [h263] The specified picture  |
 | `test_container[video:h264]` | h264: [Errno 1313558101] Unknown error occurred: 'avcodec_open2("h264_amf", {})'; last error log: [h264_amf] F |
 | `test_container[video:hevc]` | hevc: [Errno 1313558101] Unknown error occurred: 'avcodec_open2("hevc_amf", {})'; last error log: [hevc_amf] F |
 | `test_container[video:ismv]` | ismv: [Errno 1313558101] Unknown error occurred: 'avcodec_open2("av1_amf", {})'; last error log: [av1_amf] Fai |
 | `test_container[video:ivf]` | ivf: [Errno 1313558101] Unknown error occurred: 'avcodec_open2("av1_amf", {})'; last error log: [av1_amf] Fail |
-| `test_container[video:mxf]` | mxf: [Errno 1] Operation not permitted: '/tmp/pytest-of-maikel/pytest-58/ability310/container_mxf.mxf'; last e |
+| `test_container[video:mxf]` | mxf: [Errno 1] Operation not permitted: '/tmp/pytest-of-maikel/pytest-111/ability310/container_mxf.mxf'; last  |
 | `test_container[video:obu]` | obu: [Errno 1313558101] Unknown error occurred: 'avcodec_open2("av1_amf", {})'; last error log: [av1_amf] Fail |
 | `test_container[video:pdv]` | pdv: [Errno 733130664] Experimental feature: 'avcodec_open2("pdv", {})'; last error log: [pdv] The encoder 'pd |
 | `test_container[video:psp]` | psp: [Errno 1313558101] Unknown error occurred: 'avcodec_open2("av1_amf", {})'; last error log: [av1_amf] Fail |
 | `test_container[video:rm]` | rm: Invalid argument: 'avcodec_open2("rv10", {})' returned 22; last error log: [rv10] width and height must be |
 | `test_container[audio:amv]` | amv: Invalid argument: 'avcodec_open2("adpcm_ima_amv", {})' returned 22; last error log: [adpcm_ima_amv] 22050 |
 | `test_container[audio:asf]` | asf: Invalid argument: 'avcodec_open2("wmav2", {})' returned 22; last error log: [wmav2] bitrate too low: got  |
-| `test_container[audio:cpk]` | cpk: Invalid argument: '/tmp/pytest-of-maikel/pytest-58/ability375/container_cpk.cpk' returned 22; last error  |
-| `test_container[audio:daud]` | daud: Invalid argument: '/tmp/pytest-of-maikel/pytest-58/ability376/container_daud.302' returned 22; last erro |
-| `test_container[audio:dv]` | dv: [Errno 1094995529] Invalid data found when processing input: '/tmp/pytest-of-maikel/pytest-58/ability379/c |
+| `test_container[audio:cpk]` | cpk: Invalid argument: '/tmp/pytest-of-maikel/pytest-111/ability375/container_cpk.cpk' returned 22; last error |
+| `test_container[audio:daud]` | daud: Invalid argument: '/tmp/pytest-of-maikel/pytest-111/ability376/container_daud.302' returned 22; last err |
+| `test_container[audio:dv]` | dv: [Errno 1094995529] Invalid data found when processing input: '/tmp/pytest-of-maikel/pytest-111/ability379/ |
 | `test_container[audio:g723_1]` | g723_1: Invalid argument: 'avcodec_open2("g723_1", {})' returned 22; last error log: [g723_1] mono |
-| `test_container[audio:gxf]` | gxf: Invalid argument: '/tmp/pytest-of-maikel/pytest-58/ability389/container_gxf.gxf' returned 22; last error  |
-| `test_container[audio:iamf]` | iamf: Invalid argument: '/tmp/pytest-of-maikel/pytest-58/ability390/container_iamf.iamf' returned 22; last err |
-| `test_container[audio:mmf]` | mmf: Invalid argument: '/tmp/pytest-of-maikel/pytest-58/ability399/container_mmf.mmf' returned 22; last error  |
-| `test_container[audio:mxf]` | mxf: [Errno 1] Operation not permitted: '/tmp/pytest-of-maikel/pytest-58/ability404/container_mxf.mxf'; last e |
-| `test_container[audio:psp]` | psp: Invalid argument: '/tmp/pytest-of-maikel/pytest-58/ability413/container_psp.psp' returned 22; last error  |
+| `test_container[audio:gxf]` | gxf: Invalid argument: '/tmp/pytest-of-maikel/pytest-111/ability389/container_gxf.gxf' returned 22; last error |
+| `test_container[audio:iamf]` | iamf: Invalid argument: '/tmp/pytest-of-maikel/pytest-111/ability390/container_iamf.iamf' returned 22; last er |
+| `test_container[audio:mmf]` | mmf: Invalid argument: '/tmp/pytest-of-maikel/pytest-111/ability399/container_mmf.mmf' returned 22; last error |
+| `test_container[audio:mxf]` | mxf: [Errno 1] Operation not permitted: '/tmp/pytest-of-maikel/pytest-111/ability404/container_mxf.mxf'; last  |
+| `test_container[audio:psp]` | psp: Invalid argument: '/tmp/pytest-of-maikel/pytest-111/ability411/container_psp.psp' returned 22; last error |
 | `test_container[audio:roq]` | roq: Invalid argument: 'avcodec_open2("roq_dpcm", {})' returned 22; last error log: [roq_dpcm] Audio must be 2 |
-| `test_container[audio:rso]` | rso: [Errno 1094995529] Invalid data found when processing input: '/tmp/pytest-of-maikel/pytest-58/ability417/ |
-| `test_container[audio:wma]` | wma: Invalid argument: 'avcodec_open2("wmav2", {})' returned 22; last error log: [wmav2] bitrate too low: got  |
+| `test_container[audio:rso]` | rso: [Errno 1094995529] Invalid data found when processing input: '/tmp/pytest-of-maikel/pytest-111/ability415 |
+| `test_container[audio:tun]` | tun: Invalid argument: '/tmp/pytest-of-maikel/pytest-111/ability432/container_tun.tun' returned 22; last error |
+| `test_container[audio:wmv]` | wmv: Invalid argument: 'avcodec_open2("wmav2", {})' returned 22; last error log: [wmav2] bitrate too low: got  |
 | `test_extract_subtitles[ass]` | ass: covered by the container/subs assets |
 | `test_extract_subtitles[webvtt]` | webvtt: covered by the container/subs assets |
 | `test_video_encoder_option_applies[libsvtav1]` | libsvtav1: Invalid argument: 'avcodec_open2("libsvtav1", {\'crf\': \'30\', \'b\': \'500000\'})' returned 22; l |
@@ -296,7 +298,7 @@ One row per ability; the test id is the ability. Run `uv run python scripts/abil
 | `test_video_encoder_option_applies[qoi]` | qoi: no container in this wheel carries it |
 | `test_video_encoder_option_applies[roqvideo]` | roqvideo: no container in this wheel carries it |
 | `test_video_encoder_option_applies[rv10]` | rv10: Invalid argument: 'avcodec_open2("rv10", {\'b\': \'500000\'})' returned 22; last error log: [rv10] width |
-| `test_video_encoder_option_applies[rv20]` | rv20: [Errno 1163346256] Not yet implemented in FFmpeg, patches welcome: '/tmp/pytest-of-maikel/pytest-58/abil |
+| `test_video_encoder_option_applies[rv20]` | rv20: [Errno 1163346256] Not yet implemented in FFmpeg, patches welcome: '/tmp/pytest-of-maikel/pytest-111/abi |
 | `test_video_encoder_option_applies[smc]` | smc: palette-only output (pal8) — needs a pal8 source |
 | `test_video_encoder_option_applies[sunrast]` | sunrast: no container in this wheel carries it |
 | `test_video_encoder_option_applies[vbn]` | vbn: no container in this wheel carries it |
@@ -316,8 +318,8 @@ One row per ability; the test id is the ability. Run `uv run python scripts/abil
 |---|---|---|---|
 | Video encoders | 116 | 0 | 110 |
 | Audio encoders | 38 | 0 | 33 |
-| Muxers | 67 | 0 | 120 |
-| Containers | 70 | 0 | 36 |
+| Muxers | 66 | 0 | 121 |
+| Containers | 69 | 0 | 37 |
 | Filters | 468 | 0 | 0 |
 | Extract targets | 10 | 0 | 2 |
 | Tools | 9 | 0 | 0 |

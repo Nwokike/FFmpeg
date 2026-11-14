@@ -24,7 +24,16 @@ from core.theme import (
     TEXT_MUTED_LIGHT,
     is_dark_mode,
 )
-from core.tokens import FONT_LG, FONT_MD, FONT_SM, FONT_XS, RADIUS_LG, SPACE_MD, SPACE_SM
+from core.tokens import (
+    FONT_LG,
+    FONT_MD,
+    FONT_SM,
+    FONT_XS,
+    RADIUS_LG,
+    SPACE_MD,
+    SPACE_SM,
+    THUMB_STRIP_H,
+)
 from services.engine_service import EngineService
 from state.controller_ctx import use_controller
 
@@ -549,7 +558,7 @@ def CutScreen() -> ft.Control:
                         expand=True,
                     )
                 ),
-                height=160,
+                height=THUMB_STRIP_H,
                 border_radius=RADIUS_LG,
                 clip_behavior=ft.ClipBehavior.ANTI_ALIAS,
                 bgcolor=STAGE_BLACK,

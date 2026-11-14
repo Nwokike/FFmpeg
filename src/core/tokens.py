@@ -39,3 +39,13 @@ ICON_HERO = 48
 ANIM_FAST = 150
 ANIM_NORMAL = 250
 ANIM_SLOW = 400
+
+# Layout constants — recurring control geometry.
+BUTTON_H = 48
+STAGE_H = 240
+PREVIEW_SM_H = 180
+THUMB_STRIP_H = 160
+RING_SM = 18
+RING_MD = 22
+DIALOG_W = 520
+DIALOG_H = 420

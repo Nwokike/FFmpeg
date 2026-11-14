@@ -46,7 +46,7 @@ from core.theme import (
     TEXT_MUTED_LIGHT,
     is_dark_mode,
 )
-from core.tokens import FONT_LG, FONT_MD, FONT_SM, FONT_XS, RADIUS_LG, SPACE_MD, SPACE_SM
+from core.tokens import FONT_LG, FONT_MD, FONT_SM, FONT_XS, RADIUS_LG, RING_MD, SPACE_MD, SPACE_SM
 from services.engine_service import EngineService
 from state.controller_ctx import use_controller
 
@@ -490,7 +490,7 @@ def StreamsScreen() -> ft.Control:
             return ft.Container(
                 content=ft.Column(
                     controls=[
-                        ft.ProgressRing(width=36, height=36),
+                        ft.ProgressRing(width=RING_MD * 1.5, height=RING_MD * 1.5),
                         ft.Text("Loading stream…", size=FONT_SM, color=ft.Colors.WHITE),
                     ],
                     horizontal_alignment=ft.CrossAxisAlignment.CENTER,
