@@ -121,7 +121,7 @@ def test_master_variant_resolves_to_media_segments(monkeypatch, tmp_path):
             return GetResp(bodies[url])
 
     monkeypatch.setattr(httpx, "Client", FakeClient)
-    monkeypatch.setattr("services.engine_service.get_temp_dir", lambda: tmp_path)
+    monkeypatch.setattr("services.engine_service.ops_network.get_temp_dir", lambda: tmp_path)
     import av
 
     opened = {}
@@ -190,7 +190,7 @@ def test_html_error_segment_fails_loud(monkeypatch, tmp_path):
             return GetResp("#EXTM3U\nseg1.ts\n")
 
     monkeypatch.setattr(httpx, "Client", FakeClient)
-    monkeypatch.setattr("services.engine_service.get_temp_dir", lambda: tmp_path)
+    monkeypatch.setattr("services.engine_service.ops_network.get_temp_dir", lambda: tmp_path)
     with pytest.raises(ValueError, match="error page"):
         EngineService._open_https_via_httpx("https://x.example.com/live.m3u8")
 
@@ -235,7 +235,7 @@ def test_encrypted_playlist_refused_loud(monkeypatch, tmp_path):
             return GetResp(ENCRYPTED)
 
     monkeypatch.setattr(httpx, "Client", FakeClient)
-    monkeypatch.setattr("services.engine_service.get_temp_dir", lambda: tmp_path)
+    monkeypatch.setattr("services.engine_service.ops_network.get_temp_dir", lambda: tmp_path)
     with pytest.raises(ValueError, match="encrypted"):
         EngineService._open_https_via_httpx("https://x.example.com/live.m3u8")
 
@@ -350,7 +350,7 @@ def test_plain_file_single_get(monkeypatch, tmp_path):
             return Resp()
 
     monkeypatch.setattr(httpx, "Client", FakeClient)
-    monkeypatch.setattr("services.engine_service.get_temp_dir", lambda: tmp_path)
+    monkeypatch.setattr("services.engine_service.ops_network.get_temp_dir", lambda: tmp_path)
     import av
 
     class FakeContainer:
@@ -485,7 +485,7 @@ def test_https_uses_the_native_path_when_this_wheel_has_tls(monkeypatch):
     """A wheel with a TLS handler must open https directly — no httpx detour."""
     import services.engine_service as es
 
-    monkeypatch.setattr(es, "_TLS_OK", True)
+    monkeypatch.setattr("services.engine_service.options._TLS_OK", True)
     seen: dict = {}
 
     def _fake_open(path, *args, **kwargs):
@@ -503,7 +503,7 @@ def test_https_falls_back_to_httpx_only_without_tls(monkeypatch):
     """The stock bare-LGPL wheel has no TLS: then, and only then, httpx."""
     import services.engine_service as es
 
-    monkeypatch.setattr(es, "_TLS_OK", False)
+    monkeypatch.setattr("services.engine_service.options._TLS_OK", False)
 
     def _no_native(*args, **kwargs):
         raise AssertionError("native av.open must not run on a wheel without TLS")
@@ -525,7 +525,7 @@ def test_https_falls_back_to_httpx_only_without_tls(monkeypatch):
 def test_plain_http_never_takes_the_tls_fallback(monkeypatch):
     import services.engine_service as es
 
-    monkeypatch.setattr(es, "_TLS_OK", False)
+    monkeypatch.setattr("services.engine_service.options._TLS_OK", False)
     monkeypatch.setattr(es.av, "open", lambda path, *a, **k: _FakeContainer())
     container, cleanup = EngineService._open_network_input("http://example.com/a.ts")
     assert isinstance(container, _FakeContainer) and cleanup is None

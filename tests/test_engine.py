@@ -90,7 +90,9 @@ def test_android_lgpl_wheel_never_returns_an_unverified_encoder(monkeypatch):
     def mobile_supports(name: str, mode: str) -> bool:
         return mode == "w" and name in lgpl_only
 
-    monkeypatch.setattr(es, "_codec_supports_mode", mobile_supports)
+    monkeypatch.setattr(
+        "services.engine_service.resolve._codec_supports_mode", mobile_supports
+    )
 
     # An encoder this build really has resolves fine…
     assert es._resolve_video_codec("mpeg4") == "mpeg4"

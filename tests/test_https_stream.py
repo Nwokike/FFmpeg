@@ -21,7 +21,7 @@ def test_https_routes_through_httpx_only_on_a_tls_less_wheel(monkeypatch):
     import services.engine_service as es
 
     sentinel = MagicMock()
-    monkeypatch.setattr(es, "_TLS_OK", False)
+    monkeypatch.setattr("services.engine_service.options._TLS_OK", False)
     monkeypatch.setattr(
         EngineService,
         "_open_https_via_httpx",
@@ -60,7 +60,7 @@ def test_https_uses_av_open_when_the_wheel_has_tls(monkeypatch):
     import services.engine_service as es
 
     container = MagicMock()
-    monkeypatch.setattr(es, "_TLS_OK", True)
+    monkeypatch.setattr("services.engine_service.options._TLS_OK", True)
     monkeypatch.setattr(av, "open", lambda *a, **k: container)
     monkeypatch.setattr(
         EngineService,

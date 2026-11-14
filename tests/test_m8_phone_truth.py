@@ -216,7 +216,9 @@ def test_verifier_defects_closed():
     from pathlib import Path
 
     root = Path(__file__).resolve().parents[1]
-    engine = (root / "src" / "services" / "engine_service.py").read_text(encoding="utf-8")
+    engine = (root / "src" / "services" / "engine_service" / "builders.py").read_text(
+        encoding="utf-8"
+    )
     cut = (root / "src" / "screens" / "cut_screen.py").read_text(encoding="utf-8")
     join = (root / "src" / "screens" / "join_screen.py").read_text(encoding="utf-8")
 
