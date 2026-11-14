@@ -194,8 +194,10 @@ def _encoder_pix_fmt(codec_name: str) -> str:
 
     Video transcodes default to yuv420p; still-image codecs (png = rgb24/rgba/
     pal8/gray only) reject it with av.error.ArgumentError at the first encode
-    — real crash from the E2E pass. Falls back to the encoder's first declared
-    format when none of the usual candidates match.
+    — real crash from the E2E pass. JPEG-family codecs want FULL-range YUV
+    (yuvj420p): plain yuv420p fails avcodec_open2 with "Non full-range YUV is
+    non-standard", which is why the corpus builder and the matrix skip it.
+    Falls back to the encoder's first declared format when none match.
     """
     preferred = ("yuv420p", "yuvj420p", "rgb24", "rgba", "rgb8")
     try:
@@ -205,6 +207,10 @@ def _encoder_pix_fmt(codec_name: str) -> str:
         return "yuv420p"
     if not declared:
         return "yuv420p"
+    # Full-range first for the JPEG family: their declared list carries both,
+    # and only yuvj420p opens without strict-unofficial.
+    if codec_name.startswith(("mjpeg", "ljpeg", "jpeg")):
+        preferred = ("yuvj420p", "rgb24", *preferred)
     for name in preferred:
         if name in declared:
             return name
@@ -212,15 +218,20 @@ def _encoder_pix_fmt(codec_name: str) -> str:
 
 
 def _encoder_open_kwargs(codec_name: str) -> dict:
-    """Extra ``add_stream`` kwargs an audio encoder needs to actually open.
+    """Extra ``add_stream`` kwargs an encoder needs to actually open.
 
-    Vorbis is an experimental encoder on this FFmpeg build (avcodec_open2
-    refuses without strict -2); the terse ``{}`` in the native log is the
-    fingerprint. Callers that resolve user-chosen audio codecs must spread
-    this — resolving is not opening (see the E2E vorbis crash).
+    Some encoders are experimental on this FFmpeg build (vorbis; amv; snow —
+    avcodec_open2 refuses them without ``strict=-2``), and the capability enum
+    PyAV exposes does not carry the EXPERIMENTAL bit, so the answer is
+    measured: open a throwaway context and catch the error. Callers that
+    resolve user-chosen codecs must spread this — resolving is not opening
+    (see the E2E vorbis crash).
     """
-    if codec_name == "vorbis":
-        return {"options": {"strict": "-2"}}
+    try:
+        if av.codec.Codec(codec_name, "w").experimental:
+            return {"options": {"strict": "-2"}}
+    except Exception:
+        return {}
     return {}
 
 
@@ -580,12 +591,18 @@ def _wire_option_value(value: Any) -> str:
 
 
 def _supported_encoder_options(codec_name: str, requested: dict[str, Any]) -> dict[str, str]:
-    """Keep only options this wheel's encoder context advertises, as wire strings.
+    """Keep only options this wheel's encoder accepts, with values that can apply.
 
     Both option sets are legal: the generic ones (b/g/bf/threads/qmin/flags) are
     the AVCodecContext class options every encoder shares, and av hands the dict
     to avcodec_open2, which applies generic and private alike. Keeping private
     only (the old filter) silently dropped most of what a UI can offer.
+
+    Values are checked against the measured schema too: a numeric option that
+    was handed text (SVT-AV1's ``preset`` is a number, x264's is a word), or a
+    number outside the option's declared range, is dropped with one info line
+    instead of crashing ``avcodec_open2`` — the same knob means different things
+    per encoder, and the engine has to be the one that knows.
     """
     try:
         ctx = av.CodecContext.create(codec_name, "w")
@@ -594,10 +611,74 @@ def _supported_encoder_options(codec_name: str, requested: dict[str, Any]) -> di
     except Exception as exc:
         logger.debug("Could not inspect options for %s: %s", codec_name, exc)
         return {str(key): _wire_option_value(value) for key, value in requested.items()}
-    dropped = sorted(set(requested) - valid)
+
+    schema = {
+        str(spec["name"]): spec for spec in (probe().encoder_option_schema.get(codec_name) or [])
+    }
+    kept: dict[str, str] = {}
+    dropped: list[str] = []
+    for key, raw in requested.items():
+        if key not in valid:
+            dropped.append(str(key))
+            continue
+        value = _wire_option_value(raw)
+        spec = schema.get(str(key))
+        if spec is not None:
+            verdict = _value_fits(spec, value)
+            if verdict is not None:
+                logger.info("Dropping %s option %s=%r: %s", codec_name, key, value, verdict)
+                continue
+        kept[str(key)] = value
     if dropped:
         logger.info("Dropping unsupported %s encoder options: %s", codec_name, ", ".join(dropped))
-    return {str(key): _wire_option_value(value) for key, value in requested.items() if key in valid}
+    return kept
+
+
+_NUMERIC_OPTION_TYPES = frozenset({"2", "3", "10", "4", "5", "7"})
+# FFmpeg's own numeric option parser accepts k/M/G suffixes ("1M" = 1e6).
+_NUMERIC_SUFFIXES = {"k": 1e3, "m": 1e6, "g": 1e9}
+
+
+def _parse_option_number(value: str) -> float | None:
+    """Parse a numeric option value the way FFmpeg does, or None.
+
+    ``"30"``, ``"1M"``, ``"0.5k"`` parse; ``"ultrafast"`` does not — and on a
+    numeric option FFmpeg would refuse it, so the caller drops it first.
+    """
+    text = value.strip()
+    if not text:
+        return None
+    multiplier = 1.0
+    if text[-1].lower() in _NUMERIC_SUFFIXES and not text[-1].isdigit():
+        multiplier = _NUMERIC_SUFFIXES[text[-1].lower()]
+        text = text[:-1]
+    try:
+        return float(text) * multiplier
+    except ValueError:
+        return None
+
+
+def _value_fits(spec: dict, value: str) -> str | None:
+    """Why a value cannot apply, or None when it can (measured schema only)."""
+    option_type = str(spec.get("type") or "")
+    low, high = spec.get("min"), spec.get("max")
+    if option_type in _NUMERIC_OPTION_TYPES:
+        number = _parse_option_number(value)
+        if number is None:
+            bounds = (
+                f" ({low:g} … {high:g})"
+                if low is not None and high is not None and high > low
+                else ""
+            )
+            return f"this encoder's option is a number{bounds}"
+        if (
+            low is not None
+            and high is not None
+            and float(high) > float(low)
+            and not (float(low) <= number <= float(high))
+        ):
+            return f"outside the declared range {low:g} … {high:g}"
+    return None
 
 
 def _optional_encoder_knobs(
@@ -1146,17 +1227,19 @@ _WM_POSITIONS = {
 }
 
 
-def _chain_declared_size(nodes) -> tuple[int, int] | None:
+def _chain_declared_size(nodes, base: tuple[int, int] | None = None) -> tuple[int, int] | None:
     """The frame size a linear filter chain declares, if it declares one.
 
     Walks the chain in order: ``scale``/``crop`` with literal integer arguments
-    set the geometry, ``transpose`` swaps it. Expressions (``-2``, ``iw/2``) and
-    every other filter leave the geometry unknown (None) — the caller keeps the
-    input's size.
+    set the geometry, ``transpose`` swaps it. ``base`` is the input frame size —
+    a chain that only rotates needs it, or a 90° transpose would look unknown
+    and the encoder would be opened for the un-swapped input. Expressions
+    (``-2``, ``iw/2``) and every other filter leave the geometry unknown (None)
+    — the caller keeps the input's size.
     """
     if not nodes:
         return None
-    size: tuple[int, int] | None = None
+    size = base
     for node in nodes:
         name = str(node[0])
         args = str(node[1]) if len(node) > 1 else ""
@@ -1172,6 +1255,8 @@ def _chain_declared_size(nodes) -> tuple[int, int] | None:
                 return None
             size = (width, height)
         elif name == "transpose" and size is not None:
+            # 90/270° transposes swap the axes; hflip/vflip keep them. Only the
+            # axis swap changes the encoder's declared size.
             size = (size[1], size[0])
     return size
 
@@ -1289,7 +1374,11 @@ def run_encode_job(
                 if need_vfilter and v_spec.speed > 0
                 else target_fps
             )
-            out_video = out.add_stream(chosen_vcodec, rate=eff_rate)
+            out_video = out.add_stream(
+                chosen_vcodec,
+                rate=eff_rate,
+                **_encoder_open_kwargs(chosen_vcodec),
+            )
             # A caller-supplied filter chain can change the frame size (scale,
             # crop, transpose…). FFmpeg sizes the encoder from the chain's
             # output, and so must we: the codec context opens on the first
@@ -1299,7 +1388,14 @@ def run_encode_job(
             # runtime check below refuses loudly rather than upscaling silently.
             caller_chain = bool(job.video_chain is not None and job.video_chain.nodes)
             graph_owns_size = caller_chain and not (v_spec.scale_width or v_spec.scale_height)
-            declared = _chain_declared_size(job.video_chain.nodes) if graph_owns_size else None
+            declared = (
+                _chain_declared_size(
+                    job.video_chain.nodes,
+                    (in_video.width or 640, in_video.height or 360),
+                )
+                if graph_owns_size
+                else None
+            )
             target_w = (
                 v_spec.scale_width or (declared[0] if declared else 0) or in_video.width or 640
             )
@@ -1391,7 +1487,12 @@ def run_encode_job(
             src_rate = in_audio.rate or (a_spec.sample_rate or 44100)
             src_layout = getattr(in_audio.layout, "name", None)
             dst_rate = out_audio.rate
-            dst_layout = getattr(out_audio.layout, "name", None) or str(out_audio.layout)
+            # Encoders without a declared layout report an empty (0-channel)
+            # layout; stringifying it would feed "0 channels" into the
+            # resampler and crash. The spec's own layout is what was asked for.
+            dst_layout = getattr(out_audio.layout, "name", None)
+            if not dst_layout or not getattr(out_audio.layout, "channels", 0):
+                dst_layout = layout
             if src_rate != dst_rate or (src_layout and src_layout != dst_layout):
                 resampler = av.AudioResampler(
                     layout=dst_layout,
@@ -1920,18 +2021,15 @@ def run_copy_job(
                     if packet.size == 0 or (packet.pts is None and packet.dts is None):
                         return
                     src_key = packet.stream.index if packet.stream is not None else -1
-                    # Rescale onto the target stream's clock when they differ
-                    # (template streams normally share the input time base).
                     _out_s_pre = _stream_map.get(packet.stream)
-                    if (
-                        _out_s_pre is not None
-                        and _out_s_pre.time_base
-                        and packet.time_base != _av_rational(_out_s_pre.time_base)
-                    ):
-                        packet.rescale_ts(_av_rational(_out_s_pre.time_base))
                     if job.zero_base and src_key >= 0:
-                        # Separate bases per clock: B-frame delay (dts<pts) would
-                        # drive the first dts negative under a single base.
+                        # Zero-base in the packet's OWN clock, then rescale.
+                        # The out stream's time base changes when FFmpeg writes
+                        # the header (template 1/12800 → mkv 1/1000), so a base
+                        # captured on packet 1 (pre-rescale) applied to packet 2
+                        # (post-rescale) mixed clocks: dts came out ~1 s too
+                        # large and repair_pts_dts copied that into pts — a
+                        # 1.2 s cut read as 2.1 s.
                         if src_key not in base_pts:
                             base_pts[src_key] = packet.pts if packet.pts is not None else 0
                         if src_key not in base_dts:
@@ -1947,7 +2045,13 @@ def run_copy_job(
                             and packet.dts > packet.pts
                         ):
                             packet.pts = packet.dts
-                    elif job.timeline_shift:
+                    if (
+                        _out_s_pre is not None
+                        and _out_s_pre.time_base
+                        and packet.time_base != _av_rational(_out_s_pre.time_base)
+                    ):
+                        packet.rescale_ts(_av_rational(_out_s_pre.time_base))
+                    if job.timeline_shift:
                         pos = next(
                             (p for p, s in enumerate(_src_streams) if s.index == src_key),
                             None,
@@ -2017,10 +2121,27 @@ def run_copy_job(
                     ):
                         logger.info("Recording reached duration cap (%.1fs)", job.duration_cap_s)
                         break
-                    ts = packet.pts if packet.pts is not None else packet.dts
+                    # The window is judged on DTS, not PTS: B-frame streams
+                    # arrive in dts order with pts jumping back and forth, and
+                    # a pts-based window drops the keyframe (pts < start) plus
+                    # every early B-frame — the mux clamp then repairs the
+                    # resulting non-monotonicity by stretching the whole
+                    # timeline (a 1.2 s cut read as 2.1 s).
+                    ts = packet.dts if packet.dts is not None else packet.pts
                     if ts is None:
                         continue
                     pkt_time = float(ts * packet.stream.time_base)
+                    if (
+                        job.snap_to_keyframe
+                        and packet.stream.type == "video"
+                        and packet.is_keyframe
+                        and job_window_start is not None
+                        and pkt_time < job_window_start
+                    ):
+                        # The seek landed on this keyframe: a stream copy must
+                        # begin on one, so adopt it as the window start even
+                        # though it sits before the requested cut point.
+                        job_window_start = pkt_time
                     if job_window_start is not None and pkt_time < job_window_start:
                         continue
                     if win_end is not None and pkt_time > win_end:
@@ -2289,6 +2410,8 @@ class EngineService:
         audio_stream: int | None = None,
         video_filter: list | None = None,
         audio_filter: list | None = None,
+        container: str | None = None,
+        bit_rate: int | None = None,
         encoder_options: dict | None = None,
         audio_encoder_options: dict | None = None,
         container_options: dict | None = None,
@@ -2303,9 +2426,10 @@ class EngineService:
         drops with an info line instead of failing the job. ``audio_encoder_options``
         do the same for the audio stream (a separate encoder, so a separate dict).
         ``container_options`` go to the muxer through ``OutputSpec.options``
-        (``av.open(options=...)``). ``video_stream``/``audio_stream`` are
-        absolute input stream indices (the ``-map 0:v:1`` shape); ``pix_fmt``
-        overrides the encoder-fitted pixel format.
+        (``av.open(options=...)``). ``container`` names the muxer explicitly when
+        the output path's extension is not enough (the Terminal's ``-f``);
+        ``video_stream``/``audio_stream`` are absolute input stream indices (the
+        ``-map 0:v:1`` shape); ``pix_fmt`` overrides the encoder-fitted pixel format.
         """
         hwaccel = _hardware_decode(hardware_accel)
         need_vfilter = (
@@ -2364,46 +2488,55 @@ class EngineService:
                     hwaccel=hwaccel,
                 )
             ],
-            streams=[
-                StreamSpec(
-                    kind="video",
-                    selector=video_stream if video_stream is not None else "best",
-                    codec=chosen_vcodec,
-                    fps=fps,
-                    speed=speed,
-                    fine_time_base=need_vfilter,
-                    scale_width=scale_width,
-                    scale_height=scale_height,
-                    crop_aspect=crop_aspect,
-                    rotation=rotation,
-                    pix_fmt=pix_fmt,
-                    encoder_options=_supported_encoder_options(
-                        chosen_vcodec,
-                        {"crf": str(crf), "preset": preset}
-                        | ({"bf": "0"} if need_vfilter else {})
-                        | _optional_encoder_knobs(
-                            gop_size=gop_size,
-                            max_b_frames=max_b_frames,
-                            qmin=qmin,
-                            qmax=qmax,
-                            thread_count=thread_count,
-                            profile=profile,
-                            level=level,
-                        )
-                        | dict(encoder_options or {}),  # user options last: they win
+            streams=(
+                [
+                    StreamSpec(
+                        kind="video",
+                        selector=video_stream if video_stream is not None else "best",
+                        codec=chosen_vcodec,
+                        fps=fps,
+                        speed=speed,
+                        fine_time_base=need_vfilter,
+                        scale_width=scale_width,
+                        scale_height=scale_height,
+                        crop_aspect=crop_aspect,
+                        rotation=rotation,
+                        pix_fmt=pix_fmt,
+                        bit_rate=bit_rate,
+                        encoder_options=_supported_encoder_options(
+                            chosen_vcodec,
+                            {"crf": str(crf), "preset": preset}
+                            | ({"bf": "0"} if need_vfilter else {})
+                            | _optional_encoder_knobs(
+                                gop_size=gop_size,
+                                max_b_frames=max_b_frames,
+                                qmin=qmin,
+                                qmax=qmax,
+                                thread_count=thread_count,
+                                profile=profile,
+                                level=level,
+                            )
+                            | dict(encoder_options or {}),  # user options last: they win
+                        ),
                     ),
-                ),
-                StreamSpec(
-                    kind="audio",
-                    selector=audio_stream if audio_stream is not None else "best",
-                    codec=_resolve_or_raw(audio_codec, "audio"),
-                    encoder_options=_supported_encoder_options(
-                        _resolve_or_raw(audio_codec, "audio"),
-                        dict(audio_encoder_options or {}),
-                    ),
-                ),
-            ],
-            output=OutputSpec(options=dict(container_options or {})),
+                ]
+                + (
+                    [
+                        StreamSpec(
+                            kind="audio",
+                            selector=audio_stream if audio_stream is not None else "best",
+                            codec=_resolve_or_raw(audio_codec, "audio"),
+                            encoder_options=_supported_encoder_options(
+                                _resolve_or_raw(audio_codec, "audio"),
+                                dict(audio_encoder_options or {}),
+                            ),
+                        ),
+                    ]
+                    if audio_codec
+                    else []  # audio_codec=None: the Terminal's -an
+                )
+            ),
+            output=OutputSpec(container=container, options=dict(container_options or {})),
             video_chain=video_chain,
             audio_chain=audio_chain,
         )

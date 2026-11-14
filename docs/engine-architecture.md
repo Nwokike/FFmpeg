@@ -1,9 +1,11 @@
-# Engine architecture (Phase 3 + Phase 4 option panels)
+# Engine architecture (Phases 3-5)
 
 Status: Phase 3 complete (commits `f1cfc29`…`929b64e`) — generic builders,
 multi-input concat, dispatch registry, and worker-process containment (opt-in,
 regression-tested in tests/test_job_process.py). Phase 4's generic option panel
-is documented below; its tests are tests/test_encoder_option_panel.py.
+and Phase 5's real-syntax Terminal, measured TLS routing and the ability matrix
+are documented below; their tests are tests/test_encoder_option_panel.py,
+tests/test_command_parser.py and tests/test_ability_matrix.py (`live`).
 
 ## The problem this solves
 
@@ -134,6 +136,47 @@ what makes it reachable.
   `container_options`), `compress_to_target`, `cut_trim`/`_cut_reencode`
   (encoder options on the re-encode path only), `extract_audio`, `create_gif` —
   all default `None`, and the screens send only what the user touched.
+
+## Terminal — real ffmpeg syntax (Phase 5)
+
+`services/command_parser.py` is a translator, not an emulation (the old version
+approximated the CLI through hardcoded flag/filter/codec/refusal tables and
+refused the rest):
+
+- `-vf`/`-af` become `FilterChain(nodes=[(filter, args-string)])`; the engine
+  hands each node to `av.filter.Graph.add(name, args)` — FFmpeg's own argument
+  syntax, any filter this build ships, no filter table anywhere. A filter this
+  build lacks refuses at plan time (descriptor lookup), never at encode time.
+- Codec names resolve through the probe; `-pix_fmt` is checked against the
+  encoder's declared formats; an unknown `-key value` is offered to the encoder
+  and refused with the option names it *does* accept — av silently swallows
+  unknown muxer options, so guessing "muxer" would be exactly the approximation
+  this mode refuses (`-movflags` is the one real muxer flag).
+- `-map` is repeatable and reads its own stream specifier; `-an` drops the
+  audio stream; the output extension routes to extract/convert/gif/remux as
+  ffmpeg's does. Every substitution is a `note` in the two-step confirm.
+- `_map_params`/`OpPlan.summary()` keep the plan JSON-safe (the queue persists
+  params verbatim).
+
+## Network — TLS is measured, not assumed (Phase 5)
+
+`_open_network_input` opens **every** URL natively unless the wheel's TLS probe
+says the https handler is missing; only then does the httpx fetch run (the app's
+own network stack), and it says so in the job status. The old code routed every
+https URL through httpx because "the Android FFmpeg build ships without TLS" —
+a platform claim that stopped being true the moment the wrap shipped mbedtls.
+The stock bare-LGPL `flet-libffmpeg` still needs the fallback, so it stays,
+capability-driven.
+
+## Ability matrix (Phase 5)
+
+`tests/test_ability_matrix.py` (`live`) runs every op, encoder, muxer, container,
+filter and extract target the app offers against the installed wheel, one test
+id per ability, each verified by probing its own output.
+`scripts/build_corpus.py` generates the 39-asset corpus with av itself
+(deterministic, offline); only subtitle encoding needs an ffmpeg binary.
+`scripts/ability_report.py` runs the matrix and renders `docs/ability-matrix.md`
+— the gate to read before a phone pass.
 
 ## Worker-process containment (implemented; opt-in)
 

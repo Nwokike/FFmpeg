@@ -60,6 +60,8 @@ def SettingsScreen() -> ft.Control:
     # local copy; the header toggle must update this picker immediately.
     active_theme = app_state.settings.get("theme_mode", "system")
     engine_counts, set_engine_counts = ft.use_state("")
+    self_test, set_self_test = ft.use_state("")
+    self_testing, set_self_testing = ft.use_state(False)
 
     async def _load_engine_counts() -> None:
         # Capability probe off the UI loop; counts fill the subtitle live
@@ -76,6 +78,39 @@ def SettingsScreen() -> ft.Control:
             logger.warning("Engine counts probe failed: %s", exc)
 
     ft.use_effect(lambda: page.run_task(_load_engine_counts), [])
+
+    def _run_self_test() -> None:
+        """The on-device gate: a real encode→mux→decode→extract round trip.
+
+        Runs ``engine_probe.run`` off the UI loop and renders the capability
+        report plus the round-trip result, so a phone pass can prove the wheel
+        works without a computer nearby.
+        """
+        set_self_testing(True)
+        set_self_test("Running…")
+
+        async def _job() -> None:
+            from core.engine_probe import run as _engine_run
+
+            try:
+                probe_result, result = await asyncio.to_thread(_engine_run)
+                outcome = (
+                    "PASS"
+                    if result.get("ok")
+                    else f"FAIL ({result.get('error', 'round trip incomplete')})"
+                )
+                set_self_test(
+                    f"{outcome} — {result.get('frames', 0)} frames, "
+                    f"{result.get('mp4_bytes', 0)} B mp4, {result.get('jpg_bytes', 0)} B jpg, "
+                    f"{result.get('encode_s', 0):.2f}s encode\n\n{probe_result.to_text()}"
+                )
+            except Exception as exc:
+                set_self_test(f"FAIL — {type(exc).__name__}: {exc}")
+            finally:
+                set_self_testing(False)
+                page.update()
+
+        page.run_task(_job)
 
     def _update_theme(mode_str: str):
         # Whole-value assignment — a dict-item write would never publish and
@@ -489,6 +524,43 @@ def SettingsScreen() -> ft.Control:
                                 color=muted,
                             ),
                             on_click=_open_engine_inspector,
+                        ),
+                        ft.Divider(height=1),
+                        ft.ListTile(
+                            leading=ft.Icon(
+                                ft.Icons.FACT_CHECK_ROUNDED,
+                                color=PRIMARY if not self_testing else ACCENT_AMBER,
+                            ),
+                            title=ft.Text("Engine Self-Test", weight=ft.FontWeight.W_600),
+                            subtitle=ft.Text(
+                                "Encode → mux → decode → extract one synthetic clip,"
+                                " then report what this wheel can actually do",
+                                color=muted,
+                            ),
+                            trailing=(
+                                ft.ProgressRing(width=18, height=18, stroke_width=2)
+                                if self_testing
+                                else None
+                            ),
+                            on_click=None
+                            if self_testing
+                            else lambda _: page.run_task(_run_self_test),
+                        ),
+                        *(
+                            [
+                                ft.Container(
+                                    content=ft.Text(
+                                        self_test,
+                                        size=FONT_SM,
+                                        font_family="monospace",
+                                        selectable=True,
+                                        color=muted,
+                                    ),
+                                    padding=ft.Padding(SPACE_MD, 0, SPACE_MD, SPACE_SM),
+                                )
+                            ]
+                            if self_test
+                            else []
                         ),
                     ],
                     spacing=0,

@@ -375,7 +375,19 @@ def build(out: Path, force: bool = False) -> dict:
         lambda: _encode(
             out / "h264_gray.mp4", video={"codec": "libx264", "pix_fmt": "gray"}, audio=audio
         ),
-        note="grayscale",
+        note="grayscale (x264 converts to yuv420p)",
+    )
+    # The encoders that KEEP the property: ffv1 holds gray, field order and
+    # colour tags that x264 silently converts away.
+    add(
+        "gray_ffv1.mkv",
+        lambda: _encode(
+            out / "gray_ffv1.mkv",
+            video={"codec": "ffv1", "pix_fmt": "gray"},
+            audio=[{"codec": "flac"}],
+            mux="matroska",
+        ),
+        note="grayscale (ffv1 keeps it)",
     )
 
     # ── geometry / timing / colour ────────────────────────────────────────
@@ -413,22 +425,24 @@ def build(out: Path, force: bool = False) -> dict:
         note="90° display rotation",
     )
     add(
-        "h264_interlaced.mp4",
+        "interlaced_ffv1.mkv",
         lambda: _encode(
-            out / "h264_interlaced.mp4",
-            video={"codec": "libx264", "field_order": 2},
-            audio=audio,
+            out / "interlaced_ffv1.mkv",
+            video={"codec": "ffv1", "field_order": 2},
+            audio=[{"codec": "flac"}],
+            mux="matroska",
         ),
-        note="interlaced (tff)",
+        note="interlaced (ffv1 keeps the field order)",
     )
     add(
-        "h264_color.mp4",
+        "color_ffv1.mkv",
         lambda: _encode(
-            out / "h264_color.mp4",
-            video={"codec": "libx264", "color": (9, 16, 9)},
-            audio=audio,
+            out / "color_ffv1.mkv",
+            video={"codec": "ffv1", "color": (9, 16, 9)},
+            audio=[{"codec": "flac"}],
+            mux="matroska",
         ),
-        note="HDR-ish colour tags",
+        note="HDR-ish colour tags (ffv1 keeps them)",
     )
     add(
         "h264_slow.mkv",

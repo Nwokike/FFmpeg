@@ -65,7 +65,9 @@ def test_https_uses_av_open_when_the_wheel_has_tls(monkeypatch):
     monkeypatch.setattr(
         EngineService,
         "_open_https_via_httpx",
-        staticmethod(lambda *a, **k: pytest.fail("a TLS-capable wheel must not use the httpx path")),
+        staticmethod(
+            lambda *a, **k: pytest.fail("a TLS-capable wheel must not use the httpx path")
+        ),
     )
 
     got_container, cleanup = EngineService._open_network_input("https://example.com/stream.m3u8")

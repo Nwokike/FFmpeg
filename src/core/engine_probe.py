@@ -820,41 +820,101 @@ def containers_for_kind(kind: str) -> list[dict]:
     containers are NOT derivable — av does not tag still-image muxers and
     intra-only video codecs (dnxhd, dv) are not still images — so the image
     list stays the app's explicit trio.
+
+    Muxers that are not plain-file targets are excluded (derived from the
+    format's own flags and extension list): AVFMT_NOFILE devices and network
+    pseudo-muxers (alsa, fbdev, v4l2, rtp, rtsp, sap, whip…), raw codec
+    streams with no extension (h264, hevc, m2v…), and the metadata/hash
+    pseudo-formats. Without this the Convert screen offered "rtp" and "rtsp"
+    as output containers.
     """
     still = _still_image_codecs()
     placeholders = {"", "none", "wrapped_avframe"}
+    nofile_flag = 0x0001  # AVFMT_NOFILE: a device/network target, not a file
+    p = probe()
     seen: dict[str, dict] = {}
+    # First pass: which muxers are AUDIO targets. Their default video codec is
+    # absent or an IMAGE-family encoder (flac/mp3 write png cover art) — an
+    # image-family encoder declares no planar-YUV formats, which is how the
+    # wheel itself separates still-image codecs from video ones.
+    image_family: set[str] = set()
+    audio_muxers: set[str] = set()
+    for codec_name in p.encoders:
+        try:
+            formats = {str(f.name) for f in (av.codec.Codec(codec_name, "w").video_formats or [])}
+        except Exception:
+            continue
+        if formats and not formats & {"yuv420p", "yuv422p", "yuv444p", "yuv420p10le"}:
+            image_family.add(codec_name)
     for name, entry in muxer_matrix().items():
+        meta = p.format_meta.get(name) or {}
+        if int(meta.get("flags") or 0) & nofile_flag:
+            continue
+        if not [e for e in (entry.get("extensions") or []) if e]:
+            continue
         default_v = entry.get("default_video") or ""
         default_a = entry.get("default_audio") or ""
+        video_capable = (
+            bool(default_v)
+            and default_v.lower() not in placeholders
+            and _codec_mode_available(default_v, "w")
+            and default_v not in image_family
+        )
+        if bool(default_a) and _codec_mode_available(default_a, "w") and not video_capable:
+            audio_muxers.add(name)
+    for name, entry in muxer_matrix().items():
+        meta = p.format_meta.get(name) or {}
+        if int(meta.get("flags") or 0) & nofile_flag:
+            continue
+        exts = [e.lower() for e in entry.get("extensions", []) if e]
+        if not exts:
+            # A raw codec stream (h264, hevc, m2v) or a pseudo-format: nothing
+            # a file picker can name.
+            continue
+        default_v = entry.get("default_video") or ""
+        default_a = entry.get("default_audio") or ""
+        # "A video target" means the muxer's own DEFAULT video codec is one
+        # this wheel can encode. Accepting "any supported codec" put the mp3
+        # muxer (which carries mjpeg cover art) in the video list.
         video_ok = (
             bool(default_v)
             and default_v.lower() not in placeholders
-            and (
-                _codec_mode_available(default_v, "w")
-                or any(_codec_mode_available(c, "w") for c in entry.get("video", []))
-            )
+            and (_codec_mode_available(default_v, "w"))
         )
         audio_ok = bool(default_a) and _codec_mode_available(default_a, "w")
         if kind == "audio":
-            if video_ok or not audio_ok:
+            # An audio target: the muxer's default audio codec is encodable —
+            # video-capable muxers stay (mp4/ipod write pure-audio files fine);
+            # the video list is the one with the strict default-video rule.
+            if not audio_ok:
                 continue
         elif kind == "video":
             if not video_ok:
                 continue
-            if default_v in still:
+            if default_v in still or name in audio_muxers:
                 # Intra-only defaults (png/gif writers AND dnxhd/dv) are
-                # handled by the explicit image trio / excluded here.
+                # handled by the explicit image trio / excluded here, and a
+                # muxer the wheel classifies AUDIO (flac/mp3 — their default
+                # video codec is cover art) must not appear as a video target.
                 continue
         else:
             continue
-        exts = [e.lower() for e in entry.get("extensions", []) if e]
-        key = name if name.lower() in exts else (exts[0] if exts else name)
+        # The dropdown key and the output-file extension are derived, not
+        # written: the muxer's own name when it doubles as an extension, else
+        # the first extension no other muxer claims as its name. matroska's
+        # extension list starts with "webm" (the webm muxer's name), so the
+        # naive first-extension pick made matroska vanish behind webm's entry.
+        muxer_names = {n.lower() for n in muxer_matrix()}
+        best_ext = _MUXER_KEY_PREFERENCE.get(name.lower()) or next(
+            (e for e in exts if e not in muxer_names), exts[0]
+        )
+        key = name.lower() if name.lower() in exts else best_ext
         seen.setdefault(
             key,
             {
                 "container": key,
                 "muxer": name,
+                "extension": best_ext,
                 "extensions": exts,
                 "label": (entry.get("long_name") or name).split(" (")[0],
             },
@@ -878,6 +938,16 @@ _CONTAINER_DISPLAY_ORDER = (
     "ogg",
     "wav",
 )
+
+
+# Presentation only: which extension NAMES a family muxer's entry in the
+# pickers. FFmpeg lists matroska's extensions starting with webm/mk3d/mka, but
+# the entry users expect is "mkv" — this maps the label, nothing else; every
+# derived container is still offered whatever its label.
+_MUXER_KEY_PREFERENCE = {
+    "matroska": "mkv",
+    "ipod": "m4a",
+}
 
 
 def _container_sort_key(container: str) -> tuple[int, str]:
