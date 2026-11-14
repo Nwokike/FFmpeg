@@ -36,7 +36,9 @@ from services.engine_service import (
 )
 
 ROOT = Path(__file__).resolve().parents[1]
-MODULE_SRC = (ROOT / "src" / "components" / "encoder_options.py").read_text(encoding="utf-8")
+MODULE_SRC = (ROOT / "src" / "components" / "encoder_options" / "rows.py").read_text(
+    encoding="utf-8"
+)
 
 
 def _collect(root, controls: list, components: list, depth: int = 0) -> None:
