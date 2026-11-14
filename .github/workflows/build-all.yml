@@ -318,6 +318,9 @@ jobs:
   build-windows:
     needs: [resolve-version, prepare-release]
     runs-on: windows-latest
+    env:
+      BUILD_VERSION: ${{ needs.resolve-version.outputs.BUILD_VERSION }}
+      BUILD_NUMBER: ${{ needs.resolve-version.outputs.BUILD_NUMBER }}
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
@@ -386,9 +389,6 @@ jobs:
   build-linux:
     needs: [resolve-version, prepare-release]
     runs-on: ubuntu-latest
-    env:
-      BUILD_VERSION: ${{ needs.resolve-version.outputs.BUILD_VERSION }}
-      BUILD_NUMBER: ${{ needs.resolve-version.outputs.BUILD_NUMBER }}
     env:
       BUILD_VERSION: ${{ needs.resolve-version.outputs.BUILD_VERSION }}
       BUILD_NUMBER: ${{ needs.resolve-version.outputs.BUILD_NUMBER }}
