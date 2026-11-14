@@ -22,13 +22,45 @@ env:
   PYTHONUTF8: "1"
   FLET_CLI_NO_RICH_OUTPUT: "1"
   UV_PYTHON: "3.14"
-  BUILD_VERSION: ${{ inputs.build_version || '1.0.0' }}
-  BUILD_NUMBER: ${{ inputs.build_number || '1' }}
 
 jobs:
+
+  # ─── Resolve the build version ONCE (tag > dispatch input > pyproject) ──
+  # A hardcoded fallback broke every tag build: BUILD_VERSION 1.0.0 !=
+  # pyproject 2.0.0 fails the identity gate. Every job reads this output so
+  # the artifact version, APP_VERSION and the tag can never disagree.
+  resolve-version:
+    runs-on: ubuntu-latest
+    outputs:
+      BUILD_VERSION: ${{ steps.resolve.outputs.BUILD_VERSION }}
+      BUILD_NUMBER: ${{ steps.resolve.outputs.BUILD_NUMBER }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Resolve BUILD_VERSION
+        id: resolve
+        run: |
+          V="${{ inputs.build_version }}"
+          if [ -z "$V" ] && [ "${GITHUB_REF_TYPE:-}" = "tag" ]; then
+            V="${GITHUB_REF_NAME#v}"
+          fi
+          if [ -z "$V" ]; then
+            V=$(python3 -c "import tomllib;print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
+          fi
+          echo "BUILD_VERSION=$V" >> "$GITHUB_OUTPUT"
+          B="${{ inputs.build_number }}"
+          if [ -z "$B" ]; then
+            B=$(python3 -c "import tomllib;print(tomllib.load(open('pyproject.toml','rb'))['tool']['flet']['build_number'])")
+          fi
+          echo "BUILD_NUMBER=$B" >> "$GITHUB_OUTPUT"
+          echo "Resolved $V (build $B)"
+
   # ─── Q. Quality gate: lint + tests (blocks every build) ───────────────
   quality:
+    needs: [resolve-version]
     runs-on: ubuntu-latest
+    env:
+      BUILD_VERSION: ${{ needs.resolve-version.outputs.BUILD_VERSION }}
+      BUILD_NUMBER: ${{ needs.resolve-version.outputs.BUILD_NUMBER }}
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
@@ -188,8 +220,11 @@ jobs:
           retention-days: 7
 
   build-apk-split:
-    needs: [prepare-release, android-wheels]
+    needs: [resolve-version, prepare-release, android-wheels]
     runs-on: ubuntu-latest
+    env:
+      BUILD_VERSION: ${{ needs.resolve-version.outputs.BUILD_VERSION }}
+      BUILD_NUMBER: ${{ needs.resolve-version.outputs.BUILD_NUMBER }}
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
@@ -231,8 +266,11 @@ jobs:
 
   # ─── Android AAB (Play Store) ───────────────────────────
   build-aab:
-    needs: [prepare-release, android-wheels]
+    needs: [resolve-version, prepare-release, android-wheels]
     runs-on: ubuntu-latest
+    env:
+      BUILD_VERSION: ${{ needs.resolve-version.outputs.BUILD_VERSION }}
+      BUILD_NUMBER: ${{ needs.resolve-version.outputs.BUILD_NUMBER }}
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
@@ -278,7 +316,7 @@ jobs:
 
   # ─── Windows (Automated .exe Setup Installer) ──────────────
   build-windows:
-    needs: [prepare-release]
+    needs: [resolve-version, prepare-release]
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -346,8 +384,14 @@ jobs:
 
   # ─── Linux (.deb, .rpm & Universal .tar.gz) ────────────────
   build-linux:
-    needs: [prepare-release]
+    needs: [resolve-version, prepare-release]
     runs-on: ubuntu-latest
+    env:
+      BUILD_VERSION: ${{ needs.resolve-version.outputs.BUILD_VERSION }}
+      BUILD_NUMBER: ${{ needs.resolve-version.outputs.BUILD_NUMBER }}
+    env:
+      BUILD_VERSION: ${{ needs.resolve-version.outputs.BUILD_VERSION }}
+      BUILD_NUMBER: ${{ needs.resolve-version.outputs.BUILD_NUMBER }}
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
