@@ -14,6 +14,7 @@ from core.theme import (
     PRIMARY,
     PRIMARY_CONTAINER_DARK,
     PRIMARY_CONTAINER_LIGHT,
+    STAGE_BLACK,
     TEXT_MUTED_DARK,
     TEXT_MUTED_LIGHT,
     is_dark_mode,
@@ -399,7 +400,7 @@ def ResultScreen() -> ft.Control:
                             ft.Container(
                                 content=video_control,
                                 height=240,
-                                bgcolor="#000000",
+                                bgcolor=STAGE_BLACK,
                                 border_radius=RADIUS_LG,
                             )
                         ]
@@ -420,7 +421,7 @@ def ResultScreen() -> ft.Control:
                                 ),
                                 alignment=ft.Alignment.CENTER,
                                 height=240,
-                                bgcolor="#000000",
+                                bgcolor=STAGE_BLACK,
                                 border_radius=RADIUS_LG,
                             )
                         ]
@@ -475,7 +476,7 @@ def ResultScreen() -> ft.Control:
             padding=SPACE_SM,
             border_radius=RADIUS_LG,
             clip_behavior=ft.ClipBehavior.ANTI_ALIAS,
-            bgcolor="#000000",
+            bgcolor=STAGE_BLACK,
         )
     elif is_image:
         preview_control = ft.Container(

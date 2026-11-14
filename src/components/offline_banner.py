@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import flet as ft
 
-from core.theme import ACCENT_AMBER
+from core.theme import ACCENT_AMBER, STAGE_BLACK
 from core.tokens import FONT_SM, SPACE_MD, SPACE_SM
 
 
@@ -16,11 +16,11 @@ def offline_banner_view(is_online: bool) -> ft.Container:
     return ft.Container(
         content=ft.Row(
             controls=[
-                ft.Icon(ft.Icons.WIFI_OFF_ROUNDED, size=16, color="#000000"),
+                ft.Icon(ft.Icons.WIFI_OFF_ROUNDED, size=16, color=STAGE_BLACK),
                 ft.Text(
                     "You are currently offline. Local media processing works 100% offline.",
                     size=FONT_SM,
-                    color="#000000",
+                    color=STAGE_BLACK,
                     weight=ft.FontWeight.W_500,
                 ),
             ],

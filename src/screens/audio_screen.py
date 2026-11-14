@@ -9,6 +9,14 @@ import flet as ft
 
 from components.encoder_options import ContainerOptionRows, EncoderOptionPanel, OptionValues
 from components.tool_job_status import tool_job_row
+from core.constants import (
+    BITRATE_PRESETS,
+    DEFAULT_STUDIO_BITRATE_KEY,
+    DEFAULT_STUDIO_FORMAT,
+    LOSSLESS_FORMATS,
+    LOUDNESS_PRESETS,
+    STUDIO_RATES,
+)
 from core.engine_probe import can_encode_format
 from core.state import Job, use_app_state
 from core.storage_paths import format_bytes, get_temp_dir, unique_temp_name
@@ -26,19 +34,8 @@ except ImportError:  # pragma: no cover — package is in the dev tree
 
 logger = logging.getLogger(__name__)
 
-_LOUDNESS_CHOICES = (
-    ("off", "Off (passthrough)", None),
-    ("youtube", "YouTube / Music (-14 LUFS)", -14.0),
-    ("podcast", "Podcast / Vocal (-16 LUFS)", -16.0),
-    ("broadcast", "Broadcast (-23 LUFS)", -23.0),
-)
-
-_BITRATE_CHOICES = (
-    ("Opus/AAC 128k", 128),
-    ("Standard 192k", 192),
-    ("High 256k", 256),
-    ("Max 320k", 320),
-)
+_LOUDNESS_CHOICES = LOUDNESS_PRESETS
+_BITRATE_CHOICES = BITRATE_PRESETS
 
 
 @ft.component
@@ -68,8 +65,8 @@ def AudioScreen() -> ft.Control:
     loudness_key, set_loudness_key = ft.use_state("podcast")
     channel_layout, set_channel_layout = ft.use_state("stereo")
     sample_rate, set_sample_rate = ft.use_state(48000)
-    audio_format, set_audio_format = ft.use_state("m4a")
-    bitrate_key, set_bitrate_key = ft.use_state("Standard 192k")
+    audio_format, set_audio_format = ft.use_state(DEFAULT_STUDIO_FORMAT)
+    bitrate_key, set_bitrate_key = ft.use_state(DEFAULT_STUDIO_BITRATE_KEY)
     muxer_rows, set_muxer_rows = ft.use_state([])
     # Touched encoder settings for the derived encoder (ref: mutated in place
     # by the panel, read once at Start — no re-render per keystroke).
@@ -93,11 +90,11 @@ def AudioScreen() -> ft.Control:
         if audio_format in audio_formats
         else (audio_formats[0] if audio_formats else audio_format)
     )
-    lossless_audio = chosen_audio_format in ("wav", "flac")
+    lossless_audio = chosen_audio_format in LOSSLESS_FORMATS
     lufs_target = next((v for k, _, v in _LOUDNESS_CHOICES if k == loudness_key), -16.0)
     bitrate_kbps = next((v for k, v in _BITRATE_CHOICES if k == bitrate_key), 192)
 
-    rates = [48000, 44100, 32000]
+    rates = list(STUDIO_RATES)
 
     # The encoder the engine derives for the chosen format, so the option panel
     # configures the codec that will actually run (aac for m4a, libmp3lame for

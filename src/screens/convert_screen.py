@@ -13,7 +13,7 @@ from core.notify import ERROR, show_snack
 from core.state import Job, use_app_state
 from core.storage_paths import format_bytes, get_temp_dir, unique_temp_name
 from core.styles import card_container, section_header
-from core.theme import PRIMARY, TEXT_MUTED_DARK, TEXT_MUTED_LIGHT, is_dark_mode
+from core.theme import ACCENT_RED, PRIMARY, TEXT_MUTED_DARK, TEXT_MUTED_LIGHT, is_dark_mode
 from core.tokens import (
     FONT_LG,
     FONT_MD,
@@ -454,7 +454,7 @@ def ConvertScreen() -> ft.Control:
                     ft.Text(
                         start_blocked_reason,
                         size=FONT_SM,
-                        color="#EF4444",
+                        color=ACCENT_RED,
                     )
                 ]
                 if start_blocked_reason is not None

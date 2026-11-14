@@ -16,7 +16,14 @@ from core.notify import ERROR, show_snack
 from core.state import Job, use_app_state
 from core.storage_paths import format_bytes, get_temp_dir, unique_temp_name
 from core.styles import card_container, section_header
-from core.theme import ACCENT_AMBER, PRIMARY, TEXT_MUTED_DARK, TEXT_MUTED_LIGHT, is_dark_mode
+from core.theme import (
+    ACCENT_AMBER,
+    PRIMARY,
+    STAGE_BLACK,
+    TEXT_MUTED_DARK,
+    TEXT_MUTED_LIGHT,
+    is_dark_mode,
+)
 from core.tokens import FONT_LG, FONT_MD, FONT_SM, FONT_XS, RADIUS_LG, SPACE_MD, SPACE_SM
 from services.engine_service import EngineService
 from state.controller_ctx import use_controller
@@ -545,7 +552,7 @@ def CutScreen() -> ft.Control:
                 height=160,
                 border_radius=RADIUS_LG,
                 clip_behavior=ft.ClipBehavior.ANTI_ALIAS,
-                bgcolor="#000000",
+                bgcolor=STAGE_BLACK,
             ),
             ft.Row(
                 controls=[

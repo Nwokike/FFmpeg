@@ -24,7 +24,14 @@ from core.permissions import next_permission_action  # re-exported: tests import
 from core.state import use_app_state
 from core.storage_paths import format_bytes, get_temp_dir, unique_temp_name
 from core.styles import card_container, section_header
-from core.theme import ACCENT_RED, PRIMARY, TEXT_MUTED_DARK, TEXT_MUTED_LIGHT, is_dark_mode
+from core.theme import (
+    ACCENT_RED,
+    PRIMARY,
+    STAGE_BLACK,
+    TEXT_MUTED_DARK,
+    TEXT_MUTED_LIGHT,
+    is_dark_mode,
+)
 from core.tokens import (
     FONT_LG,
     FONT_MD,
@@ -1221,7 +1228,7 @@ def CaptureScreen() -> ft.Control:
             aspect_ratio=preview_aspect,
             border_radius=RADIUS_LG,
             clip_behavior=ft.ClipBehavior.ANTI_ALIAS,
-            bgcolor="#000000",
+            bgcolor=STAGE_BLACK,
         )
     else:  # mic mode, no capture yet
         preview = card_container(

@@ -113,6 +113,7 @@ _ROUTED_FLAGS = frozenset(
     )
 )
 
+
 @dataclass
 class OpPlan:
     """A validated job waiting for confirmation in the terminal UI."""
@@ -169,6 +170,7 @@ class OpPlan:
             bits.append("muxer-options=" + ",".join(sorted(self.params["container_options"])))
         return " ".join(bits)
 
+
 def _map_params(maps: list[tuple[str, str]], src: str) -> dict:
     """``-map`` flags → the Job's stream selectors (absolute indices)."""
     params: dict = {}
@@ -202,6 +204,7 @@ def _stream_type_at(path: str, index: int) -> str | None:
             return stream.stream_type
     return None
 
+
 def _drop_empty(params: dict) -> dict:
     """Params the engine can take as "unset": drop None/""/empty containers.
 
@@ -209,6 +212,7 @@ def _drop_empty(params: dict) -> dict:
     engine's own defaults then apply, and the plan preview stays honest.
     """
     return {key: value for key, value in params.items() if value not in (None, "", {}, [])}
+
 
 def _option_name(flag: str) -> str:
     """``-profile:v`` → ``profile``: FFmpeg's per-stream qualifier is syntax.
@@ -231,6 +235,7 @@ def _offered_options(codec: str, limit: int = 12) -> str:
     if not names:
         return "(no options declared)"
     return ", ".join(names[:limit]) + (" …" if len(names) > limit else "")
+
 
 def parse_command(
     command: str,
@@ -666,4 +671,3 @@ def help_text() -> str:
             "(.mp3/.m4a/.flac/... extract audio, .srt/.ass/.vtt subtitles, .gif).",
         ]
     )
-

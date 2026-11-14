@@ -18,7 +18,16 @@ import flet as ft
 from core.notify import ERROR, SUCCESS, show_snack
 from core.state import Job, use_app_state
 from core.styles import card_container, section_header
-from core.theme import ACCENT_AMBER, PRIMARY, TEXT_MUTED_DARK, TEXT_MUTED_LIGHT, is_dark_mode
+from core.theme import (
+    ACCENT_AMBER,
+    LOG_INK,
+    PRIMARY,
+    TERMINAL_BG_DARK,
+    TERMINAL_BG_LIGHT,
+    TEXT_MUTED_DARK,
+    TEXT_MUTED_LIGHT,
+    is_dark_mode,
+)
 from core.tokens import FONT_LG, FONT_MD, FONT_SM, RADIUS_MD, SPACE_LG, SPACE_MD, SPACE_SM
 from core.versions import ffmpeg_version, pyav_version
 from services.command_parser import CommandError, OpPlan, help_text, parse_command, tokenize
@@ -32,8 +41,8 @@ _LEVEL_COLORS = {
     "note": ACCENT_AMBER,
     "plan": PRIMARY,
     "ok": SUCCESS,
-    "in": "#9CA3AF",
-    "info": "#9CA3AF",
+    "in": LOG_INK,
+    "info": LOG_INK,
 }
 
 
@@ -260,7 +269,7 @@ def TerminalScreen() -> ft.Control:
             ft.Container(
                 height=280,
                 border_radius=RADIUS_MD,
-                bgcolor="#0D0D0D" if is_dark else "#101418",
+                bgcolor=TERMINAL_BG_DARK if is_dark else TERMINAL_BG_LIGHT,
                 padding=ft.Padding(SPACE_MD, SPACE_MD, SPACE_MD, SPACE_MD),
                 content=ft.ListView(
                     controls=[

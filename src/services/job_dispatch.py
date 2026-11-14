@@ -5,6 +5,18 @@ facade is passed in (tests import and call these directly)."""
 
 from __future__ import annotations
 
+from core.constants import (
+    DEFAULT_AUDIO_CODEC,
+    DEFAULT_CONTAINER,
+    DEFAULT_EXTRACT_FORMAT,
+    DEFAULT_GIF_FPS,
+    DEFAULT_GIF_WIDTH,
+    DEFAULT_JPEG_FORMAT,
+    DEFAULT_SUBTITLE_FORMAT,
+    DEFAULT_VIDEO_CODEC,
+    DEFAULT_VIDEO_PRESET,
+)
+
 
 def _build_job_dispatch(engine, state, job, _on_progress, cancel_evt):
     """Build the per-op engine call for one job.
@@ -18,10 +30,10 @@ def _build_job_dispatch(engine, state, job, _on_progress, cancel_evt):
         engine.convert(
             input_path=job.input_path,
             output_path=job.output_path,
-            video_codec=p.get("video_codec", "libx264"),
-            audio_codec=p.get("audio_codec", "aac"),
+            video_codec=p.get("video_codec", DEFAULT_VIDEO_CODEC),
+            audio_codec=p.get("audio_codec", DEFAULT_AUDIO_CODEC),
             crf=p.get("crf", 23),
-            preset=p.get("preset", "medium"),
+            preset=p.get("preset", DEFAULT_VIDEO_PRESET),
             fps=p.get("fps"),
             scale_width=p.get("scale_width"),
             scale_height=p.get("scale_height"),
@@ -81,7 +93,7 @@ def _build_job_dispatch(engine, state, job, _on_progress, cancel_evt):
         engine.extract_audio(
             input_path=job.input_path,
             output_path=job.output_path,
-            format_name=p.get("format_name", "mp3"),
+            format_name=p.get("format_name", DEFAULT_EXTRACT_FORMAT),
             bitrate_kbps=p.get("bitrate_kbps", 192),
             target_lufs=p.get("target_lufs"),
             channels=p.get("channels"),
@@ -98,7 +110,7 @@ def _build_job_dispatch(engine, state, job, _on_progress, cancel_evt):
             input_path=job.input_path,
             output_dir=job.output_path,
             count=p.get("count", 5),
-            format_name=p.get("format_name", "jpg"),
+            format_name=p.get("format_name", DEFAULT_JPEG_FORMAT),
             on_progress=_on_progress,
             cancel_event=cancel_evt,
         )
@@ -108,7 +120,7 @@ def _build_job_dispatch(engine, state, job, _on_progress, cancel_evt):
             input_path=job.input_path,
             output_path=job.output_path,
             stream_index=p.get("stream_index", 0),
-            format_name=p.get("format_name", "srt"),
+            format_name=p.get("format_name", DEFAULT_SUBTITLE_FORMAT),
             on_progress=_on_progress,
             cancel_event=cancel_evt,
         )
@@ -133,7 +145,7 @@ def _build_job_dispatch(engine, state, job, _on_progress, cancel_evt):
         engine.concat(
             paths=p.get("paths", [job.input_path]),
             output_path=job.output_path,
-            container_format=p.get("container", "mp4"),
+            container_format=p.get("container", DEFAULT_CONTAINER),
             transition=p.get("transition", "cut"),
             fade_s=p.get("fade_s", 0.5),
             video_codec=p.get("video_codec"),
@@ -154,8 +166,8 @@ def _build_job_dispatch(engine, state, job, _on_progress, cancel_evt):
         engine.create_gif(
             input_path=job.input_path,
             output_path=job.output_path,
-            fps=p.get("fps", 15),
-            width=p.get("width", 480),
+            fps=p.get("fps", DEFAULT_GIF_FPS),
+            width=p.get("width", DEFAULT_GIF_WIDTH),
             start_s=p.get("start_s", 0.0),
             duration_s=p.get("duration_s", 5.0),
             encoder_options=p.get("encoder_options"),

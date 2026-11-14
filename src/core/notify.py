@@ -19,11 +19,13 @@ import logging
 
 import flet as ft
 
+from core.theme import DANGER_RED as ERROR
+from core.theme import SUCCESS_GREEN as SUCCESS
+
 logger = logging.getLogger(__name__)
 
 # House semantic pair (reused verbatim across sibling apps)
-SUCCESS = "#2E7D32"
-ERROR = "#D32F2F"
+
 
 _SNACK_ATTR = "_house_snack"
 

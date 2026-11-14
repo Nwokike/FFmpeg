@@ -8,11 +8,15 @@ import flet as ft
 
 from components.encoder_options import ContainerOptionRows, EncoderOptionPanel, OptionValues
 from components.tool_job_status import tool_job_row
+from core.constants import (
+    DEFAULT_EXTRACT_FORMAT,
+    DEFAULT_SUBTITLE_FORMAT,
+)
 from core.engine_probe import can_encode_format
 from core.state import Job, use_app_state
 from core.storage_paths import format_bytes, get_temp_dir, unique_temp_name
 from core.styles import card_container, section_header
-from core.theme import ACCENT_CYAN, TEXT_MUTED_DARK, TEXT_MUTED_LIGHT, is_dark_mode
+from core.theme import ACCENT_CYAN, ACCENT_RED, TEXT_MUTED_DARK, TEXT_MUTED_LIGHT, is_dark_mode
 from core.tokens import FONT_LG, FONT_MD, FONT_SM, RADIUS_LG, SPACE_MD, SPACE_SM
 from state.controller_ctx import use_controller
 
@@ -64,13 +68,13 @@ def ExtractScreen() -> ft.Control:
     duration_s = max(0.5, info.duration_s if info and info.duration_s else 10.0)
 
     mode, set_mode = ft.use_state("audio")  # "audio", "frames", "gif", "subtitles"
-    audio_fmt, set_audio_fmt = ft.use_state("mp3")
+    audio_fmt, set_audio_fmt = ft.use_state(DEFAULT_EXTRACT_FORMAT)
     audio_kbps, set_audio_kbps = ft.use_state(192)
     frame_count, set_frame_count = ft.use_state(5)
     gif_fps, set_gif_fps = ft.use_state(15)
     gif_width, set_gif_width = ft.use_state(480)
     gif_duration, set_gif_duration = ft.use_state(min(5.0, duration_s))
-    sub_fmt, set_sub_fmt = ft.use_state("srt")
+    sub_fmt, set_sub_fmt = ft.use_state(DEFAULT_SUBTITLE_FORMAT)
     sub_sel, set_sub_sel = ft.use_state(0)  # index into sub_streams
     muxer_rows, set_muxer_rows = ft.use_state([])
     # Touched encoder settings per codec (ref: mutated in place by the panel,
@@ -485,7 +489,7 @@ def ExtractScreen() -> ft.Control:
             *_codec_panel(),
             ContainerOptionRows(muxer_rows, set_muxer_rows, is_dark=is_dark),
             *(
-                [ft.Text(start_blocked_reason, size=FONT_SM, color="#EF4444")]
+                [ft.Text(start_blocked_reason, size=FONT_SM, color=ACCENT_RED)]
                 if start_blocked_reason
                 else []
             ),

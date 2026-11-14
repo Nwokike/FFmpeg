@@ -151,6 +151,6 @@ def test_job_dispatch_fails_loud_on_unknown_op():
 
 def test_convert_dispatch_plumbs_preset():
     text = (_REPO / "src" / "services" / "job_dispatch.py").read_text(encoding="utf-8")
-    assert 'preset=p.get("preset", "medium")' in text, (
+    assert 'preset=p.get("preset", DEFAULT_VIDEO_PRESET)' in text, (
         "parser-emitted preset must reach the convert dispatch"
     )

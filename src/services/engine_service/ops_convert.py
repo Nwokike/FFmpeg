@@ -20,6 +20,14 @@ from services.engine_service.options import (
 from services.engine_service.resolve import _resolve_or_raw
 from services.job_model import FilterChain, InputSpec, Job, OutputSpec, StreamSpec
 
+# Target-size compression math (shared shape with the Compress screen's estimate).
+CONTAINER_HEADROOM = 0.92  # 8% muxer/container safety margin
+AUDIO_BITRATE_CAP = 128_000
+AUDIO_BITRATE_FLOOR = 64_000
+AUDIO_BITRATE_SHARE = 0.15  # audio takes 15% of the total budget
+VIDEO_BITRATE_FLOOR = 100_000
+RESOLUTION_LADDER = ((400_000, 854), (1_000_000, 1280))  # (bitrate cap, width)
+
 
 def convert(
     input_path: str,
@@ -207,11 +215,13 @@ def compress_to_target(
     """
     info = probe_media(input_path)
     duration = max(1.0, info.duration_s)
-    target_bits = target_size_mb * 8 * 1024 * 1024 * 0.92  # 8% safety headroom
+    target_bits = target_size_mb * 8 * 1024 * 1024 * CONTAINER_HEADROOM  # 8% safety headroom
     total_bitrate = int(target_bits / duration)
 
-    audio_bitrate = min(128000, max(64000, int(total_bitrate * 0.15)))
-    video_bitrate = max(100000, total_bitrate - audio_bitrate)
+    audio_bitrate = min(
+        AUDIO_BITRATE_CAP, max(AUDIO_BITRATE_FLOOR, int(total_bitrate * AUDIO_BITRATE_SHARE))
+    )
+    video_bitrate = max(VIDEO_BITRATE_FLOOR, total_bitrate - audio_bitrate)
 
     # Resolution downscale ladder for low target bitrates (derived from the
     # probed source dimensions, never written back to the caller).

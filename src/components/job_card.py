@@ -16,6 +16,10 @@ from core.styles import card_container, status_badge
 from core.theme import (
     ACCENT_AMBER,
     ACCENT_RED,
+    BADGE_ERROR_DARK,
+    BADGE_ERROR_LIGHT,
+    BADGE_RUNNING_DARK,
+    BADGE_RUNNING_LIGHT,
     PRIMARY,
     PRIMARY_CONTAINER_DARK,
     PRIMARY_CONTAINER_LIGHT,
@@ -56,10 +60,10 @@ def job_card_view(job: Job, is_dark: bool = True) -> ft.Control:
         bg_status = PRIMARY_CONTAINER_DARK if is_dark else PRIMARY_CONTAINER_LIGHT
     elif status == "running":
         status_color = ACCENT_AMBER
-        bg_status = "#3D2E0B" if is_dark else "#FEF3C7"
+        bg_status = BADGE_RUNNING_DARK if is_dark else BADGE_RUNNING_LIGHT
     elif status == "failed":
         status_color = ACCENT_RED
-        bg_status = "#3E1C1C" if is_dark else "#FEE2E2"
+        bg_status = BADGE_ERROR_DARK if is_dark else BADGE_ERROR_LIGHT
     else:
         status_color = muted
         bg_status = SURFACE_CARD_DARK if is_dark else SURFACE_CARD_LIGHT

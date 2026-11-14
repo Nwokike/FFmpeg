@@ -8,6 +8,7 @@ import flet as ft
 
 from components.encoder_options import ContainerOptionRows, EncoderOptionPanel, OptionValues
 from components.tool_job_status import tool_job_row
+from core.constants import COMPRESS_PRESETS
 from core.engine_probe import codec_label
 from core.notify import ERROR, show_snack
 from core.state import Job, use_app_state
@@ -98,12 +99,7 @@ def CompressScreen() -> ft.Control:
     busy = running_job is not None
 
     # Preset sizes (MB)
-    presets = [
-        ("whatsapp", "WhatsApp (16 MB)", 16.0),
-        ("discord", "Discord (25 MB)", 25.0),
-        ("email", "Email (10 MB)", 10.0),
-        ("small", "Ultra Small (5 MB)", 5.0),
-    ]
+    presets = COMPRESS_PRESETS
 
     # Estimated split mirrors the engine (total minus audio headroom):
     # the old readout showed the TOTAL as video kbps (15-20% high at 5MB/60s).

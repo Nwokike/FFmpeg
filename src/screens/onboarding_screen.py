@@ -15,6 +15,8 @@ import flet as ft
 from core.assets import app_icon_svg
 from core.state import use_app_state
 from core.theme import (
+    DOT_INACTIVE_DARK,
+    DOT_INACTIVE_LIGHT,
     PRIMARY,
     PRIMARY_CONTAINER_DARK,
     PRIMARY_CONTAINER_LIGHT,
@@ -107,7 +109,9 @@ def OnboardingScreen() -> ft.Control:
             width=24 if i == slide_idx else 8,
             height=8,
             border_radius=RADIUS_FULL,
-            bgcolor=PRIMARY if i == slide_idx else ("#2A2E35" if is_dark else "#D1D5DB"),
+            bgcolor=PRIMARY
+            if i == slide_idx
+            else (DOT_INACTIVE_DARK if is_dark else DOT_INACTIVE_LIGHT),
             animate=ft.Animation(200, ft.AnimationCurve.EASE_OUT),
             on_click=lambda _, i=i: set_slide_idx(i),
         )

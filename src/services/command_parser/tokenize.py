@@ -42,4 +42,3 @@ def tokenize(command: str) -> list[str]:
             _refuse("empty quoted string is not a valid path or value")
         tokens.append("".join(buf))
     return tokens
-

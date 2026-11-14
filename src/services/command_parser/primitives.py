@@ -23,6 +23,7 @@ AUDIO_EXTS = {".mp3", ".aac", ".m4a", ".flac", ".opus", ".ogg", ".wav", ".oga"}
 SUBTITLE_EXTS = {".srt", ".vtt", ".ass", ".webvtt"}
 VIDEO_EXTS = {".mp4", ".mkv", ".mov", ".avi", ".webm", ".ts", ".flv", ".m4v", ".mpg", ".mpeg"}
 
+
 def _parse_ts(value: str, flag: str) -> float:
     """``HH:MM:SS(.ms)`` | ``MM:SS`` | plain seconds → seconds."""
     bad = f"{flag} expects a timestamp (12, 1:02, or 00:01:02.5), got {value!r}"
@@ -148,9 +149,11 @@ def _map_spec(value: str, flag: str = "-map") -> tuple[str | None, int]:
         _refuse(f"{flag} {value!r} needs a stream index (e.g. 0:v:1)")
     return kind, int(text)
 
+
 def _codec_bits(value: str) -> str:
     """Drop a trailing ``(label)`` FFmpeg sometimes prints after a codec name."""
     return value.strip().split(" ")[0]
+
 
 def _check_pix_fmt(codec: str, pix_fmt: str) -> None:
     """Refuse a pixel format this encoder does not declare (measured)."""
@@ -165,6 +168,7 @@ def _check_pix_fmt(codec: str, pix_fmt: str) -> None:
             f"{codec} cannot encode {pix_fmt!r} — it declares "
             f"{', '.join(sorted(formats)[:8])}{' …' if len(formats) > 8 else ''}"
         )
+
 
 def _probe_encoder(codec: str) -> str:
     """Resolve an encoder name against the wheel (canonical name or refusal)."""
@@ -193,4 +197,3 @@ def _encoder_takes_option(codec: str, name: str, value: str) -> bool:
     from services.engine_service import _supported_encoder_options
 
     return bool(_supported_encoder_options(codec, {name: value}))
-

@@ -155,3 +155,69 @@ def kind_refusal(target_view: str, kind: str) -> str:
         f"{op_title(target_view)} works on {want} — this file is "
         f"{KIND_LABELS.get(kind, kind)}. Pick a different file or a different tool."
     )
+
+
+# ── App-level format/codec/preset choices ────────────────────────────────────
+# These are the USER-FACING default targets the screens offer (which encoder
+# and container the UI pre-selects, which targets it lists). Capability truth
+# lives in core.engine_probe — the screens gate every choice through it.
+
+DEFAULT_VIDEO_CODEC = "libx264"
+DEFAULT_AUDIO_CODEC = "aac"
+DEFAULT_VIDEO_PRESET = "medium"
+DEFAULT_CONTAINER = "mp4"
+DEFAULT_EXTRACT_FORMAT = "mp3"
+DEFAULT_STUDIO_FORMAT = "m4a"
+DEFAULT_SUBTITLE_FORMAT = "srt"
+DEFAULT_GIF_FPS = 15
+DEFAULT_GIF_WIDTH = 480
+DEFAULT_JPEG_FORMAT = "jpg"
+DEFAULT_FRAMES_COUNT = 5
+
+IMAGE_CONTAINERS = ("png", "jpg", "webp")
+LOSSLESS_FORMATS = ("wav", "flac")
+JOIN_CONTAINERS = ("mp4", "mkv")
+EXPORT_VIDEO_EXTS = (".mp4", ".mkv", ".mov", ".webm", ".avi", ".ts")
+EXPORT_AUDIO_EXTS = (".mp3", ".aac", ".m4a", ".flac", ".opus", ".wav")
+EXPORT_IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".gif")
+SIDECAR_SUB_EXTS = (".srt", ".vtt")
+SUBTITLE_FORMATS = ("srt", "ass", "webvtt")
+
+# Audio Studio
+LOUDNESS_PRESETS = (
+    ("off", "Off (passthrough)", None),
+    ("youtube", "YouTube / Music (-14 LUFS)", -14.0),
+    ("podcast", "Podcast / Vocal (-16 LUFS)", -16.0),
+    ("broadcast", "Broadcast (-23 LUFS)", -23.0),
+)
+BITRATE_PRESETS = (
+    ("Opus/AAC 128k", 128),
+    ("Standard 192k", 192),
+    ("High 256k", 256),
+    ("Max 320k", 320),
+)
+DEFAULT_STUDIO_BITRATE_KEY = "Standard 192k"
+STUDIO_RATES = (48000, 44100, 32000)
+
+# Compress
+COMPRESS_PRESETS = (
+    ("whatsapp", "WhatsApp (16 MB)", 16.0),
+    ("discord", "Discord (25 MB)", 25.0),
+    ("email", "Email (10 MB)", 10.0),
+    ("small", "Ultra Small (5 MB)", 5.0),
+)
+
+# Filters screen chip groups
+DENOISE_LEVELS = ("low", "strong")
+CROP_ASPECTS = ("original", "16:9", "1:1", "4:5")
+VIDEO_FILTER_CANDIDATES = ("hqdn3d", "nlmeans", "atadenoise")
+SHARPEN_FILTER = "unsharp"
+EQ_FILTER = "eq"
+WM_FILTERS = ("movie", "overlay")
+
+# Streams screen
+STREAM_FORMATS = {
+    "mp4": ("mp4", None),
+    "ts": ("ts", "mpegts"),
+    "mkv": ("mkv", "matroska"),
+}
