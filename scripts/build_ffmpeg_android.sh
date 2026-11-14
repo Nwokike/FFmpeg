@@ -41,6 +41,12 @@ if [ ! -d "$FAM_DIR/.git" ]; then
 fi
 git -C "$FAM_DIR" checkout --quiet "$FAM_COMMIT"
 
+# CMake 4.x removed compatibility with cmake_minimum_required < 3.5, and
+# libx265 still declares 3.2. This env var (supported since CMake 4.0) tells
+# every cmake in the tree to treat 3.5 as the floor; a no-op for the libs that
+# already require more.
+export CMAKE_POLICY_VERSION_MINIMUM=3.5
+
 # ── Overlay: extra external codec libraries (ogg/vorbis/svtav1) ────────────
 "$ROOT/scripts/ffmpeg-android-maker-ext/apply.sh" "$FAM_DIR"
 

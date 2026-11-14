@@ -70,6 +70,15 @@ if "libogg is a dependency" not in text:
         "done"
     )
     fb.write_text(text.replace(old, new, 1))
+
+# 3) mbedtls/build.sh: download.sh clones the tag into ${MBEDTLS_VERSION}
+#    (v3.6.3) but build.sh cd's into mbedtls-${MBEDTLS_VERSION} — a directory
+#    that never exists. Upstream bug at the pin; without set -e the failing
+#    cd is swallowed and mbedtls is silently skipped.
+mb = forge / "scripts" / "mbedtls" / "build.sh"
+text = mb.read_text()
+if "cd mbedtls-${MBEDTLS_VERSION}" in text:
+    mb.write_text(text.replace("cd mbedtls-${MBEDTLS_VERSION}", "cd ${MBEDTLS_VERSION}", 1))
 print("overlay applied:", [p.name for p in (forge / "scripts").iterdir() if p.name in ("libogg", "libvorbis", "libsvtav1")])
 PY
 echo ">> overlay applied to $FORGE"
