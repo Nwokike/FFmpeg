@@ -100,8 +100,17 @@ jobs:
           if felb != env_b:
               errs.append(f"tool.flet.build_number {felb} != BUILD_NUMBER {env_b}")
 
+          # PEP 440 comparison — the dotted-int tuple flagged "1.0" vs "1.0.0"
+          # (the same version) as AHEAD and crashed on pre-release strings
+          # (proot-distro-flet's release.md documents this exact bug).
+          from packaging.version import InvalidVersion, Version
+
           def vt(s):
-              return tuple(int(x) for x in s.split("."))
+              try:
+                  return Version(s)
+              except InvalidVersion:
+                  errs.append(f"version {s!r} is not PEP 440")
+                  return Version("0")
 
           if vj is None:
               print("NOTICE: version.json held back (absent)")
@@ -213,6 +222,24 @@ jobs:
         run: python3 scripts/build_flet_libffmpeg_wheel.py --ffmpeg-prefix .wrap-work/ffmpeg-android-maker/build/ffmpeg --out wheels
       - name: Build av 19.0.2 Android wheels (mobile-forge)
         run: scripts/build_av_android_wheels.sh wheels
+      - name: Audit the wheel set (one libffmpeg + one av wheel per ABI)
+        run: |
+          set -euo pipefail
+          # Audit the artifact, not just the build exit code (proot-distro-flet
+          # pattern): a wheel that quietly lacks a payload lib would surface
+          # much later as a runtime failure on the device.
+          ls -lh wheels/
+          for abi in arm64-v8a armeabi-v7a x86_64; do
+            ff=$(ls wheels/flet_libffmpeg-*android_24_${abi}.whl 2>/dev/null | wc -l)
+            av=$(ls wheels/av-*android_24_${abi}.whl 2>/dev/null | wc -l)
+            [ "$ff" -eq 1 ] || { echo "::error::expected exactly 1 flet_libffmpeg wheel for ${abi}, found $ff"; exit 1; }
+            [ "$av" -eq 1 ] || { echo "::error::expected exactly 1 av wheel for ${abi}, found $av"; exit 1; }
+            wheel=$(ls wheels/flet_libffmpeg-*android_24_${abi}.whl)
+            for lib in libavcodec.so libavdevice.so libavfilter.so libavformat.so libavutil.so libswresample.so libswscale.so; do
+              unzip -l "$wheel" | grep -q "opt/lib/${lib}" || { echo "::error::${lib} missing from $(basename "$wheel")"; exit 1; }
+            done
+            unzip -l "$(ls wheels/av-*android_24_${abi}.whl)" | grep -q "av/__init__.py" || { echo "::error::av package missing from the av wheel (${abi})"; exit 1; }
+          done
       - uses: actions/upload-artifact@v4
         with:
           name: android-wheels
@@ -251,7 +278,20 @@ jobs:
           FLET_ANDROID_SIGNING_KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
           FLET_ANDROID_SIGNING_KEY_STORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
           FLET_ANDROID_SIGNING_KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
-        run: uv run flet build apk --python-version 3.14 --yes --project ffmpeg --product "FFmpeg AV" --org ng.kiri --company "Kiri Research Labs" --build-version ${{ env.BUILD_VERSION }} --build-number ${{ env.BUILD_NUMBER }} --split-per-abi -v
+        run: |
+          # Upstream download flakes (mobile-forge fetches, Gradle plugin
+          # ETag/temp state, CDN truncation) can kill one build per run —
+          # proot-distro-flet's answer: a clean retry, three attempts.
+          for attempt in 1 2 3; do
+            echo "== flet build apk — attempt $attempt"
+            if uv run flet build apk --python-version 3.14 --yes --project ffmpeg --product "FFmpeg AV" --org ng.kiri --company "Kiri Research Labs" --build-version ${{ env.BUILD_VERSION }} --build-number ${{ env.BUILD_NUMBER }} --split-per-abi -v; then
+              exit 0
+            fi
+            echo "== attempt $attempt failed — cleaning and retrying"
+            uv run flet clean || true
+            sleep 15
+          done
+          exit 1
       - name: Size report
         if: always()
         run: ls -lh build/apk/*.apk
@@ -299,7 +339,18 @@ jobs:
           FLET_ANDROID_SIGNING_KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
           FLET_ANDROID_SIGNING_KEY_STORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
           FLET_ANDROID_SIGNING_KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
-        run: uv run flet build aab --python-version 3.14 --yes --project ffmpeg --product "FFmpeg AV" --org ng.kiri --company "Kiri Research Labs" --build-version ${{ env.BUILD_VERSION }} --build-number ${{ env.BUILD_NUMBER }} -v
+        run: |
+          # Same clean-retry contract as the APK job.
+          for attempt in 1 2 3; do
+            echo "== flet build aab — attempt $attempt"
+            if uv run flet build aab --python-version 3.14 --yes --project ffmpeg --product "FFmpeg AV" --org ng.kiri --company "Kiri Research Labs" --build-version ${{ env.BUILD_VERSION }} --build-number ${{ env.BUILD_NUMBER }} -v; then
+              exit 0
+            fi
+            echo "== attempt $attempt failed — cleaning and retrying"
+            uv run flet clean || true
+            sleep 15
+          done
+          exit 1
       - name: Size report
         if: always()
         run: ls -lh build/aab/*.aab
