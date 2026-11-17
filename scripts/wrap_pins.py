@@ -24,6 +24,14 @@ FAM_COMMIT = "dd72b161ae5c759fd25a5cab971a3ff710f0bdba"
 NDK_R = "r27c"
 NDK_URL = f"https://dl.google.com/android/repository/android-ndk-{NDK_R}-linux.zip"
 
+# CMake for the cross-build: the last 3.x release. CMake 4 refuses libx265's
+# cmake_minimum_required 3.2 AND the CMP0025/CMP0054 OLD policies x265 4.1
+# still sets (removed in CMake 4.0; x265 only switched them to NEW in 4.2).
+# There is no env override for individual policies, so the toolchain itself is
+# pinned here — the same _PINNED_SOURCES discipline as proot-distro-flet's
+# wheel builders. ffmpeg-android-maker resolves cmake via `which cmake`.
+CMAKE_PIP_SPEC = "cmake==3.31.6"
+
 # mobile-forge — the PyAV Android wheel builder.
 FORGE_REPO = "https://github.com/flet-dev/mobile-forge"
 FORGE_COMMIT = "d2cb18b58226d958a2efa25bcbe126ce7a8ab19c"

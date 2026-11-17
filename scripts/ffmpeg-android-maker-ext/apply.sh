@@ -71,14 +71,29 @@ if "libogg is a dependency" not in text:
     )
     fb.write_text(text.replace(old, new, 1))
 
-# 3) mbedtls/build.sh: download.sh clones the tag into ${MBEDTLS_VERSION}
-#    (v3.6.3) but build.sh cd's into mbedtls-${MBEDTLS_VERSION} — a directory
-#    that never exists. Upstream bug at the pin; without set -e the failing
-#    cd is swallowed and mbedtls is silently skipped.
+# 3) mbedtls/build.sh: the build loop cd's into SOURCES_DIR_mbedtls
+#    (<parent>/v3.6.3) before sourcing build.sh, but upstream's build.sh
+#    cd's AGAIN into mbedtls-${MBEDTLS_VERSION} — a directory that never
+#    exists (the download clones the tag into ${MBEDTLS_VERSION}). Upstream
+#    bug at the pin; without set -e the failing cd is swallowed and mbedtls
+#    is silently skipped. Drop the stale cd: every other component's
+#    build.sh already assumes cwd = sources root.
 mb = forge / "scripts" / "mbedtls" / "build.sh"
 text = mb.read_text()
-if "cd mbedtls-${MBEDTLS_VERSION}" in text:
-    mb.write_text(text.replace("cd mbedtls-${MBEDTLS_VERSION}", "cd ${MBEDTLS_VERSION}", 1))
+if "already cd'd into" not in text:
+    stale = (
+        "# mbedtls authors park their source in a directory named"
+        "  mbedtls-${MBEDTLS_VERSION}\n"
+        "# instead of root directory\n"
+        "cd mbedtls-${MBEDTLS_VERSION}\n"
+    )
+    assert stale in text, "mbedtls stale cd not found"
+    fixed = (
+        "# The build loop has already cd'd into ${MBEDTLS_VERSION} (the\n"
+        "# download clones the tag there); upstream's stale cd is patched out\n"
+        "# by scripts/ffmpeg-android-maker-ext/apply.sh.\n"
+    )
+    mb.write_text(text.replace(stale, fixed, 1))
 print("overlay applied:", [p.name for p in (forge / "scripts").iterdir() if p.name in ("libogg", "libvorbis", "libsvtav1")])
 PY
 echo ">> overlay applied to $FORGE"

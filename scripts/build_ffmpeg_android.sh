@@ -41,11 +41,19 @@ if [ ! -d "$FAM_DIR/.git" ]; then
 fi
 git -C "$FAM_DIR" checkout --quiet "$FAM_COMMIT"
 
-# CMake 4.x removed compatibility with cmake_minimum_required < 3.5, and
-# libx265 still declares 3.2. This env var (supported since CMake 4.0) tells
-# every cmake in the tree to treat 3.5 as the floor; a no-op for the libs that
-# already require more.
-export CMAKE_POLICY_VERSION_MINIMUM=3.5
+# ── CMake 3.31.x (pinned in wrap_pins.py) ───────────────────────────────────
+# CMake 4 refuses libx265's cmake_minimum_required 3.2 and the CMP0025/CMP0054
+# OLD policies x265 4.1 still sets (removed in CMake 4.0) — no env override
+# exists for the policies, so the toolchain itself is pinned. `which cmake`
+# inside ffmpeg-android-maker resolves through PATH.
+CMAKE_VENV="$WORK/cmake-venv"
+if [ ! -x "$CMAKE_VENV/bin/cmake" ]; then
+    uv venv --quiet "$CMAKE_VENV"
+    uv pip install --python "$CMAKE_VENV/bin/python" --quiet \
+        "$(python3 "$ROOT/scripts/wrap_pins.py" --value CMAKE_PIP_SPEC)"
+fi
+export PATH="$CMAKE_VENV/bin:$PATH"
+echo ">> cmake: $(cmake --version | head -1)"
 
 # ── Overlay: extra external codec libraries (ogg/vorbis/svtav1) ────────────
 "$ROOT/scripts/ffmpeg-android-maker-ext/apply.sh" "$FAM_DIR"
