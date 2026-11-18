@@ -10,6 +10,7 @@ from pathlib import Path
 import flet as ft
 
 from components.encoder_options import ContainerOptionRows, EncoderOptionPanel, OptionValues
+from components.studio import chip_group, media_summary_card, screen_header
 from components.tool_job_status import tool_job_row
 from core.engine_probe import codec_label
 from core.notify import ERROR, show_snack
@@ -434,48 +435,17 @@ def CutScreen() -> ft.Control:
 
     return ft.ListView(
         controls=[
-            # Header
-            ft.Row(
-                controls=[
-                    ft.IconButton(
-                        icon=ft.Icons.ARROW_BACK_ROUNDED,
-                        on_click=lambda _: ctrl.navigate("dashboard"),
-                        tooltip="Back to Dashboard",
-                    ),
-                    ft.Text("Trim & Cut Segment", size=FONT_LG, weight=ft.FontWeight.BOLD),
-                ],
-                spacing=SPACE_SM,
-            ),
-            # Input file overview
-            card_container(
-                content=ft.Row(
-                    controls=[
-                        ft.Icon(ft.Icons.CONTENT_CUT_ROUNDED, size=32, color=ACCENT_AMBER),
-                        ft.Column(
-                            controls=[
-                                ft.Text(
-                                    file_name,
-                                    size=FONT_MD,
-                                    weight=ft.FontWeight.BOLD,
-                                    max_lines=1,
-                                    overflow=ft.TextOverflow.ELLIPSIS,
-                                ),
-                                ft.Text(
-                                    f"Total Duration: {_format_time_s(total_dur)} • {file_size_str}",
-                                    size=FONT_SM,
-                                    color=muted,
-                                ),
-                            ],
-                            spacing=2,
-                            expand=True,
-                        ),
-                        ft.OutlinedButton("Change", on_click=lambda _: ctrl.pick_media_for("cut")),
-                    ],
-                    alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
-                ),
-                padding=SPACE_MD,
-                border_radius=RADIUS_LG,
+            screen_header(
+                "Cut & Trim",
+                subtitle=file_name,
+                on_back=lambda: ctrl.navigate("dashboard"),
                 is_dark=is_dark,
+            ),
+            media_summary_card(
+                media_path,
+                info,
+                is_dark=is_dark,
+                on_change=lambda: ctrl.pick_media_for("cut"),
             ),
             # Trim boundaries display
             card_container(
@@ -636,7 +606,8 @@ def CutScreen() -> ft.Control:
                                 else keyframes[:: (len(keyframes) + 11) // 12][:12]
                             )
                         ],
-                        wrap=True,
+                        wrap=False,
+                        scroll=ft.ScrollMode.AUTO,
                         spacing=SPACE_SM,
                     ),
                     ft.Text(
@@ -650,21 +621,10 @@ def CutScreen() -> ft.Control:
             ),
             # Mode toggle
             section_header("Processing Mode", "Cutting method", is_dark=is_dark),
-            ft.Row(
-                controls=[
-                    ft.Chip(
-                        label=ft.Text("Stream Copy (Lossless)"),
-                        selected=stream_copy,
-                        on_select=lambda _: set_stream_copy(True),
-                    ),
-                    ft.Chip(
-                        label=ft.Text("Re-encode (Frame-Accurate)"),
-                        selected=not stream_copy,
-                        on_select=lambda _: set_stream_copy(False),
-                    ),
-                ],
-                wrap=True,
-                spacing=SPACE_SM,
+            chip_group(
+                [("Stream Copy (Lossless)", True), ("Re-encode (Frame-Accurate)", False)],
+                value=stream_copy,
+                on_change=set_stream_copy,
             ),
             # Re-encode codec: measured, never assumed. Stream-copy needs no
             # encoder so this only shows for the re-encode path.
@@ -675,17 +635,10 @@ def CutScreen() -> ft.Control:
                         f"Frame-accurate trim encodes with {codec_label(chosen_video) if chosen_video else '—'}",
                         is_dark=is_dark,
                     ),
-                    ft.Row(
-                        controls=[
-                            ft.Chip(
-                                label=ft.Text(codec_label(enc)),
-                                selected=chosen_video == enc,
-                                on_click=lambda _, e=enc: set_v_codec(e),
-                            )
-                            for enc in available_video
-                        ],
-                        wrap=True,
-                        spacing=SPACE_SM,
+                    chip_group(
+                        [(codec_label(enc), enc) for enc in available_video],
+                        value=chosen_video,
+                        on_change=set_v_codec,
                     ),
                 ]
                 if not stream_copy
