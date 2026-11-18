@@ -495,7 +495,7 @@ def AudioScreen() -> ft.Control:
                 [
                     section_header("Bitrate", "Target for lossy codecs", is_dark=is_dark),
                     chip_group(
-                        [(label, name) for label, _ in _BITRATE_CHOICES],
+                        [(label, label) for label, _ in _BITRATE_CHOICES],
                         value=bitrate_key,
                         on_change=set_bitrate_key,
                         is_dark=is_dark,
