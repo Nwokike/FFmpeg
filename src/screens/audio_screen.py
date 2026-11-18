@@ -8,7 +8,7 @@ from pathlib import Path
 import flet as ft
 
 from components.encoder_options import ContainerOptionRows, EncoderOptionPanel, OptionValues
-from components.studio import media_summary_card, screen_header
+from components.studio import chip_group, media_summary_card, screen_header
 from components.tool_job_status import tool_job_row
 from core.constants import (
     BITRATE_PRESETS,
@@ -63,6 +63,9 @@ def AudioScreen() -> ft.Control:
     sample_rate, set_sample_rate = ft.use_state(48000)
     audio_format, set_audio_format = ft.use_state(DEFAULT_STUDIO_FORMAT)
     bitrate_key, set_bitrate_key = ft.use_state(DEFAULT_STUDIO_BITRATE_KEY)
+    gain_db, set_gain_db = ft.use_state(0.0)
+    fade_in_s, set_fade_in_s = ft.use_state(0.0)
+    fade_out_s, set_fade_out_s = ft.use_state(0.0)
     muxer_rows, set_muxer_rows = ft.use_state([])
     # Touched encoder settings for the derived encoder (ref: mutated in place
     # by the panel, read once at Start — no re-render per keystroke).
@@ -267,6 +270,10 @@ def AudioScreen() -> ft.Control:
                 **({"target_lufs": float(lufs_target)} if lufs_target is not None else {}),
                 "channels": 2 if channel_layout == "stereo" else 1,
                 "sample_rate": int(sample_rate),
+                "gain_db": float(gain_db or 0.0),
+                "fade_in_s": float(fade_in_s or 0.0),
+                "fade_out_s": float(fade_out_s or 0.0),
+                **({"layout": layout} if layout else {}),
                 **({"encoder_options": encoder_opts} if encoder_opts else {}),
                 **({"container_options": muxer_opts} if muxer_opts else {}),
             },
@@ -405,61 +412,80 @@ def AudioScreen() -> ft.Control:
                 "Target integrated loudness (Off skips the measure pass)",
                 is_dark=is_dark,
             ),
+            chip_group(
+                [(label, key) for key, label, _ in _LOUDNESS_CHOICES],
+                value=loudness_key,
+                on_change=set_loudness_key,
+                is_dark=is_dark,
+            ),
+            # Gain and Fades (engine: volume + afade on the source timeline)
+            section_header("Gain & Fades", "Trim levels and shape the ends", is_dark=is_dark),
             ft.Row(
                 controls=[
-                    ft.Chip(
-                        label=ft.Text(label),
-                        selected=loudness_key == key,
-                        on_click=lambda _, k=key: set_loudness_key(k),
-                    )
-                    for key, label, _ in _LOUDNESS_CHOICES
+                    ft.Container(
+                        width=90,
+                        content=ft.Text(f"Gain {gain_db:+.0f} dB", size=FONT_SM),
+                    ),
+                    ft.Slider(
+                        value=float(gain_db),
+                        min=-12.0,
+                        max=12.0,
+                        divisions=24,
+                        on_change=lambda e: set_gain_db(round(float(e.control.value), 1)),
+                    ),
                 ],
-                wrap=True,
+                spacing=SPACE_SM,
+            ),
+            ft.Row(
+                controls=[
+                    ft.Container(width=90, content=ft.Text("Fade In", size=FONT_SM)),
+                    ft.Slider(
+                        value=float(fade_in_s),
+                        min=0,
+                        max=5,
+                        divisions=10,
+                        on_change=lambda e: set_fade_in_s(round(float(e.control.value), 1)),
+                    ),
+                    ft.Text(f"{fade_in_s:.1f}s", size=FONT_SM),
+                ],
+                spacing=SPACE_SM,
+            ),
+            ft.Row(
+                controls=[
+                    ft.Container(width=90, content=ft.Text("Fade Out", size=FONT_SM)),
+                    ft.Slider(
+                        value=float(fade_out_s),
+                        min=0,
+                        max=5,
+                        divisions=10,
+                        on_change=lambda e: set_fade_out_s(round(float(e.control.value), 1)),
+                    ),
+                    ft.Text(f"{fade_out_s:.1f}s", size=FONT_SM),
+                ],
                 spacing=SPACE_SM,
             ),
             # Channel Routing
-            section_header("Channel Routing", "Acoustic layout", is_dark=is_dark),
-            ft.Row(
-                controls=[
-                    ft.Chip(
-                        label=ft.Text("Stereo (2 Channels)"),
-                        selected=channel_layout == "stereo",
-                        on_click=lambda _: set_channel_layout("stereo"),
-                    ),
-                    ft.Chip(
-                        label=ft.Text("Mono (1 Channel)"),
-                        selected=channel_layout == "mono",
-                        on_click=lambda _: set_channel_layout("mono"),
-                    ),
-                ],
-                spacing=SPACE_SM,
+            section_header("Channel Layout", "Acoustic layout", is_dark=is_dark),
+            chip_group(
+                [("Stereo (2 Channels)", "stereo"), ("Mono (1 Channel)", "mono")],
+                value=channel_layout,
+                on_change=set_channel_layout,
+                is_dark=is_dark,
             ),
-            # Sample Rate
             section_header("Sample Rate", "Digital frequency", is_dark=is_dark),
-            ft.Row(
-                controls=[
-                    ft.Chip(
-                        label=ft.Text(f"{r // 1000} kHz"),
-                        selected=sample_rate == r,
-                        on_click=lambda _, rate=r: set_sample_rate(rate),
-                    )
-                    for r in rates
-                ],
-                spacing=SPACE_SM,
+            chip_group(
+                [(f"{r // 1000} kHz", r) for r in rates],
+                value=sample_rate,
+                on_change=set_sample_rate,
+                is_dark=is_dark,
             ),
             # Output Format
             section_header("Output Format", "Container / codec target", is_dark=is_dark),
-            ft.Row(
-                controls=[
-                    ft.Chip(
-                        label=ft.Text(fmt.upper() if fmt != "m4a" else "M4A (AAC)"),
-                        selected=chosen_audio_format == fmt,
-                        on_click=lambda _, f=fmt: set_audio_format(f),
-                    )
-                    for fmt in audio_formats
-                ],
-                wrap=True,
-                spacing=SPACE_SM,
+            chip_group(
+                [(fmt.upper() if fmt != "m4a" else "M4A (AAC)", fmt) for fmt in audio_formats],
+                value=chosen_audio_format,
+                on_change=set_audio_format,
+                is_dark=is_dark,
             ),
             # Every encoder setting this build exposes for the derived codec.
             *_codec_panel(),
@@ -468,17 +494,11 @@ def AudioScreen() -> ft.Control:
             *(
                 [
                     section_header("Bitrate", "Target for lossy codecs", is_dark=is_dark),
-                    ft.Row(
-                        controls=[
-                            ft.Chip(
-                                label=ft.Text(label),
-                                selected=bitrate_key == label,
-                                on_click=lambda _, name=label: set_bitrate_key(name),
-                            )
-                            for label, _ in _BITRATE_CHOICES
-                        ],
-                        wrap=True,
-                        spacing=SPACE_SM,
+                    chip_group(
+                        [(label, name) for label, _ in _BITRATE_CHOICES],
+                        value=bitrate_key,
+                        on_change=set_bitrate_key,
+                        is_dark=is_dark,
                     ),
                 ]
                 if not lossless_audio

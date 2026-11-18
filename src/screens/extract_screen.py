@@ -18,7 +18,7 @@ from core.state import Job, use_app_state
 from core.storage_paths import get_temp_dir, unique_temp_name
 from core.styles import section_header
 from core.theme import ACCENT_RED, TEXT_MUTED_DARK, TEXT_MUTED_LIGHT, is_dark_mode
-from core.tokens import FONT_SM, SPACE_MD, SPACE_SM
+from core.tokens import FONT_SM, SPACE_MD
 from state.controller_ctx import use_controller
 
 # Mode names in display order — the derived-clamp fallback walks this.
@@ -76,6 +76,11 @@ def ExtractScreen() -> ft.Control:
     gif_loop, set_gif_loop = ft.use_state(0)  # 0 = loop forever
     sub_fmt, set_sub_fmt = ft.use_state(DEFAULT_SUBTITLE_FORMAT)
     sub_sel, set_sub_sel = ft.use_state(0)  # index into sub_streams
+    sub_action, set_sub_action = ft.use_state("extract")  # "extract" or "burn"
+    sub_shift, set_sub_shift = ft.use_state(0.0)  # timing offset in seconds
+    frame_mode, set_frame_mode = ft.use_state("stills")  # "stills" or "sheet"
+    sheet_cols, set_sheet_cols = ft.use_state(4)
+    sheet_rows, set_sheet_rows = ft.use_state(3)
     muxer_rows, set_muxer_rows = ft.use_state([])
     # Touched encoder settings per codec (ref: mutated in place by the panel,
     # read once at Start — no re-render per keystroke).
@@ -142,36 +147,68 @@ def ExtractScreen() -> ft.Control:
                 else 0,
             )
         elif active_mode == "subtitles":
-            # Clamp for the engine, which indexes the subtitle SUBLIST
-            # (inp.streams.subtitles) — the container-wide stream index made
-            # it extract a different (or the first) track.
             stream_pos = sub_sel if sub_sel < len(sub_streams) else 0
-            ext = "vtt" if sub_fmt == "webvtt" else sub_fmt
-            out_name = unique_temp_name(stem, ext)
-            out_path = str(get_temp_dir() / out_name)
-            job = Job(
-                op="extract_subtitles",
-                input_path=media_path,
-                output_path=out_path,
-                params={
-                    "stream_index": stream_pos,
-                    "format_name": sub_fmt,
-                },
-                original_size_bytes=Path(media_path).stat().st_size
-                if Path(media_path).exists()
-                else 0,
-            )
+            if sub_action == "burn":
+                out_name = unique_temp_name(f"{stem}_burned_subs", ".mp4")
+                out_path = str(get_temp_dir() / out_name)
+                job = Job(
+                    op="burn_subs",
+                    input_path=media_path,
+                    output_path=out_path,
+                    params={
+                        "sub_stream": stream_pos,
+                        "color": "white",
+                        "position": "bottom",
+                    },
+                    original_size_bytes=Path(media_path).stat().st_size
+                    if Path(media_path).exists()
+                    else 0,
+                )
+            else:
+                ext = "vtt" if sub_fmt == "webvtt" else sub_fmt
+                out_name = unique_temp_name(stem, ext)
+                out_path = str(get_temp_dir() / out_name)
+                job = Job(
+                    op="extract_subtitles",
+                    input_path=media_path,
+                    output_path=out_path,
+                    params={
+                        "stream_index": stream_pos,
+                        "format_name": sub_fmt,
+                        "shift_s": float(sub_shift),
+                    },
+                    original_size_bytes=Path(media_path).stat().st_size
+                    if Path(media_path).exists()
+                    else 0,
+                )
         elif active_mode == "frames":
-            out_dir = str(get_temp_dir() / unique_temp_name(f"{stem}_frames", ""))
-            job = Job(
-                op="extract_frames",
-                input_path=media_path,
-                output_path=out_dir,
-                params={"count": int(frame_count), "format_name": "jpg"},
-                original_size_bytes=Path(media_path).stat().st_size
-                if Path(media_path).exists()
-                else 0,
-            )
+            if frame_mode == "sheet":
+                out_name = unique_temp_name(f"{stem}_sheet", ".png")
+                out_path = str(get_temp_dir() / out_name)
+                job = Job(
+                    op="thumbnail_sheet",
+                    input_path=media_path,
+                    output_path=out_path,
+                    params={
+                        "cols": int(sheet_cols),
+                        "rows": int(sheet_rows),
+                        "width": 160,
+                    },
+                    original_size_bytes=Path(media_path).stat().st_size
+                    if Path(media_path).exists()
+                    else 0,
+                )
+            else:
+                out_dir = str(get_temp_dir() / unique_temp_name(f"{stem}_frames", ""))
+                job = Job(
+                    op="extract_frames",
+                    input_path=media_path,
+                    output_path=out_dir,
+                    params={"count": int(frame_count), "format_name": "jpg"},
+                    original_size_bytes=Path(media_path).stat().st_size
+                    if Path(media_path).exists()
+                    else 0,
+                )
         else:  # gif (active_mode)
             out_name = unique_temp_name(f"{stem}_animated", ".gif")
             out_path = str(get_temp_dir() / out_name)
@@ -339,14 +376,52 @@ def ExtractScreen() -> ft.Control:
             *(
                 [
                     section_header(
-                        "Number of Frames", f"{frame_count} frames across duration", is_dark=is_dark
+                        "Output Style", "Individual images vs single contact sheet", is_dark=is_dark
                     ),
-                    ft.Slider(
-                        value=float(frame_count),
-                        min=1,
-                        max=20,
-                        divisions=19,
-                        on_change=lambda e: set_frame_count(int(e.control.value)),
+                    chip_group(
+                        [("Individual JPEGs", "stills"), ("Tiled Contact Sheet", "sheet")],
+                        value=frame_mode,
+                        on_change=set_frame_mode,
+                        is_dark=is_dark,
+                    ),
+                    *(
+                        [
+                            section_header(
+                                "Number of Frames",
+                                f"{frame_count} frames across duration",
+                                is_dark=is_dark,
+                            ),
+                            ft.Slider(
+                                value=float(frame_count),
+                                min=1,
+                                max=20,
+                                divisions=19,
+                                on_change=lambda e: set_frame_count(int(e.control.value)),
+                            ),
+                        ]
+                        if frame_mode == "stills"
+                        else [
+                            section_header(
+                                "Sheet Grid Columns", f"{sheet_cols} columns", is_dark=is_dark
+                            ),
+                            ft.Slider(
+                                value=float(sheet_cols),
+                                min=2,
+                                max=8,
+                                divisions=6,
+                                on_change=lambda e: set_sheet_cols(int(e.control.value)),
+                            ),
+                            section_header(
+                                "Sheet Grid Rows", f"{sheet_rows} rows", is_dark=is_dark
+                            ),
+                            ft.Slider(
+                                value=float(sheet_rows),
+                                min=1,
+                                max=8,
+                                divisions=7,
+                                on_change=lambda e: set_sheet_rows(int(e.control.value)),
+                            ),
+                        ]
                     ),
                 ]
                 if active_mode == "frames"
@@ -354,6 +429,15 @@ def ExtractScreen() -> ft.Control:
             ),
             *(
                 [
+                    section_header(
+                        "Subtitle Action", "Extract to file or burn into video", is_dark=is_dark
+                    ),
+                    chip_group(
+                        [("Extract Sidecar File", "extract"), ("Burn into Video", "burn")],
+                        value=sub_action,
+                        on_change=set_sub_action,
+                        is_dark=is_dark,
+                    ),
                     section_header(
                         "Subtitle Track",
                         (
@@ -365,20 +449,18 @@ def ExtractScreen() -> ft.Control:
                     ),
                     *(
                         [
-                            ft.Row(
-                                controls=[
-                                    ft.Chip(
-                                        label=ft.Text(
-                                            f"Track {s.index}"
-                                            + (f" • {s.language}" if s.language else "")
-                                        ),
-                                        selected=sub_sel == i,
-                                        on_click=lambda _, idx=i: set_sub_sel(idx),
+                            chip_group(
+                                [
+                                    (
+                                        f"Track {s.index}"
+                                        + (f" • {s.language}" if s.language else ""),
+                                        i,
                                     )
                                     for i, s in enumerate(sub_streams)
                                 ],
-                                wrap=True,
-                                spacing=SPACE_SM,
+                                value=sub_sel,
+                                on_change=set_sub_sel,
+                                is_dark=is_dark,
                             )
                         ]
                         if sub_streams
@@ -386,19 +468,32 @@ def ExtractScreen() -> ft.Control:
                     ),
                     *(
                         [
-                            ft.Row(
-                                controls=[
-                                    ft.Chip(
-                                        label=ft.Text(fmt.upper() if fmt != "webvtt" else "VTT"),
-                                        selected=sub_fmt == fmt,
-                                        on_click=lambda _, f=fmt: set_sub_fmt(f),
-                                    )
+                            section_header("File Format", "Target format", is_dark=is_dark),
+                            chip_group(
+                                [
+                                    (fmt.upper() if fmt != "webvtt" else "VTT", fmt)
                                     for fmt in ("srt", "ass", "webvtt")
                                 ],
-                                spacing=SPACE_SM,
-                            )
+                                value=sub_fmt,
+                                on_change=set_sub_fmt,
+                                is_dark=is_dark,
+                            ),
+                            section_header(
+                                "Time Sync Shift",
+                                f"{sub_shift:+.2f}s delay/advance"
+                                if sub_shift != 0
+                                else "No shift (original timing)",
+                                is_dark=is_dark,
+                            ),
+                            ft.Slider(
+                                value=float(sub_shift),
+                                min=-5.0,
+                                max=5.0,
+                                divisions=100,
+                                on_change=lambda e: set_sub_shift(round(float(e.control.value), 2)),
+                            ),
                         ]
-                        if sub_streams
+                        if sub_streams and sub_action == "extract"
                         else []
                     ),
                 ]

@@ -236,6 +236,19 @@ def _build_job_dispatch(engine, state, job, _on_progress, cancel_evt):
             cancel_event=cancel_evt,
         )
 
+    def _run_thumbnail_sheet():
+        engine.thumbnail_sheet(
+            input_path=job.input_path,
+            output_path=job.output_path,
+            cols=p.get("cols", 4),
+            rows=p.get("rows", 3),
+            width=p.get("width", 160),
+            start_s=p.get("start_s"),
+            end_s=p.get("end_s"),
+            on_progress=_on_progress,
+            cancel_event=cancel_evt,
+        )
+
     return {
         # name, retry clones params verbatim, and unknown ops fail loudly.
         "convert": _run_convert,
@@ -251,6 +264,7 @@ def _build_job_dispatch(engine, state, job, _on_progress, cancel_evt):
         "mux_subs": _run_mux_subs,
         "burn_subs": _run_burn_subs,
         "attachments": _run_extract_attachments,
+        "thumbnail_sheet": _run_thumbnail_sheet,
     }
 
 
