@@ -49,7 +49,7 @@ def _chain_declared_size(nodes, base: tuple[int, int] | None = None) -> tuple[in
         name = str(node[0])
         args = str(node[1]) if len(node) > 1 else ""
         parts = [part.strip() for part in args.replace(";", ":").split(":") if part.strip()]
-        if name in ("scale", "crop"):
+        if name in ("scale", "crop", "pad"):
             if len(parts) < 2:
                 return None
             try:

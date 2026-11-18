@@ -25,7 +25,7 @@ import av
 
 from services.engine_service.builders import run_encode_job
 from services.engine_service.capability import EngineCapabilityError
-from services.engine_service.graphs import available_filters
+from services.engine_service.graphs import _FONT, _drawtext_escaped, available_filters
 from services.engine_service.logs import _INPUT_OPTIONS, _INPUT_TIMEOUT
 from services.engine_service.ops_extract import read_cues
 from services.engine_service.options import _pick_video_encoder
@@ -35,17 +35,8 @@ from services.job_model import FilterChain, InputSpec, Job, OutputSpec, StreamSp
 
 logger = logging.getLogger(__name__)
 
-_FONT = Path(__file__).resolve().parent / "fonts" / "Roboto-Regular.ttf"
 _TEXT_CONTAINERS = ("matroska", "webm")
-_ESCAPES = (("\\", r"\\"), (":", r"\:"), ("'", r"\'"), ("%", r"\%"), (",", r"\,"))
-
-
-def _escaped(text: str) -> str:
-    """One cue's text as a drawtext argument (newlines collapse to spaces)."""
-    flat = " ".join(line.strip() for line in text.splitlines() if line.strip())
-    for raw, escaped in _ESCAPES:
-        flat = flat.replace(raw, escaped)
-    return flat
+_escaped = _drawtext_escaped  # the shared escaping lives next to the graph code
 
 
 def mux_subtitles(

@@ -35,6 +35,18 @@ def _mjpeg_bytes(frame: av.VideoFrame, width: int) -> bytes:
 
 _FINE_VIDEO_TB = Fraction(1, 90000)
 
+# Drawtext needs an explicit font file (no fontconfig in the lean build).
+_FONT = Path(__file__).resolve().parent / "fonts" / "Roboto-Regular.ttf"
+_DRAWTEXT_ESCAPES = (("\\", r"\\"), (":", r"\:"), ("'", r"\'"), ("%", r"\%"), (",", r"\,"))
+
+
+def _drawtext_escaped(text: str) -> str:
+    """One line of text as a drawtext argument value (newlines -> spaces)."""
+    flat = " ".join(line.strip() for line in str(text).splitlines() if line.strip())
+    for raw, escaped in _DRAWTEXT_ESCAPES:
+        flat = flat.replace(raw, escaped)
+    return flat
+
 
 def _rebase_pts(frame: av.VideoFrame, dst_tb: Fraction) -> None:
     """Rescale a frame's pts into dst_tb (Frame.time_base setter does not rescale)."""
@@ -119,6 +131,12 @@ def _build_video_filter_graph(
     sharpen: int | None = None,
     watermark: dict | None = None,
     fps: int | None = None,
+    flip: str | None = None,
+    crop_rect: tuple[int, int, int, int] | None = None,
+    pad: tuple[int, int, str] | None = None,
+    deinterlace: bool = False,
+    gamma: float | None = None,
+    drawtext: dict | None = None,
 ) -> av.filter.Graph | None:
     """buffer → crop?/eq?/denoise?/sharpen? → [overlay] → transpose?/setpts? → sink.
 
@@ -131,25 +149,43 @@ def _build_video_filter_graph(
     middle: list = []
     base_w = frame.width  # post-crop width — sizes the watermark overlay
 
+    if deinterlace and "yadif" in avail:
+        middle.append(("yadif", None))
+
+    if crop_rect and len(crop_rect) == 4 and "crop" in avail:
+        cw, ch, cx, cy = (int(v) for v in crop_rect)
+        if cw >= 2 and ch >= 2:
+            middle.append(("crop", f"{cw}:{ch}:{cx}:{cy}"))
+            base_w = cw
+
+    if pad and len(pad) >= 2 and "pad" in avail:
+        pw, ph = int(pad[0]), int(pad[1])
+        color = str(pad[2]) if len(pad) > 2 and pad[2] else "black"
+        if pw >= 2 and ph >= 2:
+            middle.append(("pad", f"{pw}:{ph}:(ow-iw)/2:(oh-ih)/2:{color}"))
+            base_w = pw
+
     if crop_aspect and crop_aspect != "original" and "crop" in avail:
         cw, ch = _crop_dims(frame.width, frame.height, crop_aspect)
         if (cw, ch) != (frame.width, frame.height):
             middle.append(("crop", f"{cw}:{ch}"))
             base_w = cw
 
-    if eq and "eq" in avail:
-        bits = []
+    eq_bits: list[str] = []
+    if eq:
         brightness = float(eq.get("brightness", 0.0) or 0.0)
         contrast = float(eq.get("contrast", 1.0) or 1.0)
         saturation = float(eq.get("saturation", 1.0) or 1.0)
         if abs(brightness) > 1e-6:
-            bits.append(f"brightness={brightness:+.3f}")
+            eq_bits.append(f"brightness={brightness:+.3f}")
         if abs(contrast - 1.0) > 1e-6:
-            bits.append(f"contrast={contrast:.3f}")
+            eq_bits.append(f"contrast={contrast:.3f}")
         if abs(saturation - 1.0) > 1e-6:
-            bits.append(f"saturation={saturation:.3f}")
-        if bits:
-            middle.append(("eq", ":".join(bits)))
+            eq_bits.append(f"saturation={saturation:.3f}")
+    if gamma is not None and abs(float(gamma) - 1.0) > 1e-6:
+        eq_bits.append(f"gamma={float(gamma):.3f}")
+    if eq_bits and "eq" in avail:
+        middle.append(("eq", ":".join(eq_bits)))
 
     if denoise and denoise != "off":
         # hqdn3d is preferred but compiled out of this build; nlmeans and
@@ -167,6 +203,13 @@ def _build_video_filter_graph(
         amount = 0.5 + (int(sharpen) / 100.0) * 1.5  # slider 0..100 → 0.5..2.0
         middle.append(("unsharp", f"5:5:{amount:.2f}:5:5:0"))
 
+    if flip:
+        wanted = str(flip).lower()
+        if "h" in wanted and "hflip" in avail:
+            middle.append(("hflip", None))
+        if "v" in wanted and "vflip" in avail:
+            middle.append(("vflip", None))
+
     rot = rotation % 360
     tail: list = []
     if fps and "fps" in avail:
@@ -183,6 +226,28 @@ def _build_video_filter_graph(
         tail.append(("transpose", "clock"))
     elif rot == 270:
         tail.append(("transpose", "cclock"))
+    if drawtext:
+        if "drawtext" in avail:
+            text = _drawtext_escaped(str(drawtext.get("text") or ""))
+            if text:
+                size_pct = float(drawtext.get("size_pct", 0.05) or 0.05)
+                color = str(drawtext.get("color") or "white")
+                anchor = str(drawtext.get("position") or "bottom")
+                y_expr = {
+                    "top": "h*0.06",
+                    "center": "(h-text_h)/2",
+                }.get(anchor, "h-text_h-h*0.06")
+                args = (
+                    f"fontfile={_FONT}:text='{text}':fontsize=h*{size_pct:.4f}:"
+                    f"fontcolor={color}:borderw=3:bordercolor=black:"
+                    f"x=(w-text_w)/2:y={y_expr}"
+                )
+                window = drawtext.get("window")
+                if window and len(window) == 2:
+                    args += f":enable='between(t,{float(window[0]):.3f},{float(window[1]):.3f})'"
+                tail.append(("drawtext", args))
+        else:
+            logger.info("Text overlay requested but this build has no drawtext filter")
     if abs(speed - 1.0) > 1e-6:
         tail.append(("setpts", f"PTS/{speed}"))
 

@@ -631,3 +631,40 @@ def test_audio_gain_fades_and_layout(media, tmp_path):
     EngineService.extract_audio(str(media["clip"]), str(six), format_name="wav", layout="5.1")
     with _open(six) as c:
         assert c.streams.audio[0].codec_context.layout.name == "5.1"
+
+
+def test_video_transforms_pad_crop_flip(media, tmp_path):
+    """Pad and free-rect crop change geometry; flip keeps it; all keep timing."""
+    info = EngineService.probe(str(media["clip"]))
+    w, h = info.video_stream.width, info.video_stream.height
+    clip_dur = info.duration_s
+
+    pad_out = tmp_path / "pad.mp4"
+    EngineService.convert(
+        str(media["clip"]),
+        str(pad_out),
+        video_codec="libx264",
+        audio_codec="aac",
+        preset="fast",
+        pad_w=w + 120,
+        pad_h=h + 80,
+    )
+    pi = EngineService.probe(str(pad_out))
+    assert (pi.video_stream.width, pi.video_stream.height) == (w + 120, h + 80)
+    assert pi.duration_s == pytest.approx(clip_dur, rel=0.1)
+
+    crop_out = tmp_path / "crop.mp4"
+    EngineService.convert(
+        str(media["clip"]),
+        str(crop_out),
+        video_codec="libx264",
+        audio_codec="aac",
+        preset="fast",
+        crop_rect=(w // 2, h // 2, 10, 10),
+        flip="h",
+        deinterlace=True,
+        gamma=1.2,
+    )
+    ci = EngineService.probe(str(crop_out))
+    assert (ci.video_stream.width, ci.video_stream.height) == (w // 2, h // 2)
+    assert ci.duration_s == pytest.approx(clip_dur, rel=0.1)

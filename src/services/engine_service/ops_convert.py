@@ -65,6 +65,14 @@ def convert(
     encoder_options: dict | None = None,
     audio_encoder_options: dict | None = None,
     container_options: dict | None = None,
+    flip: str | None = None,
+    crop_rect: tuple[int, int, int, int] | None = None,
+    pad_w: int | None = None,
+    pad_h: int | None = None,
+    pad_color: str = "black",
+    deinterlace: bool = False,
+    gamma: float | None = None,
+    drawtext: dict | None = None,
     on_progress: Callable[[float, str], None] | None = None,
     cancel_event: Event | None = None,
 ) -> str:
@@ -92,6 +100,12 @@ def convert(
         or bool(sharpen)
         or bool(watermark)
         or bool(video_filter)
+        or bool(flip)
+        or bool(crop_rect)
+        or bool(pad_w or pad_h)
+        or bool(deinterlace)
+        or gamma is not None
+        or bool(drawtext)
     )
     need_afilter = volume_pct != 100 or abs(speed - 1.0) > 1e-6
 
@@ -114,6 +128,12 @@ def convert(
                     sharpen=sharpen,
                     watermark=watermark,
                     fps=fps,
+                    flip=flip,
+                    crop_rect=crop_rect,
+                    pad=(pad_w, pad_h, pad_color) if (pad_w or pad_h) else None,
+                    deinterlace=deinterlace,
+                    gamma=gamma,
+                    drawtext=drawtext,
                 )
             )
             if need_vfilter
@@ -149,8 +169,12 @@ def convert(
                     fps=fps,
                     speed=speed,
                     fine_time_base=need_vfilter,
-                    scale_width=scale_width,
-                    scale_height=scale_height,
+                    # The chain's final geometry must be declared, or the
+                    # post-graph reformat pulls the frame back to the input
+                    # size and pad/crop come out unchanged. Precedence:
+                    # pad (applied last) > crop_rect > explicit scale.
+                    scale_width=(pad_w or (crop_rect[0] if crop_rect else scale_width)),
+                    scale_height=(pad_h or (crop_rect[1] if crop_rect else scale_height)),
                     crop_aspect=crop_aspect,
                     rotation=rotation,
                     pix_fmt=pix_fmt,
