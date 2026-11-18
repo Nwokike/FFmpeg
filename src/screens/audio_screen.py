@@ -273,7 +273,6 @@ def AudioScreen() -> ft.Control:
                 "gain_db": float(gain_db or 0.0),
                 "fade_in_s": float(fade_in_s or 0.0),
                 "fade_out_s": float(fade_out_s or 0.0),
-                **({"layout": layout} if layout else {}),
                 **({"encoder_options": encoder_opts} if encoder_opts else {}),
                 **({"container_options": muxer_opts} if muxer_opts else {}),
             },
