@@ -7,7 +7,7 @@ from pathlib import Path
 
 import flet as ft
 
-from components.studio import chip_group, screen_header
+from components.studio import chip_group, poster_bytes, screen_header
 from core.notify import ERROR, show_snack
 from core.state import Job, MediaInfo, use_app_state
 from core.storage_paths import format_bytes, get_temp_dir, unique_temp_name
@@ -143,6 +143,13 @@ def ProbeScreen() -> ft.Control:
     remux_container, set_remux_container = ft.use_state("mkv")
     faststart, set_faststart = ft.use_state(False)
     rotation, set_rotation = ft.use_state(0)
+    stream_edits_ref = ft.use_ref({})
+
+    def _set_stream_lang(stream_index: int, code: str) -> None:
+        if code:
+            stream_edits_ref.current.setdefault(stream_index, {}).update({"language": code})
+        else:
+            stream_edits_ref.current.get(stream_index, {}).pop("language", None)
 
     _update_tag, _delete_tag, _add_tag = _row_setter(set_tag_rows, tag_rows)
     _update_ch, _delete_ch, _add_ch = _row_setter(set_ch_rows, ch_rows)
@@ -250,6 +257,37 @@ def ProbeScreen() -> ft.Control:
             )
 
         trailing: list[ft.Control] = []
+        # Per-stream language editor (engine: remux stream_edits)
+        if s.stream_type in ("video", "audio"):
+            trailing.append(
+                ft.Dropdown(
+                    value=lang,
+                    options=[
+                        ft.DropdownOption(key=code, text=label)
+                        for code, label in [
+                            ("", "Original"),
+                            ("eng", "English"),
+                            ("fre", "French"),
+                            ("ger", "German"),
+                            ("spa", "Spanish"),
+                            ("por", "Portuguese"),
+                            ("ara", "Arabic"),
+                            ("chi", "Chinese"),
+                            ("jpn", "Japanese"),
+                            ("kor", "Korean"),
+                            ("hin", "Hindi"),
+                            ("yor", "Yoruba"),
+                            ("hau", "Hausa"),
+                            ("ibo", "Igbo"),
+                            ("pcm", "Pidgin"),
+                        ]
+                    ],
+                    width=140,
+                    dense=True,
+                    on_change=lambda e, i=s.index: _set_stream_lang(i, e.control.value),
+                    tooltip="Subtitle/audio language tag",
+                )
+            )
         if len(info.streams) > 1:
             trailing.append(
                 ft.Switch(
@@ -329,6 +367,7 @@ def ProbeScreen() -> ft.Control:
                 "metadata": metadata,
                 "chapters": chapters,
                 "container": container,
+                "stream_edits": dict(stream_edits_ref.current),
                 "rotation": rotation if rotation else None,
                 "faststart": faststart,
             },
@@ -380,6 +419,24 @@ def ProbeScreen() -> ft.Control:
                     ft.OutlinedButton("Change", on_click=lambda _: ctrl.pick_media_for("probe"))
                 ],
                 is_dark=is_dark,
+            ),
+            # Hero poster (cached poster bytes, best effort)
+            *(
+                [
+                    ft.Image(
+                        src=blob,
+                        width=280,
+                        height=140,
+                        fit=ft.BoxFit.COVER,
+                        border_radius=RADIUS_LG,
+                    )
+                    for blob in [
+                        poster_bytes(media_path, at_s=(info.duration_s if info else 10) * 0.25)
+                    ]
+                    if blob is not None
+                ]
+                if media_path
+                else []
             ),
             # General Specs Card
             card_container(

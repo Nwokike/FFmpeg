@@ -8,7 +8,8 @@ from pathlib import Path
 import flet as ft
 
 from components.studio import screen_header
-from core.state import use_app_state
+from core.notify import ERROR, show_snack
+from core.state import Job, use_app_state
 from core.storage_paths import format_bytes
 from core.styles import card_container, status_badge
 from core.theme import (
@@ -94,6 +95,45 @@ def ResultScreen() -> ft.Control:
     audio_ref = ft.use_ref(None)
     dragging_ref = ft.use_ref(False)  # slider drag in flight — ignore position events
     audio_state_ref = ft.use_ref(AudioState.STOPPED)
+
+    async def _open_output_folder(opened_job: Job) -> None:
+        """Launch the OS file manager at the output file's parent directory."""
+        out = Path(opened_job.output_path) if opened_job else None
+        if out is None or not out.exists():
+            show_snack(page, "Output file not found on disk", bgcolor=ERROR)
+            return
+        url_launcher = next(
+            (s for s in getattr(page, "services", []) if isinstance(s, ft.UrlLauncher)), None
+        )
+        if url_launcher is None:
+            show_snack(page, "Open folder is unavailable on this platform")
+            return
+        try:
+            await url_launcher.launch_url(
+                f"file://{out.parent}", mode=ft.LaunchMode.PLATFORM_DEFAULT
+            )
+        except Exception as exc:
+            logger.debug("Open folder failed: %s", exc)
+            show_snack(page, "Couldn't open the folder", bgcolor=ERROR)
+
+    async def _copy_ffmpeg_command(opened_job: Job) -> None:
+        """Build the equivalent ffmpeg CLI invocation and copy it to the clipboard."""
+        cmd = getattr(opened_job, "ffmpeg_command", "") or ""
+        if not cmd:
+            show_snack(page, "No ffmpeg command recorded for this job")
+            return
+        clipboard = next(
+            (s for s in getattr(page, "services", []) if isinstance(s, ft.Clipboard)), None
+        )
+        if clipboard is None:
+            show_snack(page, "Clipboard unavailable")
+            return
+        try:
+            await clipboard.set(cmd)
+            show_snack(page, "ffmpeg command copied to clipboard", bgcolor=PRIMARY)
+        except Exception as exc:
+            logger.debug("Clipboard copy failed: %s", exc)
+            show_snack(page, "Couldn't copy to clipboard", bgcolor=ERROR)
 
     def _is_mounted(ctrl) -> bool:
         """True once Flet attached the control to the page.
@@ -741,6 +781,24 @@ def ResultScreen() -> ft.Control:
                         height=48,
                         expand=True,
                         on_click=lambda _: ctrl.share_result(job),
+                    ),
+                ],
+                spacing=SPACE_MD,
+            ),
+            # Open folder + copy command (desktop/desktop workflows)
+            ft.Row(
+                controls=[
+                    ft.OutlinedButton(
+                        "Open Folder",
+                        icon=ft.Icons.FOLDER_OPEN_ROUNDED,
+                        height=40,
+                        on_click=lambda _: page.run_task(_open_output_folder, job),
+                    ),
+                    ft.OutlinedButton(
+                        "Copy Command",
+                        icon=ft.Icons.CONTENT_COPY_ROUNDED,
+                        height=40,
+                        on_click=lambda _: page.run_task(_copy_ffmpeg_command, job),
                     ),
                 ],
                 spacing=SPACE_MD,
