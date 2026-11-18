@@ -227,6 +227,7 @@ dependencies = [
     { name = "flet-audio" },
     { name = "flet-audio-recorder" },
     { name = "flet-camera" },
+    { name = "flet-notifications" },
     { name = "flet-permission-handler" },
     { name = "flet-video" },
     { name = "httpx" },
@@ -249,6 +250,7 @@ requires-dist = [
     { name = "flet-audio", specifier = ">=1.1.2" },
     { name = "flet-audio-recorder", specifier = ">=1.1.2" },
     { name = "flet-camera", specifier = ">=1.1.2" },
+    { name = "flet-notifications", specifier = ">=1.1.2" },
     { name = "flet-permission-handler", specifier = ">=1.1.2" },
     { name = "flet-video", specifier = ">=1.1.2" },
     { name = "httpx", specifier = ">=0.28.1" },
@@ -356,6 +358,19 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/aa/fd/a237c7dfa8674ea1b1e121449db3dd27c5eb1e5388f96ed56248f85842f4/flet_desktop-1.1.2.tar.gz", hash = "sha256:eca291ccfaa407b9895502fb0133fcf5ae346459dab21dd25569df49c0a85235", size = 19345, upload-time = "2026-11-06T23:28:50.919Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/b7/ca/a25eb55c3b5cd0973486828fb75edf1952e665c93dcaa958187c01484bc2/flet_desktop-1.1.2-py3-none-any.whl", hash = "sha256:e192133923f462a87ad7b92bc1f1b94947c341083c31340f12964da653301f28", size = 18544, upload-time = "2026-11-06T23:28:49.884Z" },
+]
+
+[[package]]
+name = "flet-notifications"
+version = "1.1.2"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "flet" },
+    { name = "tzdata" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/8b/87/31b72c86b3e6e106faf1af34bf1980160fa2194af5f6ea02b7231a130282/flet_notifications-1.1.2.tar.gz", hash = "sha256:0d9ff0b6f2ee86b02ac1483aba8e0f70114b0f75561b781164336decf9501e3f", size = 69604, upload-time = "2026-11-06T23:29:30.89Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/29/d7/fab7fc2dfcedeed17a14bccad15e0d39adc706d535057360ead6871f2daf/flet_notifications-1.1.2-py3-none-any.whl", hash = "sha256:4b4166beed0c762424201a914e149e68252e6151e06cb9b5d224bca126f1148e", size = 85217, upload-time = "2026-11-06T23:29:29.96Z" },
 ]
 
 [[package]]

@@ -252,6 +252,15 @@ class JobQueue:
         with self._cond:
             return ([self._current] if self._current else []) + list(self._pending)
 
+    def cancel_active(self) -> bool:
+        """Cancel whichever job is running (the notification's Cancel action).
+
+        Returns True when a job was found and cancellation was signalled.
+        """
+        with self._cond:
+            running = self._current
+        return self.cancel(running.id) if running is not None else False
+
     # ── Cancellation ─────────────────────────────────────────────────────
 
     def cancel(self, job_id: str) -> bool:

@@ -2,7 +2,7 @@
 # Build the `av` (PyAV) Android wheels via flet-dev/mobile-forge, against the
 # wrap's own full flet-libffmpeg wheel.
 #
-# Stage two of the wrap pipeline. ffmpeg-android-master built the FFmpeg
+# Stage two of the wrap pipeline. ffmpeg-android-maker built the FFmpeg
 # libraries; forge compiles PyAV's 49 Cython extension modules against them for
 # every ABI in the pinned Python support package's manifest.
 #
@@ -21,6 +21,24 @@ if [ ! -d "$FORGE_DIR/.git" ]; then
     git clone --quiet "$FORGE_REPO" "$FORGE_DIR"
 fi
 git -C "$FORGE_DIR" checkout --quiet "$FORGE_COMMIT"
+
+# ── NDK for the Cython extension build ──────────────────────────────────────
+# The Python Android support package embeds compiler paths pointing at an NDK
+# layout that only exists inside the package. Forge re-points those paths to a
+# real NDK ONLY when NDK_HOME is set (src/forge/build.py: "If NDK_HOME is set,
+# re-point missing compiler/binutils paths to that installed NDK toolchain").
+# Without it the build dies with "No such file or directory: .../aarch64-...-clang".
+if [ -z "${NDK_HOME:-}" ]; then
+    if [ -n "${ANDROID_NDK_HOME:-}" ]; then
+        NDK_HOME="$ANDROID_NDK_HOME"
+    else
+        SDK="${ANDROID_HOME:-${ANDROID_SDK_HOME:-/usr/local/lib/android/sdk}}"
+        NDK_HOME=$(ls -d "$SDK"/ndk/* 2>/dev/null | sort -V | tail -1)
+    fi
+fi
+export NDK_HOME
+export ANDROID_NDK_HOME="${ANDROID_NDK_HOME:-$NDK_HOME}"
+echo ">> NDK_HOME=$NDK_HOME"
 
 # ── Install the wrap's av recipe fork (version + host dep) ──────────────────
 rm -rf "$FORGE_DIR/recipes/av"

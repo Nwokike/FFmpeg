@@ -332,6 +332,39 @@ async def main(page: ft.Page) -> None:
         except Exception as exc:
             logger.warning("Wakelock %s failed: %s", on, exc)
 
+    # Long jobs keep running when the app is minimized: a sticky foreground
+    # service with a persistent notification showing progress and a Cancel
+    # action (flet-notifications; the proot-distro / CollabShell pattern).
+    from services.notification_service import JobNotificationService
+
+    async def _cancel_active_job() -> None:
+        active = state.active_job
+        if active is not None:
+            queue.cancel(active.id)
+
+    def _open_jobs() -> None:
+        state.selected_tab = 1
+        navigate("dashboard")
+
+    job_notify = JobNotificationService(
+        page, cancel_active=_cancel_active_job, open_jobs=_open_jobs
+    )
+    job_notify.mount()
+    page.run_task(job_notify.request_permission)
+
+    async def _on_lifecycle(event) -> None:
+        """Backgrounding releases the screen wakelock; the foreground service
+        keeps the process and the job alive. Resuming re-asserts both."""
+        name = getattr(getattr(event, "state", None), "value", "")
+        if name in ("hide", "pause", "detach"):
+            await _set_wakelock(False)
+            return
+        if name in ("resume", "show") and state.active_job is not None:
+            await _set_wakelock(True)
+            await job_notify.update_job(state.active_job)
+
+    page.on_app_lifecycle_state_change = lambda e: page.run_task(_on_lifecycle, e)
+
     # PermissionHandler's platform guard allows Android/TV/iOS/Windows/Web but
     # RAISES on Linux/macOS desktops — only register where it can update.
     permission_handler = None
@@ -651,6 +684,9 @@ async def main(page: ft.Page) -> None:
             # subscribed job/banner/history components to rebuild.
             state.jobs = list(state.jobs)
             page.update()
+            # The tray mirrors the same numbers (~2 updates/second; the
+            # service throttles). Never called from the worker thread.
+            await job_notify.update_job(job, queued=max(0, len(queue.active_jobs) - 1))
 
     def _set_worker_field(job: Job, name: str, value) -> None:
         """Mutate a Job from the worker without notifying Flet off-context."""
@@ -691,6 +727,10 @@ async def main(page: ft.Page) -> None:
         state.jobs = [j for j in state.jobs if j.id != job.id]
         state.history.insert(0, job)
         _persist_history()
+
+        # Tray: end the foreground service (or hand it to the next job) and
+        # leave a tap-to-result alert for the finished one.
+        await job_notify.finished(job, queued=len(queue.active_jobs))
 
         # Notify UI and navigate to result if successful (ad break moved to the
         # result→dashboard exit — never between completion and its own result)

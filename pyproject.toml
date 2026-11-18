@@ -12,6 +12,7 @@ dependencies = [
     "flet-audio>=1.1.2",
     "flet-audio-recorder>=1.1.2",
     "flet-camera>=1.1.2",
+    "flet-notifications>=1.1.2",
     "flet-permission-handler>=1.1.2",
     "flet-video>=1.1.2",
     "httpx>=0.28.1",
@@ -61,6 +62,9 @@ bundle_id = "ng.kiri.ffmpeg"
 split_per_abi = true
 extract_packages = ["av"]
 target_arch = ["arm64-v8a", "x86_64", "armeabi-v7a"]
+# Our own Android resources (notification small icon drawable), copied into
+# the generated android/app/src/main/res by flet build.
+res_dir = "android_res"
 
 [tool.flet.android.meta_data]
 # Production AdMob App ID (matches ADMOB_APP_ID_PROD in src/core/constants.py
@@ -78,6 +82,20 @@ target_arch = ["arm64-v8a", "x86_64", "armeabi-v7a"]
 "android.permission.CAMERA" = true
 "android.permission.RECORD_AUDIO" = true
 "android.permission.MODIFY_AUDIO_SETTINGS" = true
+# Long jobs keep running when the app is minimized: a persistent,
+# cancelable notification backed by a foreground service (flet-notifications).
+"android.permission.POST_NOTIFICATIONS" = true
+"android.permission.FOREGROUND_SERVICE" = true
+"android.permission.FOREGROUND_SERVICE_SPECIAL_USE" = true
+
+# The foreground service component the plugin drives. The special-use
+# subtype property belongs to the SERVICE (not the application meta-data).
+[tool.flet.android.service."com.dexterous.flutterlocalnotifications.ForegroundService"]
+exported = false
+foregroundServiceType = "specialUse"
+
+[tool.flet.android.service."com.dexterous.flutterlocalnotifications.ForegroundService".property]
+"android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE" = "Media conversion jobs keep running in the background until they finish or are cancelled"
 
 [tool.flet.android.feature]
 "android.software.leanback" = false
