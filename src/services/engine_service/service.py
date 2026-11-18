@@ -62,6 +62,7 @@ from services.engine_service.ops_container import (
     _crossfade_gate,
     _xfade_window,
     concat,
+    extract_attachments,
     remux,
 )
 from services.engine_service.ops_convert import (
@@ -194,5 +195,6 @@ class EngineService:
     probe = staticmethod(probe_media)
     record = staticmethod(record)
     remux = staticmethod(remux)
+    extract_attachments = staticmethod(extract_attachments)
     mux_subtitles = staticmethod(mux_subtitles)
     thumbnail_strip = staticmethod(thumbnail_strip)

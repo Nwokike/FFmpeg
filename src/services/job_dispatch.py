@@ -176,6 +176,18 @@ def _build_job_dispatch(engine, state, job, _on_progress, cancel_evt):
             rotation=p.get("rotation"),
             chapters=p.get("chapters"),
             container=p.get("container"),
+            metadata=p.get("metadata"),
+            stream_edits=p.get("stream_edits"),
+            add_attachments=p.get("add_attachments"),
+            faststart=bool(p.get("faststart", False)),
+            on_progress=_on_progress,
+            cancel_event=cancel_evt,
+        )
+
+    def _run_extract_attachments():
+        engine.extract_attachments(
+            input_path=job.input_path,
+            output_dir=job.output_path,
             on_progress=_on_progress,
             cancel_event=cancel_evt,
         )
@@ -235,6 +247,7 @@ def _build_job_dispatch(engine, state, job, _on_progress, cancel_evt):
         "create_gif": _run_create_gif,
         "mux_subs": _run_mux_subs,
         "burn_subs": _run_burn_subs,
+        "attachments": _run_extract_attachments,
     }
 
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from errno import EAGAIN
 from fractions import Fraction
+from pathlib import Path
 from threading import Event
 
 import av
@@ -19,7 +20,12 @@ from services.engine_service.builders import (
     run_encode_job,
 )
 from services.engine_service.capability import _encoder_pix_fmt
-from services.engine_service.logs import _INPUT_TIMEOUT, _decode_packet, logger
+from services.engine_service.logs import (
+    _INPUT_OPTIONS,
+    _INPUT_TIMEOUT,
+    _decode_packet,
+    logger,
+)
 from services.engine_service.options import _pick_video_encoder, _supported_encoder_options
 from services.engine_service.resolve import (
     _resolve_audio_codec,
@@ -37,6 +43,10 @@ def remux(
     rotation: int | None = None,
     chapters: list[dict] | None = None,
     container: str | None = None,
+    metadata: dict | None = None,
+    stream_edits: dict | None = None,
+    add_attachments: list[dict] | None = None,
+    faststart: bool = False,
     on_progress: Callable[[float, str], None] | None = None,
     cancel_event: Event | None = None,
 ) -> str:
@@ -55,19 +65,66 @@ def remux(
     caller (other muxers ignore them).
     ``container`` names the muxer explicitly; None infers it from the output
     extension (the Dossier's picker passes e.g. "mp4"/"matroska"/"webm").
+
+    ``metadata`` sets container tags ("" removes one); ``stream_edits`` maps a
+    source stream index to tag/disposition edits
+    ({"language": "eng", "disposition": 1}); ``add_attachments`` embeds files
+    ([{"path", "name", "mime"}]); ``faststart`` moves the moov atom up front
+    for progressive MP4 playback.
     """
+    out_options = {"movflags": "+faststart"} if faststart else {}
     job = Job(
         output_path=output_path,
         inputs=[InputSpec(path=input_path)],
-        output=OutputSpec(container=container, metadata=True, rotation=rotation),
+        output=OutputSpec(
+            container=container, metadata=True, rotation=rotation, options=out_options
+        ),
         drop_indices=list(drop_indices or []),
         keep_attachments=True,
         chapters=chapters,
+        metadata_set={str(k): str(v) for k, v in (metadata or {}).items()} or None,
+        stream_edits={int(k): dict(v) for k, v in (stream_edits or {}).items()} or None,
+        add_attachments=list(add_attachments or []) or None,
         progress_label="Copying streams",
         complete_label="Streams copied",
         cancel_message="Stream copy cancelled",
     )
     return run_copy_job(job, on_progress=on_progress, cancel_event=cancel_event)
+
+
+def extract_attachments(
+    input_path: str,
+    output_dir: str,
+    on_progress: Callable[[float, str], None] | None = None,
+    cancel_event: Event | None = None,
+) -> list[str]:
+    """Write every embedded attachment (fonts, cover art…) to ``output_dir``."""
+    out_dir = Path(output_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    inp = av.open(input_path, "r", timeout=_INPUT_TIMEOUT, options=_INPUT_OPTIONS)
+    written: list[str] = []
+    try:
+        attachments = inp.streams.attachments
+        if not attachments:
+            raise ValueError("This file has no embedded attachments")
+        for index, attachment in enumerate(attachments):
+            if cancel_event and cancel_event.is_set():
+                raise InterruptedError("Attachment extraction cancelled")
+            data = bytes(attachment.data or b"")
+            if not data:
+                continue
+            name = attachment.name or f"attachment_{index}.bin"
+            target = out_dir / Path(name).name
+            target.write_bytes(data)
+            written.append(str(target))
+            if on_progress:
+                on_progress(
+                    (index + 1) / max(1, len(attachments)),
+                    f"Wrote {target.name}",
+                )
+    finally:
+        _close_container(inp)
+    return written
 
 
 def concat(

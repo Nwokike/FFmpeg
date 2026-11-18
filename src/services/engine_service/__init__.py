@@ -247,6 +247,7 @@ __all__ = [
     "cut_trim",
     "estimate_hls_segments",
     "export_sequence",
+    "extract_attachments",
     "extract_audio",
     "extract_frames",
     "extract_subtitles",

@@ -668,3 +668,25 @@ def test_video_transforms_pad_crop_flip(media, tmp_path):
     ci = EngineService.probe(str(crop_out))
     assert (ci.video_stream.width, ci.video_stream.height) == (w // 2, h // 2)
     assert ci.duration_s == pytest.approx(clip_dur, rel=0.1)
+
+
+def test_remux_metadata_edits_and_attachments(media, tmp_path):
+    """Dossier-as-editor: tags, stream language, embedded attachments."""
+    att = tmp_path / "font.ttf"
+    att.write_bytes(b"FAKEFONT")
+    out = tmp_path / "edited.mkv"
+    EngineService.remux(
+        str(media["mp4"]),
+        str(out),
+        container="matroska",
+        metadata={"title": "Studio Test"},
+        stream_edits={1: {"language": "eng", "title": "Main"}},
+        add_attachments=[{"path": str(att), "mime": "font/ttf"}],
+    )
+    with _open(out) as c:
+        assert c.metadata.get("title") == "Studio Test"
+        audio = next(s for s in c.streams if s.type == "audio")
+        assert audio.metadata.get("language") == "eng"
+        assert [a.name for a in c.streams.attachments] == ["font.ttf"]
+    got = EngineService.extract_attachments(str(out), str(tmp_path / "atts"))
+    assert Path(got[0]).read_bytes() == b"FAKEFONT"

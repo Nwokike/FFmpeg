@@ -109,6 +109,14 @@ class Job:
     # Packet-path (stream-copy) options.
     drop_indices: list[int] = field(default_factory=list)
     keep_attachments: bool = False
+    # Container metadata written to the output (None = copy the source tags;
+    # a value replaces that tag; a "" value removes it).
+    metadata_set: dict[str, str] | None = None
+    # Per-source-stream edits applied after the template copy:
+    # {stream_index: {"language": "eng", "title": ..., "disposition": int}}.
+    stream_edits: dict[int, dict] | None = None
+    # Extra attachments to embed: [{"path": str, "name": str|None, "mime": str|None}].
+    add_attachments: list[dict] | None = None
     # None -> copy the source chapters; a list replaces them; SKIP leaves the
     # output with no chapter set at all.
     chapters: list[dict] | object | None = None

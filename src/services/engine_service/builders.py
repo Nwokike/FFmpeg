@@ -665,6 +665,11 @@ def run_copy_job(
                     )
                     if job.output.metadata and inp.metadata:
                         out.metadata.update(inp.metadata)
+                    for key, value in (job.metadata_set or {}).items():
+                        if value == "":
+                            out.metadata.pop(key, None)
+                        else:
+                            out.metadata[key] = value
 
                     kept_attachments = False
                     if job.keep_attachments:
@@ -678,6 +683,17 @@ def run_copy_job(
                                 logger.debug(
                                     "Attachment copy skipped (%s): %s", attachment.name, exc
                                 )
+                    for spec_att in job.add_attachments or []:
+                        try:
+                            blob = Path(spec_att["path"]).read_bytes()
+                            out.add_attachment(
+                                spec_att.get("name") or Path(spec_att["path"]).name,
+                                spec_att.get("mime") or "application/octet-stream",
+                                blob,
+                            )
+                            kept_attachments = True
+                        except Exception as exc:
+                            logger.warning("Attachment add skipped (%s): %s", spec_att, exc)
 
                     src_streams = _kept_streams(inp)
                     for s in src_streams:
@@ -693,6 +709,15 @@ def run_copy_job(
                         out_s.metadata.update(s.metadata)
                         with contextlib.suppress(Exception):
                             out_s.disposition = int(s.disposition)
+                        edit = (job.stream_edits or {}).get(s.index) or {}
+                        for tag, value in edit.items():
+                            if tag == "disposition":
+                                with contextlib.suppress(Exception):
+                                    out_s.disposition = int(value)
+                            elif value == "":
+                                out_s.metadata.pop(tag, None)
+                            else:
+                                out_s.metadata[str(tag)] = str(value)
                         stream_map[s] = out_s
                         out_by_pos.append(out_s)
                         tb_by_pos.append(_av_rational(s.time_base or Fraction(1, 1000)))
