@@ -134,6 +134,35 @@ def _shell_body(
     )
 
 
+def _build_navigation_rail(ctrl, app_state: AppState | None = None, selected: int = 0) -> ft.NavigationRail:
+    """Desktop chrome: a labeled rail instead of a phone bottom bar."""
+    if app_state is None:
+        app_state = state
+
+    def _on_rail_change(e):
+        idx = clamp_tab(e.control.selected_index)
+        if idx != app_state.selected_tab:
+            ctrl.select_tab(idx)
+
+    destinations = [
+        ft.NavigationRailDestination(
+            icon=ft.Icon(icon),
+            selected_icon=ft.Icon(selected_icon),
+            label=label,
+        )
+        for icon, selected_icon, label in zip(_TAB_ICONS, _TAB_SELECTED_ICONS, _TAB_NAMES, strict=True)
+    ]
+    return ft.NavigationRail(
+        selected_index=clamp_tab(selected),
+        label_type=ft.NavigationRailLabelType.ALL,
+        min_width=88,
+        min_extended_width=180,
+        group_alignment=-0.9,
+        destinations=destinations,
+        on_change=_on_rail_change,
+    )
+
+
 def _build_navigation_bar(ctrl, app_state: AppState | None = None) -> ft.NavigationBar:
     """Dashboard NavigationBar — declared on the view, rebuilt on queue change."""
     if app_state is None:
@@ -269,7 +298,8 @@ def AppShell() -> ft.Control:
         if not page or not page.views:
             return
         try:
-            if _should_show_onboarding(app_state) or active_view != "dashboard":
+            wide = (getattr(app_state, "window_width", 0) or 0) >= 840
+            if _should_show_onboarding(app_state) or active_view != "dashboard" or wide:
                 page.views[0].navigation_bar = None
             else:
                 job_count = len(app_state.jobs)
@@ -305,6 +335,18 @@ def AppShell() -> ft.Control:
         else:
             content = SettingsScreen(key=ft.ValueKey("settings"))
         body = _shell_body(content, app_state, header=BrandHeader())
+        if (getattr(app_state, "window_width", 0) or 0) >= 840:
+            # Expanded width: rail + constrained reading column (Material
+            # window-size guidance; phone layouts must not stretch to 1600 px).
+            body = ft.Row(
+                controls=[
+                    _build_navigation_rail(controller, app_state, active_tab),
+                    ft.VerticalDivider(width=1),
+                    ft.Container(content=body, expand=True, padding=ft.Padding.only(left=SPACE_MD)),
+                ],
+                expand=True,
+                spacing=0,
+            )
     elif active_view == "convert":
         body = _shell_body(ConvertScreen(key=ft.ValueKey("convert")), app_state)
     elif active_view == "compress":

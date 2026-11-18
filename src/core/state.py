@@ -182,6 +182,9 @@ class AppState:
 
         # System & network
         self.is_online: bool = True
+        # Live window width (0 until the first resize event): the shell picks
+        # NavigationRail for wide layouts, NavigationBar for compact ones.
+        self.window_width: int = 0
         # Ad consent settled (and banner slots may render). AdService state is
         # invisible to Flet's reactivity, so without this observable banners
         # stayed collapsed until an unrelated page update.

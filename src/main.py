@@ -305,6 +305,16 @@ async def main(page: ft.Page) -> None:
     page.services.append(wakelock)
     page.services.append(connectivity)
 
+    # Adaptive chrome: the shell reads this to choose NavigationRail vs bar.
+    def _on_resize(_e=None) -> None:
+        try:
+            state.window_width = int(page.width or 0)
+        except Exception:
+            pass
+
+    _on_resize()
+    page.on_resize = _on_resize
+
     async def _refresh_online() -> None:
         try:
             states = await connectivity.get_connectivity()
