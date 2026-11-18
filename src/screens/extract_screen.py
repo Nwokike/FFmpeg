@@ -15,7 +15,7 @@ from core.constants import (
 )
 from core.engine_probe import can_encode_format
 from core.state import Job, use_app_state
-from core.storage_paths import format_bytes, get_temp_dir, unique_temp_name
+from core.storage_paths import get_temp_dir, unique_temp_name
 from core.styles import section_header
 from core.theme import ACCENT_RED, TEXT_MUTED_DARK, TEXT_MUTED_LIGHT, is_dark_mode
 from core.tokens import FONT_SM, SPACE_MD, SPACE_SM
@@ -293,7 +293,9 @@ def ExtractScreen() -> ft.Control:
                 ],
                 value=mode,
                 on_change=set_mode,
-                disabled_values=[k for k in ("audio", "frames", "gif", "subtitles") if not mode_ok[k]],
+                disabled_values=[
+                    k for k in ("audio", "frames", "gif", "subtitles") if not mode_ok[k]
+                ],
                 tips={
                     "audio": "This file has no audio track",
                     "frames": "Video frames need a video file",
@@ -449,9 +451,16 @@ def ExtractScreen() -> ft.Control:
                         divisions=max(1, int(min(60, duration_s))),
                         on_change=lambda e: set_gif_start(round(float(e.control.value), 1)),
                     ),
-                    section_header("GIF Palette", "Colours, dithering and looping", is_dark=is_dark),
+                    section_header(
+                        "GIF Palette", "Colours, dithering and looping", is_dark=is_dark
+                    ),
                     chip_group(
-                        [("Auto", 0), ("64 colours", 64), ("128 colours", 128), ("256 colours", 256)],
+                        [
+                            ("Auto", 0),
+                            ("64 colours", 64),
+                            ("128 colours", 128),
+                            ("256 colours", 256),
+                        ],
                         value=gif_colors,
                         on_change=set_gif_colors,
                     ),
