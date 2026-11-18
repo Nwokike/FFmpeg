@@ -7,6 +7,7 @@ from pathlib import Path
 
 import flet as ft
 
+from components.studio import screen_header
 from core.state import use_app_state
 from core.storage_paths import format_bytes
 from core.styles import card_container, status_badge
@@ -646,17 +647,10 @@ def ResultScreen() -> ft.Control:
 
     return ft.ListView(
         controls=[
-            # Header
-            ft.Row(
-                controls=[
-                    ft.IconButton(
-                        icon=ft.Icons.ARROW_BACK_ROUNDED,
-                        on_click=lambda _: ctrl.navigate("dashboard"),
-                        tooltip="Back to Dashboard",
-                    ),
-                    ft.Text("Processing Complete", size=FONT_LG, weight=ft.FontWeight.BOLD),
-                ],
-                spacing=SPACE_SM,
+            screen_header(
+                "Result",
+                on_back=lambda _: ctrl.navigate("dashboard"),
+                is_dark=is_dark,
             ),
             # Preview Player Card
             preview_control,

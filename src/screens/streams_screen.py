@@ -25,6 +25,8 @@ import uuid
 import flet as ft
 import httpx
 
+from components.studio import screen_header
+
 try:
     import flet_video as ftv
 
@@ -46,7 +48,7 @@ from core.theme import (
     TEXT_MUTED_LIGHT,
     is_dark_mode,
 )
-from core.tokens import FONT_LG, FONT_MD, FONT_SM, FONT_XS, RADIUS_LG, RING_MD, SPACE_MD, SPACE_SM
+from core.tokens import FONT_MD, FONT_SM, FONT_XS, RADIUS_LG, RING_MD, SPACE_MD, SPACE_SM
 from services.engine_service import EngineService
 from state.controller_ctx import use_controller
 
@@ -591,16 +593,10 @@ def StreamsScreen() -> ft.Control:
 
     return ft.ListView(
         controls=[
-            ft.Row(
-                controls=[
-                    ft.IconButton(
-                        icon=ft.Icons.ARROW_BACK_ROUNDED,
-                        on_click=lambda _: ctrl.navigate("dashboard"),
-                        tooltip="Back to Dashboard",
-                    ),
-                    ft.Text("Live Streams", size=FONT_LG, weight=ft.FontWeight.BOLD),
-                ],
-                spacing=SPACE_SM,
+            screen_header(
+                "Live Streams",
+                on_back=lambda _: ctrl.navigate("dashboard"),
+                is_dark=is_dark,
             ),
             _stage(),
             # Recording controls live WITH the stage: stop is always the

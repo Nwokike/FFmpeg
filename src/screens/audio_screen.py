@@ -8,6 +8,7 @@ from pathlib import Path
 import flet as ft
 
 from components.encoder_options import ContainerOptionRows, EncoderOptionPanel, OptionValues
+from components.studio import media_summary_card, screen_header
 from components.tool_job_status import tool_job_row
 from core.constants import (
     BITRATE_PRESETS,
@@ -19,10 +20,10 @@ from core.constants import (
 )
 from core.engine_probe import can_encode_format
 from core.state import Job, use_app_state
-from core.storage_paths import format_bytes, get_temp_dir, unique_temp_name
+from core.storage_paths import get_temp_dir, unique_temp_name
 from core.styles import card_container, section_header
-from core.theme import PRIMARY, TEXT_MUTED_DARK, TEXT_MUTED_LIGHT, is_dark_mode
-from core.tokens import FONT_LG, FONT_MD, FONT_SM, FONT_XS, RADIUS_LG, SPACE_MD, SPACE_SM
+from core.theme import TEXT_MUTED_DARK, TEXT_MUTED_LIGHT, is_dark_mode
+from core.tokens import FONT_SM, FONT_XS, RADIUS_LG, SPACE_MD, SPACE_SM
 from state.controller_ctx import use_controller
 
 try:
@@ -50,11 +51,6 @@ def AudioScreen() -> ft.Control:
     media_path = app_state.current_media_path
     info = app_state.current_media_info
     file_name = Path(media_path).name if media_path else "No file selected"
-    file_size_str = (
-        format_bytes(Path(media_path).stat().st_size)
-        if media_path and Path(media_path).exists()
-        else "0 B"
-    )
     # Audio Studio needs an audio timeline: images, muted video, and
     # streamless files are refused with an explanation (the engine raises
     # ValueError in a background job otherwise). info-None stays permissive —
@@ -280,46 +276,17 @@ def AudioScreen() -> ft.Control:
 
     return ft.ListView(
         controls=[
-            # Header
-            ft.Row(
-                controls=[
-                    ft.IconButton(
-                        icon=ft.Icons.ARROW_BACK_ROUNDED,
-                        on_click=lambda _: ctrl.navigate("dashboard"),
-                        tooltip="Back to Dashboard",
-                    ),
-                    ft.Text("Audio Studio & Mastering", size=FONT_LG, weight=ft.FontWeight.BOLD),
-                ],
-                spacing=SPACE_SM,
-            ),
-            # Input file overview
-            card_container(
-                content=ft.Row(
-                    controls=[
-                        ft.Icon(ft.Icons.GRAPHIC_EQ_ROUNDED, size=32, color=PRIMARY),
-                        ft.Column(
-                            controls=[
-                                ft.Text(
-                                    file_name,
-                                    size=FONT_MD,
-                                    weight=ft.FontWeight.BOLD,
-                                    max_lines=1,
-                                    overflow=ft.TextOverflow.ELLIPSIS,
-                                ),
-                                ft.Text(f"Size: {file_size_str}", size=FONT_SM, color=muted),
-                            ],
-                            spacing=2,
-                            expand=True,
-                        ),
-                        ft.OutlinedButton(
-                            "Change", on_click=lambda _: ctrl.pick_media_for("audio")
-                        ),
-                    ],
-                    alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
-                ),
-                padding=SPACE_MD,
-                border_radius=RADIUS_LG,
+            screen_header(
+                "Audio Studio",
+                subtitle=file_name,
+                on_back=lambda _: ctrl.navigate("dashboard"),
                 is_dark=is_dark,
+            ),
+            media_summary_card(
+                media_path,
+                info,
+                is_dark=is_dark,
+                on_change=lambda: ctrl.pick_media_for("audio"),
             ),
             # Live pipeline status (derived, never stuck)
             *([tool_job_row(running_job, ctrl, is_dark=is_dark)] if running_job else []),

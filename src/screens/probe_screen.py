@@ -7,6 +7,7 @@ from pathlib import Path
 
 import flet as ft
 
+from components.studio import screen_header
 from core.notify import ERROR, show_snack
 from core.state import Job, MediaInfo, use_app_state
 from core.storage_paths import format_bytes, get_temp_dir, unique_temp_name
@@ -20,7 +21,6 @@ from core.theme import (
     is_dark_mode,
 )
 from core.tokens import (
-    FONT_LG,
     FONT_MD,
     FONT_SM,
     FONT_XS,
@@ -120,14 +120,10 @@ def ProbeScreen() -> ft.Control:
     if not info or not media_path or not Path(media_path).exists():
         return ft.ListView(
             controls=[
-                ft.Row(
-                    controls=[
-                        ft.IconButton(
-                            icon=ft.Icons.ARROW_BACK_ROUNDED,
-                            on_click=lambda _: ctrl.navigate("dashboard"),
-                        ),
-                        ft.Text("Media Dossier", size=FONT_LG, weight=ft.FontWeight.BOLD),
-                    ],
+                screen_header(
+                    "Media Dossier",
+                    on_back=lambda _: ctrl.navigate("dashboard"),
+                    is_dark=is_dark,
                 ),
                 card_container(
                     content=ft.Column(
@@ -307,19 +303,14 @@ def ProbeScreen() -> ft.Control:
 
     return ft.ListView(
         controls=[
-            # Header
-            ft.Row(
-                controls=[
-                    ft.IconButton(
-                        icon=ft.Icons.ARROW_BACK_ROUNDED,
-                        on_click=lambda _: ctrl.navigate("dashboard"),
-                        tooltip="Back to Dashboard",
-                    ),
-                    ft.Text("Media Dossier", size=FONT_LG, weight=ft.FontWeight.BOLD),
-                    ft.Container(expand=True),
-                    ft.OutlinedButton("Change", on_click=lambda _: ctrl.pick_media_for("probe")),
+            screen_header(
+                "Media Dossier",
+                subtitle=Path(media_path).name,
+                on_back=lambda _: ctrl.navigate("dashboard"),
+                actions=[
+                    ft.OutlinedButton("Change", on_click=lambda _: ctrl.pick_media_for("probe"))
                 ],
-                spacing=SPACE_SM,
+                is_dark=is_dark,
             ),
             # General Specs Card
             card_container(
