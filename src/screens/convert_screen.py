@@ -7,16 +7,15 @@ from pathlib import Path
 import flet as ft
 
 from components.encoder_options import ContainerOptionRows, EncoderOptionPanel, OptionValues
+from components.studio import chip_group, media_summary_card, screen_header
 from components.tool_job_status import tool_job_row
 from core.engine_probe import codec_family, codec_label, container_label, containers_for_kind
 from core.notify import ERROR, show_snack
 from core.state import Job, use_app_state
-from core.storage_paths import format_bytes, get_temp_dir, unique_temp_name
+from core.storage_paths import get_temp_dir, unique_temp_name
 from core.styles import card_container, section_header
-from core.theme import ACCENT_RED, PRIMARY, TEXT_MUTED_DARK, TEXT_MUTED_LIGHT, is_dark_mode
+from core.theme import ACCENT_RED, TEXT_MUTED_DARK, TEXT_MUTED_LIGHT, is_dark_mode
 from core.tokens import (
-    FONT_LG,
-    FONT_MD,
     FONT_SM,
     RADIUS_LG,
     SPACE_MD,
@@ -44,11 +43,6 @@ def ConvertScreen() -> ft.Control:
     media_path = app_state.current_media_path
     info = app_state.current_media_info
     file_name = Path(media_path).name if media_path else "No file selected"
-    file_size_str = (
-        format_bytes(Path(media_path).stat().st_size)
-        if media_path and Path(media_path).exists()
-        else "0 B"
-    )
 
     # Codec choices are shown only when the INSTALLED wheel verified them as a
     # mode='w' encoder. Hardcoding libx264/libx265/vp9 is what let a tap reach
@@ -289,57 +283,64 @@ def ConvertScreen() -> ft.Control:
 
     audio_options = [ft.DropdownOption(key=key, text=codec_label(key)) for key in visible_audio]
 
+    def _apply_preset(preset: str) -> None:
+        """One-tap starting points: container + quality + resolution only.
+
+        Codecs deliberately stay on the probe's measured defaults — a screen
+        must never name an encoder (test_capability_schema enforces it).
+        """
+        if preset == "web":
+            if "mp4" in allowed_containers:
+                set_container_fmt("mp4")
+            set_crf_val(23)
+            set_res_choice("1080p")
+        elif preset == "chat":
+            if "mp4" in allowed_containers:
+                set_container_fmt("mp4")
+            set_crf_val(28)
+            set_res_choice("720p")
+        elif preset == "archive":
+            if "mkv" in allowed_containers:
+                set_container_fmt("mkv")
+            set_crf_val(20)
+            set_res_choice("original")
+
     return ft.ListView(
         controls=[
-            # Header with back button
-            ft.Row(
-                controls=[
-                    ft.IconButton(
-                        icon=ft.Icons.ARROW_BACK_ROUNDED,
-                        on_click=lambda _: ctrl.navigate("dashboard"),
-                        tooltip="Back to Dashboard",
-                    ),
-                    ft.Text("Convert Media", size=FONT_LG, weight=ft.FontWeight.BOLD),
-                ],
-                spacing=SPACE_SM,
-            ),
-            # Input file overview card
-            card_container(
-                content=ft.Row(
-                    controls=[
-                        ft.Icon(ft.Icons.VIDEO_FILE_ROUNDED, size=32, color=PRIMARY),
-                        ft.Column(
-                            controls=[
-                                ft.Text(
-                                    file_name,
-                                    size=FONT_MD,
-                                    weight=ft.FontWeight.BOLD,
-                                    max_lines=1,
-                                    overflow=ft.TextOverflow.ELLIPSIS,
-                                ),
-                                ft.Text(
-                                    f"Size: {file_size_str} • {info.duration_s:.1f}s"
-                                    if info
-                                    else f"Size: {file_size_str}",
-                                    size=FONT_SM,
-                                    color=muted,
-                                ),
-                            ],
-                            spacing=2,
-                            expand=True,
-                        ),
-                        ft.OutlinedButton(
-                            "Change", on_click=lambda _: ctrl.pick_media_for("convert")
-                        ),
-                    ],
-                    alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
-                ),
-                padding=SPACE_MD,
-                border_radius=RADIUS_LG,
+            screen_header(
+                "Convert",
+                subtitle=file_name,
+                on_back=lambda: ctrl.navigate("dashboard"),
                 is_dark=is_dark,
+            ),
+            media_summary_card(
+                media_path,
+                info,
+                is_dark=is_dark,
+                on_change=lambda: ctrl.pick_media_for("convert"),
             ),
             # Live pipeline status (derived, never stuck)
             *([tool_job_row(running_job, ctrl, is_dark=is_dark)] if running_job else []),
+            # One-tap presets: the common outcomes, before any detail controls.
+            *(
+                [
+                    section_header(
+                        "Quick Presets", "Starting points — adjust anything below", is_dark=is_dark
+                    ),
+                    chip_group(
+                        [
+                            ("Web 1080p", "web"),
+                            ("Chat friendly", "chat"),
+                            ("Archive MKV", "archive"),
+                        ],
+                        value="",
+                        on_change=_apply_preset,
+                        is_dark=is_dark,
+                    ),
+                ]
+                if media_kind == "video"
+                else []
+            ),
             # Target Format Section
             section_header("Output Format", "Select destination container", is_dark=is_dark),
             ft.Dropdown(
@@ -372,21 +373,17 @@ def ConvertScreen() -> ft.Control:
                     section_header("Video Codec", "Encoding algorithm", is_dark=is_dark),
                     *(
                         [
-                            ft.Row(
-                                controls=[
-                                    ft.Chip(
-                                        label=ft.Text(label),
-                                        selected=chosen_video == key,
-                                        on_click=lambda _, code=key: set_v_codec(code),
-                                    )
+                            chip_group(
+                                [
+                                    (label, key)
                                     for key, label in (
                                         visible_video
                                         if media_kind == "video"
                                         else [(key, codec_label(key)) for key in still_choices]
                                     )
                                 ],
-                                wrap=True,
-                                spacing=SPACE_SM,
+                                value=chosen_video,
+                                on_change=set_v_codec,
                             )
                         ]
                         if (visible_video if media_kind == "video" else True)
