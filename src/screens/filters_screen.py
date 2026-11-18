@@ -13,13 +13,14 @@ from pathlib import Path
 
 import flet as ft
 
+from components.studio import chip_group, media_summary_card, screen_header
 from components.tool_job_status import tool_job_row
 from core.notify import ERROR, show_snack
 from core.state import Job, use_app_state
-from core.storage_paths import cache_bytes, format_bytes, get_temp_dir, unique_temp_name
+from core.storage_paths import cache_bytes, get_temp_dir, unique_temp_name
 from core.styles import card_container, section_header
 from core.theme import ACCENT_PURPLE, TEXT_MUTED_DARK, TEXT_MUTED_LIGHT, is_dark_mode
-from core.tokens import FONT_LG, FONT_MD, FONT_SM, FONT_XS, RADIUS_LG, SPACE_MD, SPACE_SM
+from core.tokens import FONT_MD, FONT_SM, FONT_XS, RADIUS_LG, SPACE_MD, SPACE_SM
 from services.engine_service import available_filters, filter_description
 from services.media_io import picker_files
 from state.controller_ctx import use_controller
@@ -45,11 +46,6 @@ def FiltersScreen() -> ft.Control:
     media_path = app_state.current_media_path
     info = app_state.current_media_info
     file_name = Path(media_path).name if media_path else "No file selected"
-    file_size_str = (
-        format_bytes(Path(media_path).stat().st_size)
-        if media_path and Path(media_path).exists()
-        else "0 B"
-    )
 
     speed_val, set_speed_val = ft.use_state(1.0)
     volume_pct, set_volume_pct = ft.use_state(100)
@@ -224,42 +220,17 @@ def FiltersScreen() -> ft.Control:
             show_snack(page, f"Couldn't start: {exc}", bgcolor=ERROR)
 
     media_kind = info.kind if info is not None else "video"
-    header = ft.Row(
-        controls=[
-            ft.IconButton(
-                icon=ft.Icons.ARROW_BACK_ROUNDED,
-                on_click=lambda _: ctrl.navigate("dashboard"),
-                tooltip="Back to Dashboard",
-            ),
-            ft.Text("Media Filter Stack", size=FONT_LG, weight=ft.FontWeight.BOLD),
-        ],
-        spacing=SPACE_SM,
-    )
-    file_card = card_container(
-        content=ft.Row(
-            controls=[
-                ft.Icon(ft.Icons.TUNE_ROUNDED, size=32, color=ACCENT_PURPLE),
-                ft.Column(
-                    controls=[
-                        ft.Text(
-                            file_name,
-                            size=FONT_MD,
-                            weight=ft.FontWeight.BOLD,
-                            max_lines=1,
-                            overflow=ft.TextOverflow.ELLIPSIS,
-                        ),
-                        ft.Text(f"Size: {file_size_str}", size=FONT_SM, color=muted),
-                    ],
-                    spacing=2,
-                    expand=True,
-                ),
-                ft.OutlinedButton("Change", on_click=lambda _: ctrl.pick_media_for("filters")),
-            ],
-            alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
-        ),
-        padding=SPACE_MD,
-        border_radius=RADIUS_LG,
+    header = screen_header(
+        "Filters",
+        subtitle=file_name,
+        on_back=lambda: ctrl.navigate("dashboard"),
         is_dark=is_dark,
+    )
+    file_card = media_summary_card(
+        media_path,
+        info,
+        is_dark=is_dark,
+        on_change=lambda: ctrl.pick_media_for("filters"),
     )
 
     if media_kind != "video":
@@ -332,17 +303,10 @@ def FiltersScreen() -> ft.Control:
             ),
             # Speed / Tempo
             section_header("Playback Speed", f"{speed_val}x playback multiplier", is_dark=is_dark),
-            ft.Row(
-                controls=[
-                    ft.Chip(
-                        label=ft.Text(f"{s}x"),
-                        selected=abs(speed_val - s) < 0.05,
-                        on_select=lambda _, sp=s: set_speed_val(sp),
-                    )
-                    for s in speeds
-                ],
-                wrap=True,
-                spacing=SPACE_SM,
+            chip_group(
+                [(f"{s}x", s) for s in speeds],
+                value=next((s for s in speeds if abs(speed_val - s) < 0.05), None),
+                on_change=set_speed_val,
             ),
             # Volume Boost
             section_header(
@@ -357,33 +321,19 @@ def FiltersScreen() -> ft.Control:
             ),
             # Orientation / Rotate
             section_header("Video Rotation", "Rotate video frame", is_dark=is_dark),
-            ft.Row(
-                controls=[
-                    ft.Chip(
-                        label=ft.Text(lbl),
-                        selected=rotation_deg == deg,
-                        on_select=lambda _, d=deg: set_rotation_deg(d),
-                    )
-                    for deg, lbl in rotations
-                ],
-                wrap=True,
-                spacing=SPACE_SM,
+            chip_group(
+                [(lbl, deg) for deg, lbl in rotations],
+                value=rotation_deg,
+                on_change=set_rotation_deg,
             ),
             # Crop (gated: crop filter)
             section_header("Crop", "Center-crop to an aspect ratio", is_dark=is_dark),
             *(
                 [
-                    ft.Row(
-                        controls=[
-                            ft.Chip(
-                                label=ft.Text(a.upper() if a == "original" else a),
-                                selected=crop == a,
-                                on_select=lambda _, v=a: set_crop(v),
-                            )
-                            for a in _CROP_ASPECTS
-                        ],
-                        wrap=True,
-                        spacing=SPACE_SM,
+                    chip_group(
+                        [(a.upper() if a == "original" else a, a) for a in _CROP_ASPECTS],
+                        value=crop,
+                        on_change=set_crop,
                     )
                 ]
                 if not _missing("crop")
@@ -391,20 +341,17 @@ def FiltersScreen() -> ft.Control:
             ),
             # Scale (reuses convert's reformat path — no filter needed)
             section_header("Scale Down", "Even-dimension downscale", is_dark=is_dark),
-            ft.Row(
-                controls=[
-                    ft.Chip(
-                        label=ft.Text(label),
-                        selected=scale == value,
-                        on_select=lambda _, v=value: set_scale(v),
-                    )
+            chip_group(
+                [
+                    (label, value)
                     for value, label in (
                         ("original", "Original"),
                         ("480p", "480p"),
                         ("720p", "720p"),
                     )
                 ],
-                spacing=SPACE_SM,
+                value=scale,
+                on_change=set_scale,
             ),
             # EQ (gated: eq filter — compiled out of this build)
             section_header("Color EQ", "Brightness · contrast · saturation", is_dark=is_dark),
@@ -491,16 +438,10 @@ def FiltersScreen() -> ft.Control:
             ),
             *(
                 [
-                    ft.Row(
-                        controls=[
-                            ft.Chip(
-                                label=ft.Text(level.title()),
-                                selected=denoise == level,
-                                on_select=lambda _, v=level: set_denoise(v),
-                            )
-                            for level in _DENOISE_LEVELS
-                        ],
-                        spacing=SPACE_SM,
+                    chip_group(
+                        [(level.title(), level) for level in _DENOISE_LEVELS],
+                        value=denoise,
+                        on_change=set_denoise,
                     )
                 ]
                 if avail is None or _denoise_backend() != "unavailable"
@@ -559,27 +500,27 @@ def FiltersScreen() -> ft.Control:
                                 ),
                                 *(
                                     [
-                                        ft.Row(
+                                        ft.Column(
                                             controls=[
                                                 ft.Text("Position", size=FONT_SM),
-                                                *[
-                                                    ft.Chip(
-                                                        label=ft.Text(
+                                                chip_group(
+                                                    [
+                                                        (
                                                             {
                                                                 "br": "Bottom Right",
                                                                 "bl": "Bottom Left",
                                                                 "tl": "Top Left",
                                                                 "tr": "Top Right",
                                                                 "center": "Center",
-                                                            }[p]
-                                                        ),
-                                                        selected=wm_pos == p,
-                                                        on_select=lambda _, v=p: set_wm_pos(v),
-                                                    )
-                                                    for p in _WM_POSITIONS
-                                                ],
+                                                            }[p],
+                                                            p,
+                                                        )
+                                                        for p in _WM_POSITIONS
+                                                    ],
+                                                    value=wm_pos,
+                                                    on_change=set_wm_pos,
+                                                ),
                                             ],
-                                            wrap=True,
                                             spacing=SPACE_SM,
                                         ),
                                         ft.Row(
