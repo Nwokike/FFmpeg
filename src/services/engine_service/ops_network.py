@@ -349,9 +349,7 @@ def _open_network_input(
 
         return EngineService._open_https_via_httpx(input_url, cancel_event, max_hls_download_mb)
     # FFmpeg's TLS backend has no OS trust store: hand it certifi's bundle.
-    return av.open(
-        input_url, "r", timeout=(10.0, 30.0), options=network_options()
-    ), None
+    return av.open(input_url, "r", timeout=(10.0, 30.0), options=network_options()), None
 
 
 def record(
