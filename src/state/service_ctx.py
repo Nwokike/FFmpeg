@@ -31,6 +31,7 @@ class Services:
     permission_handler: Any = None
     audio_recorder: Any = None
     queue: Any = None  # JobQueue: pause/cancel/queued reads for cards+banner
+    notify: Any = None  # JobNotificationService: permission/settings reads
 
 
 _DEFAULT_SERVICES = Services()

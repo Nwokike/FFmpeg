@@ -193,6 +193,18 @@ def SettingsScreen() -> ft.Control:
             logger.warning("Privacy options failed: %s", exc)
             show_snack(page, "Privacy choices unavailable right now", bgcolor=ERROR)
 
+    async def _open_notification_settings() -> None:
+        """Open the OS notification settings when the user needs to re-allow."""
+        notify = getattr(services, "notify", None)
+        if notify is None:
+            show_snack(page, "Notifications are unavailable on this platform", bgcolor=ERROR)
+            return
+        enabled = await notify.are_enabled()
+        if enabled:
+            show_snack(page, "Job notifications are enabled", bgcolor=SUCCESS)
+            return
+        await notify.open_settings()
+
     def _open_activity_terminal(_):
         logs = MemoryLogHandler.get_logs(limit=100)
         log_text = "\n".join(logs) if logs != ["No logs recorded yet."] else "No logs yet."
@@ -484,6 +496,27 @@ def SettingsScreen() -> ft.Control:
                         ),
                     ],
                     alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                ),
+                padding=SPACE_MD,
+                border_radius=RADIUS_MD,
+                is_dark=is_dark,
+            ),
+            # Background-job notifications: what they do and how to fix a
+            # denied permission (Android 13+ blocks them until allowed).
+            section_header("Notifications", "Background job progress", is_dark=is_dark),
+            card_container(
+                content=ft.ListTile(
+                    leading=ft.Icon(ft.Icons.NOTIFICATIONS_ACTIVE_ROUNDED, color=PRIMARY),
+                    title=ft.Text("Job notifications", weight=ft.FontWeight.W_600),
+                    subtitle=ft.Text(
+                        "A persistent notification shows progress and Cancel while a job "
+                        "runs, and keeps it alive when the app is minimized.",
+                        color=muted,
+                    ),
+                    trailing=ft.OutlinedButton(
+                        "System settings",
+                        on_click=lambda _: page.run_task(_open_notification_settings),
+                    ),
                 ),
                 padding=SPACE_MD,
                 border_radius=RADIUS_MD,

@@ -413,6 +413,7 @@ async def main(page: ft.Page) -> None:
         permission_handler=permission_handler,
         audio_recorder=audio_recorder,
     )
+    services.notify = job_notify
 
     # Restore persisted state from storage
     state.has_accepted_terms = storage.get("terms_accepted") == TERMS_VERSION

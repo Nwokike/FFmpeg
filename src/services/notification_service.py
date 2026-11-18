@@ -195,6 +195,24 @@ class JobNotificationService:
         except Exception as exc:
             logger.debug("notification stop failed: %s", exc)
 
+    async def are_enabled(self) -> bool:
+        """Whether the OS allows this app's notifications (Settings row)."""
+        if self._svc is None:
+            return False
+        try:
+            return bool(await self._svc.are_notifications_enabled())
+        except Exception:
+            return False
+
+    async def open_settings(self) -> None:
+        """Open the OS notification settings screen (Android/iOS/macOS)."""
+        if self._svc is None:
+            return
+        try:
+            await self._svc.open_settings()
+        except Exception as exc:
+            logger.debug("notification settings unavailable: %s", exc)
+
     # ── actions / taps ──────────────────────────────────────────────────
     def _on_action(self, e) -> None:
         action = getattr(e, "action_id", "")
