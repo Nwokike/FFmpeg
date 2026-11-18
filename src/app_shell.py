@@ -13,12 +13,13 @@ import logging
 
 import flet as ft
 
+from components.adaptive_nav import build_navigation_rail, build_sidebar, window_class
 from components.brand_header import BrandHeader
 from components.jobs_banner import jobs_banner_view
 from components.offline_banner import offline_banner_view
 from core.state import AppState, state, use_app_state
 from core.theme import ACCENT_RED, is_dark_mode
-from core.tokens import SPACE_MD
+from core.tokens import CONTENT_MAX_W, SIDEBAR_EXPANDED_WIDTH, SPACE_MD
 from screens.audio_screen import AudioScreen
 from screens.capture_screen import CaptureScreen
 from screens.compress_screen import CompressScreen
@@ -37,6 +38,7 @@ from screens.settings_screen import SettingsScreen
 from screens.streams_screen import StreamsScreen
 from screens.terminal_screen import TerminalScreen
 from state.controller_ctx import use_controller
+from state.service_ctx import use_services
 
 logger = logging.getLogger("AppShell")
 
@@ -131,35 +133,6 @@ def _shell_body(
             expand=True,
         ),
         expand=True,
-    )
-
-
-def _build_navigation_rail(ctrl, app_state: AppState | None = None, selected: int = 0) -> ft.NavigationRail:
-    """Desktop chrome: a labeled rail instead of a phone bottom bar."""
-    if app_state is None:
-        app_state = state
-
-    def _on_rail_change(e):
-        idx = clamp_tab(e.control.selected_index)
-        if idx != app_state.selected_tab:
-            ctrl.select_tab(idx)
-
-    destinations = [
-        ft.NavigationRailDestination(
-            icon=ft.Icon(icon),
-            selected_icon=ft.Icon(selected_icon),
-            label=label,
-        )
-        for icon, selected_icon, label in zip(_TAB_ICONS, _TAB_SELECTED_ICONS, _TAB_NAMES, strict=True)
-    ]
-    return ft.NavigationRail(
-        selected_index=clamp_tab(selected),
-        label_type=ft.NavigationRailLabelType.ALL,
-        min_width=88,
-        min_extended_width=180,
-        group_alignment=-0.9,
-        destinations=destinations,
-        on_change=_on_rail_change,
     )
 
 
@@ -292,14 +265,29 @@ def AppShell() -> ft.Control:
     # flips between zero/non-zero or the capped label changes.
     last_nav_job_count, set_last_nav_job_count = ft.use_state(-1)
 
+    services = use_services()
+    sidebar_collapsed, set_sidebar_collapsed = ft.use_state(
+        bool(getattr(app_state, "sidebar_collapsed", False))
+    )
+
+    def _toggle_sidebar() -> None:
+        nxt = not sidebar_collapsed
+        set_sidebar_collapsed(nxt)
+        app_state.sidebar_collapsed = nxt
+        try:
+            if services.storage is not None:
+                services.storage.set("sidebar_collapsed", nxt)
+        except Exception:
+            logger.debug("sidebar collapse not persisted", exc_info=True)
+
     def _sync_chrome():
-        """Sync the root view's navigation bar to the current branch."""
+        """Sync the root view's bottom bar: compact widths only."""
         page = ft.context.page
         if not page or not page.views:
             return
         try:
-            wide = (getattr(app_state, "window_width", 0) or 0) >= 840
-            if _should_show_onboarding(app_state) or active_view != "dashboard" or wide:
+            compact = window_class(app_state.window_width or page.width) == "compact"
+            if _should_show_onboarding(app_state) or active_view != "dashboard" or not compact:
                 page.views[0].navigation_bar = None
             else:
                 job_count = len(app_state.jobs)
@@ -335,14 +323,39 @@ def AppShell() -> ft.Control:
         else:
             content = SettingsScreen(key=ft.ValueKey("settings"))
         body = _shell_body(content, app_state, header=BrandHeader())
-        if (getattr(app_state, "window_width", 0) or 0) >= 840:
-            # Expanded width: rail + constrained reading column (Material
-            # window-size guidance; phone layouts must not stretch to 1600 px).
+        chrome_class = window_class(app_state.window_width or None)
+        if chrome_class != "compact":
+            # Medium (rail) / expanded (collapsible sidebar) chrome, with the
+            # reading column centred and capped like the desktop studio apps.
+            def _select_tab(idx: int) -> None:
+                set_active_tab(idx)
+
+            if chrome_class == "medium":
+                chrome: ft.Control = build_navigation_rail(
+                    active_tab, lambda e: _select_tab(e.control.selected_index)
+                )
+            else:
+                chrome = build_sidebar(
+                    active_tab,
+                    _select_tab,
+                    sidebar_collapsed,
+                    _toggle_sidebar,
+                    is_dark=is_dark_mode(ft.context.page, app_state),
+                )
+            width = app_state.window_width or 1100
+            content_w = min(CONTENT_MAX_W, max(600, width - SIDEBAR_EXPANDED_WIDTH - 120))
             body = ft.Row(
                 controls=[
-                    _build_navigation_rail(controller, app_state, active_tab),
+                    chrome,
                     ft.VerticalDivider(width=1),
-                    ft.Container(content=body, expand=True, padding=ft.Padding.only(left=SPACE_MD)),
+                    ft.Container(
+                        expand=True,
+                        padding=ft.Padding.only(left=SPACE_MD, right=SPACE_MD),
+                        content=ft.Row(
+                            controls=[ft.Container(content=body, width=content_w)],
+                            alignment=ft.MainAxisAlignment.CENTER,
+                        ),
+                    ),
                 ],
                 expand=True,
                 spacing=0,

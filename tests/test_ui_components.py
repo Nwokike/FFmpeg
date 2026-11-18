@@ -41,3 +41,24 @@ def test_media_summary_card_without_media_renders_a_placeholder():
     row = card.content
     text = next(t for t in row.controls if isinstance(t, ft.Column)).controls[0]
     assert text.value == "No media selected"
+
+
+def test_window_classes_drive_the_chrome():
+    from components.adaptive_nav import window_class
+
+    assert window_class(None) == "compact"
+    assert window_class(500) == "compact"
+    assert window_class(700) == "medium"
+    assert window_class(1200) == "expanded"
+
+
+def test_sidebar_renders_collapsed_and_expanded():
+    from components.adaptive_nav import build_sidebar
+
+    opts: list[int] = []
+    for collapsed in (True, False):
+        side = build_sidebar(1, opts.append, collapsed, lambda: None)
+        assert side.width == (72 if collapsed else 264)
+        # Destination rows are clickable in both states.
+        rows = [c for c in side.content.controls if isinstance(c, ft.Container)]
+        rows[-2].on_click(None) if len(rows) > 1 else None

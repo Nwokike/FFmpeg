@@ -49,3 +49,10 @@ RING_SM = 18
 RING_MD = 22
 DIALOG_W = 520
 DIALOG_H = 420
+
+# Window-size classes (Material 3) — drive the adaptive navigation chrome.
+WINDOW_COMPACT_MAX = 599.0  # <= bottom NavigationBar
+WINDOW_MEDIUM_MAX = 839.0  # <= icon NavigationRail; above -> sidebar
+SIDEBAR_RAIL_WIDTH = 72  # collapsed sidebar
+SIDEBAR_EXPANDED_WIDTH = 264  # labelled sidebar
+CONTENT_MAX_W = 1100  # reading column cap on expanded windows

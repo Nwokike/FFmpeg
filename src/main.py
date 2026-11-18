@@ -288,6 +288,8 @@ async def main(page: ft.Page) -> None:
     media_io = MediaIOService(page)
     ads = AdService(page)
     update_svc = UpdateService()
+    # Seed persisted chrome state before the shell's first render.
+    state.sidebar_collapsed = bool(storage.get("sidebar_collapsed", False))
 
     # Flet's Page has no launch_url/set_clipboard — these services must be
     # registered in page.services before any launch/clipboard call (GC + transport).
@@ -307,10 +309,8 @@ async def main(page: ft.Page) -> None:
 
     # Adaptive chrome: the shell reads this to choose NavigationRail vs bar.
     def _on_resize(_e=None) -> None:
-        try:
+        with contextlib.suppress(Exception):
             state.window_width = int(page.width or 0)
-        except Exception:
-            pass
 
     _on_resize()
     page.on_resize = _on_resize

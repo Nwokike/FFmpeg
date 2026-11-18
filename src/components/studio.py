@@ -68,10 +68,15 @@ def chip_group(
     value: Any,
     on_change: Callable[[Any], None],
     is_dark: bool = True,
-    wrap: bool = True,
+    wrap: bool = False,
     key: str | None = None,
 ) -> ft.Control:
-    """A single-select chip row. ``options`` may be strings or (label, value) pairs."""
+    """A single-select chip row. ``options`` may be strings or (label, value) pairs.
+
+    The row scrolls horizontally by default so a long option set stays one line
+    on a phone instead of wrapping into a tall block; pass ``wrap=True`` for
+    layouts that genuinely want multi-line flow.
+    """
     chips: list[ft.Control] = []
     for option in options:
         label, option_value = option if isinstance(option, tuple) else (option, option)
@@ -84,11 +89,14 @@ def chip_group(
                 on_select=lambda _e, v=option_value: on_change(v),
             )
         )
+    # Horizontal scroll (not wrap): a long option row must stay one line on
+    # narrow screens instead of stacking into a tall block.
     return ft.Row(
         controls=chips,
         wrap=wrap,
         spacing=SPACE_XS,
         run_spacing=SPACE_2XS,
+        scroll=None if wrap else ft.ScrollMode.AUTO,
         key=key,
     )
 
