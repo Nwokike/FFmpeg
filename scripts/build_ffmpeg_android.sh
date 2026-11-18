@@ -45,6 +45,9 @@ if [ ! -d "$FAM_DIR/.git" ]; then
 fi
 git -C "$FAM_DIR" checkout --quiet "$FAM_COMMIT"
 
+# ── Deterministic repairs for upstream bugs at the pin (idempotent) ────────
+python3 "$ROOT/scripts/fam_fixes.py" "$FAM_DIR"
+
 # ── CMake 3.31.x (pinned in wrap_pins.py) ───────────────────────────────────
 # CMake 4 refuses libx265's cmake_minimum_required 3.2 and the CMP0025/CMP0054
 # OLD policies x265 4.1 still sets (removed in CMake 4.0) — no env override
