@@ -36,10 +36,11 @@ def remux(
     drop_indices: list[int] | None = None,
     rotation: int | None = None,
     chapters: list[dict] | None = None,
+    container: str | None = None,
     on_progress: Callable[[float, str], None] | None = None,
     cancel_event: Event | None = None,
 ) -> str:
-    """Losslessly copy selected streams into a Matroska file (track picker).
+    """Losslessly copy selected streams into a new container (track picker).
 
     ``drop_indices`` are source stream indexes to EXCLUDE (e.g. an unwanted
     audio track). ``add_stream_from_template`` already carries codecpar,
@@ -52,11 +53,13 @@ def remux(
     (list of {title, start_s, end_s}) replaces the chapter set; None keeps
     the source chapters. Chapter writes are matroska/mov-gated by the
     caller (other muxers ignore them).
+    ``container`` names the muxer explicitly; None infers it from the output
+    extension (the Dossier's picker passes e.g. "mp4"/"matroska"/"webm").
     """
     job = Job(
         output_path=output_path,
         inputs=[InputSpec(path=input_path)],
-        output=OutputSpec(container="matroska", metadata=True, rotation=rotation),
+        output=OutputSpec(container=container, metadata=True, rotation=rotation),
         drop_indices=list(drop_indices or []),
         keep_attachments=True,
         chapters=chapters,

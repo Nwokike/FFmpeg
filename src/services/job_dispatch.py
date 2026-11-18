@@ -59,6 +59,9 @@ def _build_job_dispatch(engine, state, job, _on_progress, cancel_evt):
             encoder_options=p.get("encoder_options"),
             audio_encoder_options=p.get("audio_encoder_options"),
             container_options=p.get("container_options"),
+            container=p.get("container"),
+            bit_rate=p.get("bit_rate"),
+            pix_fmt=p.get("pix_fmt"),
             on_progress=_on_progress,
             cancel_event=cancel_evt,
         )
@@ -158,6 +161,9 @@ def _build_job_dispatch(engine, state, job, _on_progress, cancel_evt):
             input_path=job.input_path,
             output_path=job.output_path,
             drop_indices=p.get("drop", []),
+            rotation=p.get("rotation"),
+            chapters=p.get("chapters"),
+            container=p.get("container"),
             on_progress=_on_progress,
             cancel_event=cancel_evt,
         )
