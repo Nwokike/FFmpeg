@@ -9,6 +9,11 @@ rm -rf ${CMAKE_BUILD_DIR}
 mkdir ${CMAKE_BUILD_DIR}
 cd ${CMAKE_BUILD_DIR}
 
+# SVT-AV1 sets CMAKE_ARCHIVE_OUTPUT_DIRECTORY to <source>/Bin/<config>/ but
+# never creates it — cmake then fails at archive time with "Error running
+# link command: no such file or directory". Create the declared output dir.
+mkdir -p ../Bin/Release
+
 # Pin the archiver explicitly: NDK r27's toolchain can resolve CMAKE_AR to a
 # target-prefixed wrapper that does not exist ("Error running link command:
 # no such file or directory" at archive time). FAM_AR/FAM_RANLIB are the
