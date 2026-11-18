@@ -34,6 +34,10 @@ ${CMAKE_EXECUTABLE} .. \
 
 # Make the resolved binutils visible in the build log for the next failure.
 ${CMAKE_EXECUTABLE} -LA -N . | grep -E '^CMAKE_(AR|RANLIB|C_COMPILER_AR|C_COMPILER_RANLIB):' || true
+echo ">> svtav1 tools: cmake=$(command -v cmake) ar=${FAM_AR} ranlib=${FAM_RANLIB}"
+ls -ld ../Bin/Release
 
-${MAKE_EXECUTABLE} -j${HOST_NPROC} || exit 1
+# VERBOSE=1 so a link failure prints the actual ar command, not just "Error
+# running link command: no such file or directory".
+${MAKE_EXECUTABLE} VERBOSE=1 -j${HOST_NPROC} || exit 1
 ${MAKE_EXECUTABLE} install
