@@ -9,7 +9,8 @@ exact layout the `av` wheel's extension modules link against (unversioned
 libav*.so in opt/lib, relocatable pkg-config files in opt/lib/pkgconfig).
 
 Every payload is verified before it ships:
-- ELF64, 16 KiB PT_LOAD alignment, no text relocations;
+- ELF32/ELF64; PT_LOAD alignment 16 KiB for 64-bit ABIs, 4 KiB for 32-bit
+  (armeabi-v7a); no text relocations;
 - DT_SONAME == filename for the seven libav* libraries;
 - DT_NEEDED satisfied by the shipped set or the platform (external codec
   libraries must be statically folded in, not shipped loose);
@@ -27,7 +28,7 @@ import runpy
 import zipfile
 from pathlib import Path
 
-from elf_tools import ALIGN_16K, ElfError, elf_info
+from elf_tools import ALIGN_4K, ALIGN_16K, ElfError, elf_info
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 PINS = runpy.run_path(REPO_ROOT / "scripts" / "wrap_pins.py")
@@ -105,8 +106,12 @@ def verify_prefix(prefix: Path, abi: str) -> tuple[dict[str, bytes], str]:
             info = elf_info(blob, f"{abi}/{name}")
         except ElfError as exc:
             fail(str(exc))
-        if not info["align"] or info["align"] < ALIGN_16K:
-            fail(f"{abi}/{name}: PT_LOAD align {info['align']:#x} < 0x{ALIGN_16K:x} (16 KiB)")
+        # 16 KiB pages only exist on 64-bit devices; armeabi-v7a is ELF32 and
+        # its floor is the 4 KiB page size.
+        floor = ALIGN_16K if info.get("bits", 64) == 64 else ALIGN_4K
+        if not info["align"] or info["align"] < floor:
+            label = "16 KiB" if floor == ALIGN_16K else "4 KiB"
+            fail(f"{abi}/{name}: PT_LOAD align {info['align']:#x} < 0x{floor:x} ({label})")
         if info["textrel"]:
             fail(f"{abi}/{name}: DT_TEXTREL present (unrelocatable on modern Android)")
         if info["soname"] and info["soname"] != name:
