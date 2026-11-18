@@ -31,14 +31,10 @@ _NATIVE_LICENSES = {
     "libdav1d (AV1 decoder)": "BSD-2-Clause",
     "libmp3lame (MP3 encoder)": "LGPL-2.0-or-later",
     "libopus": "BSD-3-Clause",
-    "libspeex": "BSD-3-Clause",
-    "libtwolame": "LGPL-2.1-or-later",
     "libwebp": "BSD-3-Clause",
     "libfreetype": "FTL / GPL-2.0-or-later",
     "libfribidi": "LGPL-2.1-or-later",
     "mbedtls (TLS)": "Apache-2.0 / GPL-2.0-or-later",
-    "libbluray": "LGPL-2.1-or-later",
-    "libxml2": "MIT",
 }
 
 _PY_DISTS = (

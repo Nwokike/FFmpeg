@@ -12,32 +12,33 @@ changes.
 | H.264 encode | libx264 (GPL) |
 | H.265/HEVC encode | libx265 (GPL) |
 | VP8/VP9 encode | libvpx |
-| AV1 encode | libaom + SVT-AV1 (**new** — overlay) |
+| AV1 encode | libaom |
 | AV1 decode | libdav1d + libaom |
 | MP3 encode | libmp3lame |
 | AAC/Opus/FLAC/ALAC/PCM | FFmpeg native + libopus |
-| **Vorbis encode (`.ogg`/`.oga`)** | **libogg + libvorbis (new — overlay)** |
 | WebP encode | libwebp |
-| Subtitles demux/decode | FFmpeg native + libxml2 |
+| drawtext + bidi text | libfreetype + libfribidi |
+| Vorbis decode | FFmpeg native |
 | TLS (https/tls/hls-encrypted) | mbedtls |
-| Bluray/DVD demux | libbluray/libdvdnav/libdvdread (fam free set) |
 | 16 KB page alignment | `-Wl,-z,max-page-size=16384` |
 
-### Overlay (this pass)
+### Component set (lean, no overlay)
 
-`scripts/ffmpeg-android-maker-ext/` adds three libraries the harness lacked,
-each pinned by sha256:
+`scripts/wrap_pins.py` (`FAM_ARGS`) enables exactly these external libraries
+and no others; every one is built static and folded into the seven `libav*.so`,
+so the wheels ship no companion `.so` closure:
 
-- `libogg 1.3.5` — dependency of libvorbis, built first; FFmpeg has no
-  `--enable-libogg`, so `apply.sh` wires it as build-only.
-- `libvorbis 1.3.7` — Vorbis encoder (`--enable-libvorbis`).
-- `SVT-AV1 v4.0.1` — AV1 encoder (`--enable-libsvtav1`).
+- GPL: `libx264`, `libx265` (`--enable-all-gpl` also sets `--enable-gpl`)
+- Free: `libaom`, `libdav1d`, `libmp3lame`, `libopus`, `libvpx`, `libwebp`,
+  `libfreetype`, `libfribidi`, `mbedtls`
 
-`apply.sh` copies the recipes into the pinned ffmpeg-android-maker clone,
-registers them in `parse-arguments.sh`, skips the `--enable-libogg` configure
-flag, and puts the external pkg-config dir on the search path. The packager
-gate (`REQUIRED_CONFIGURE_TOKENS`) now demands `libvorbis`/`libsvtav1` in the
+The packager gate (`REQUIRED_CONFIGURE_TOKENS`) demands exactly this set in the
 built configure string, so a silently reduced build cannot ship.
+
+Dropped on purpose (size, not capability-critical): `libvorbis`/`libogg`
+(lossy audio encode is covered by AAC/Opus/MP3; Vorbis decode stays native),
+`svt-av1` (AV1 encode covered by libaom), `libbluray`, `libxml2` (DASH/ISM —
+the app handles HLS), `libtwolame`, `libspeex`.
 
 ## Still open (documented, not yet in the build)
 

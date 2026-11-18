@@ -1,10 +1,14 @@
 #!/usr/bin/env bash
-# Build full FFmpeg shared libraries for Android via ffmpeg-android-maker.
+# Build FFmpeg shared libraries for Android via ffmpeg-android-maker.
 #
 # The wrap pipeline's first stage: produces a per-ABI `make install` prefix
 # (lib/*.so + include/ + lib/pkgconfig/*.pc) that
 # scripts/build_flet_libffmpeg_wheel.py packages into `flet-libffmpeg` wheels.
 # All versions/commits are pinned in scripts/wrap_pins.py.
+#
+# Every external codec is linked STATIC and folded into the seven libav*.so,
+# so the wheels ship no companion .so closure (that is what keeps the APK
+# lean). The component set lives in wrap_pins.FAM_ARGS.
 #
 # Usage: build_ffmpeg_android.sh [abi,abi,...]   (default: all pinned ABIs)
 # Env:   ANDROID_NDK_HOME (downloaded + cached when unset)
@@ -54,9 +58,6 @@ if [ ! -x "$CMAKE_VENV/bin/cmake" ]; then
 fi
 export PATH="$CMAKE_VENV/bin:$PATH"
 echo ">> cmake: $(cmake --version | head -1)"
-
-# ── Overlay: extra external codec libraries (ogg/vorbis/svtav1) ────────────
-"$ROOT/scripts/ffmpeg-android-maker-ext/apply.sh" "$FAM_DIR"
 
 # ── Build every requested ABI ───────────────────────────────────────────────
 FAM_ARGS=$(python3 "$ROOT/scripts/wrap_pins.py" --args)

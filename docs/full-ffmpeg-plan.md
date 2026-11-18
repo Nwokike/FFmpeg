@@ -41,14 +41,15 @@ Two workstreams:
 ## A2. Build the mobile wheels
 
 1. **FFmpeg 9.0.2 for Android** (`arm64-v8a`, `armeabi-v7a`, `x86_64`) with the
-   PyAV feature set. Two ways:
-   - `ffmpeg-android-maker --source-tar=9.0.2 --enable-all-free --enable-all-gpl`
-     (plus `libsvtav1`, `libass`, `libvorbis`; `mbedtls` or `openssl` for TLS).
-     External libs are built static and folded into `libavcodec.so`, so the
-     output is just the seven `libav*.so`, unversioned, 16 KB aligned, no text
-     relocations.
-   - Or repackage Termux's FFmpeg 9.0.2 debs (aarch64/arm/x86_64, GPL-3.0,
-     16 KB aligned) with `elf_tools.py` soname rewrites — the proot pattern.
+   PyAV feature set: `ffmpeg-android-maker --source-tar=9.0.2` with the lean
+   component set in `scripts/wrap_pins.py` (`FAM_ARGS`): x264, x265, aom,
+   dav1d, vpx, mp3lame, opus, webp, freetype, fribidi, mbedtls. External libs
+   are built static and folded into `libavcodec.so`, so the output is just the
+   seven `libav*.so`, unversioned, 16 KB aligned, no text relocations and no
+   companion `.so` closure.
+   Termux's prebuilt debs are deliberately NOT used: Termux links every codec
+   dynamically, so repacking them drags ~50 companion libraries per ABI
+   (measured: 102 packages / 439 MB installed) — bloat the app does not need.
 2. **Package as a wheel** in the `opt/lib` layout, exactly like `flet-libffmpeg`:
    `flet_libffmpeg-9.0.2-1-py3-none-android_24_<abi>.whl`. Script adapted from
    `proot-distro-flet/scripts/build_flet_proot_wheel.py`: sha256 pins, ELF
@@ -233,7 +234,7 @@ Make the app run as FFmpeg AV on a full FFmpeg wheel:
 - CI: build wheels → `PIP_FIND_LINKS` → `flet build apk --split-per-abi`;
   verify ELF alignment and that the device probe reports the full encoder set.
 - Deliverable: an FFmpeg AV APK whose engine reports libx264/libx265/libvpx/
-  libaom/libmp3lame/libopus/libvorbis on device.
+  libaom/libmp3lame/libopus on device.
 
 ## Phase 2 — Capability schema
 

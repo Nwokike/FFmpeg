@@ -42,21 +42,25 @@ PYTHON_VERSION = "3.14"
 # Android API level (floor of the Flet/av wheel lineage).
 ANDROID_API_LEVEL = 24
 
-# ffmpeg-android-maker flag set: every library it supports, free + GPL.
-# Pending (harness lacks recipes): libvorbis+ogg, libass(+harfbuzz), svt-av1,
-# rav1e, openssl — tracked in docs/full-ffmpeg-plan.md Phase 2.
+# ffmpeg-android-maker flag set: the app's real codec surface, no more.
+# Every external lib is built STATIC and folded into the seven libav*.so —
+# that is what keeps the APK lean: no companion .so closure to ship. The
+# overlay recipes (ogg/vorbis/svt-av1) are gone: no patches live here.
+# --enable-all-gpl is exactly libx264 + libx265 and also turns on --enable-gpl
+# (FAM has no standalone gpl flag).
 FAM_ARGS = [
     "--source-tar=" + FFMPEG_VERSION,
     f"--android-api-level={ANDROID_API_LEVEL}",
-    "--enable-all-free",
     "--enable-all-gpl",
-    # External libs beyond ffmpeg-android-maker's built-in set, built by the
-    # overlay in scripts/ffmpeg-android-maker-ext/ (libogg is a dependency of
-    # libvorbis; FFmpeg has no --enable-libogg, so apply.sh wires it as
-    # build-only and adds the external pkg-config path).
-    "--enable-libogg",
-    "--enable-libvorbis",
-    "--enable-libsvtav1",
+    "--enable-libaom",  # AV1 encode + decode
+    "--enable-libdav1d",  # fast AV1 decode
+    "--enable-libmp3lame",  # MP3 encode
+    "--enable-libopus",  # Opus encode/decode
+    "--enable-libvpx",  # VP8/VP9
+    "--enable-libwebp",  # WebP stills/animation
+    "--enable-libfreetype",  # drawtext
+    "--enable-libfribidi",  # bidi text
+    "--enable-mbedtls",  # TLS for https/HLS streams
 ]
 
 ABIS = ("arm64-v8a", "armeabi-v7a", "x86_64")
@@ -72,11 +76,9 @@ REQUIRED_CONFIGURE_TOKENS = (
     "libopus",
     "libdav1d",
     "libwebp",
-    "libxml2",
-    "libbluray",
+    "libfreetype",
+    "libfribidi",
     "mbedtls",
-    "libvorbis",
-    "libsvtav1",
 )
 
 WHEEL_BUILD_TAG = "1"
@@ -91,8 +93,6 @@ PAYLOAD_COMPONENTS = {
     "libdav1d": ("BSD-2-Clause", "https://code.videolan.org/videolan/dav1d"),
     "libmp3lame": ("LGPL-2.0-or-later", "https://lame.sourceforge.net"),
     "libopus": ("BSD-3-Clause", "https://opus-codec.org"),
-    "libspeex": ("BSD-3-Clause", "https://speex.org"),
-    "libtwolame": ("LGPL-2.1-or-later", "https://www.twolame.org"),
     "libwebp": ("BSD-3-Clause", "https://developers.google.com/speed/webp"),
     "libfreetype": ("FTL / GPL-2.0-or-later", "https://freetype.org"),
     "libfribidi": ("LGPL-2.1-or-later", "https://github.com/fribidi/fribidi"),
@@ -100,8 +100,6 @@ PAYLOAD_COMPONENTS = {
         "Apache-2.0 / GPL-2.0-or-later",
         "https://www.trustedfirmware.org/projects/mbed-tls",
     ),
-    "libbluray": ("LGPL-2.1-or-later", "https://www.videolan.org/developers/libbluray.html"),
-    "libxml2": ("MIT", "https://gitlab.gnome.org/GNOME/libxml2"),
 }
 
 
