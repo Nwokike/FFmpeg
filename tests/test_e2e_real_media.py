@@ -591,3 +591,43 @@ def test_thumbnail_sheet(media, tmp_path):
     with _open(sheet) as c:
         v = next(s for s in c.streams if s.type == "video")
         assert v.codec_context.width == 288  # 3 columns x 96 px
+
+
+def test_audio_gain_fades_and_layout(media, tmp_path):
+    """Gain/fades shape the waveform ends; arbitrary layouts are honoured."""
+    import array
+    import math
+
+    out = tmp_path / "faded.wav"
+    EngineService.extract_audio(
+        str(media["clip"]),
+        str(out),
+        format_name="wav",
+        sample_rate=44100,
+        channels=1,
+        gain_db=-6.0,
+        fade_in_s=0.5,
+        fade_out_s=0.5,
+    )
+    dur = _duration(out)
+    assert dur > 2.0
+
+    def rms_at(t: float) -> float:
+        with _open(out) as c:
+            s = c.streams.audio[0]
+            c.seek(int(t * 1_000_000), backward=True)
+            for f in c.decode(s):
+                arr = array.array("h")
+                arr.frombytes(bytes(f.planes[0]))
+                return math.sqrt(sum(x * x for x in arr) / max(1, len(arr))) if arr else 0.0
+        return 0.0
+
+    mid = rms_at(dur / 2)
+    assert mid > 0
+    assert rms_at(0.02) < mid * 0.75, "fade-in did not attenuate the start"
+    assert rms_at(dur - 0.1) < mid * 0.75, "fade-out did not attenuate the end"
+
+    six = tmp_path / "six.wav"
+    EngineService.extract_audio(str(media["clip"]), str(six), format_name="wav", layout="5.1")
+    with _open(six) as c:
+        assert c.streams.audio[0].codec_context.layout.name == "5.1"

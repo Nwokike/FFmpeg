@@ -38,6 +38,34 @@ def _measure_loudnorm(input_path: str, target_lufs: float) -> dict[str, str]:
         return {}
 
 
+def _audio_effect_nodes(
+    *,
+    loudnorm_args: str | None,
+    gain_db: float,
+    fade_in_s: float,
+    fade_out_s: float,
+    duration_s: float,
+    extra: list | None,
+) -> list[tuple[str, str | None]]:
+    """The ordered audio effect chain: loudness -> gain -> fades -> caller nodes.
+
+    Pure (no av objects) so the ordering and argument shapes are unit-testable.
+    """
+    nodes: list[tuple[str, str | None]] = []
+    if loudnorm_args:
+        nodes.append(("loudnorm", loudnorm_args))
+    if abs(gain_db) > 1e-6:
+        nodes.append(("volume", f"{gain_db:+.2f}dB"))
+    if fade_in_s > 0:
+        nodes.append(("afade", f"t=in:st=0:d={fade_in_s:.3f}"))
+    if fade_out_s > 0 and duration_s > 0:
+        start = max(0.0, duration_s - fade_out_s)
+        nodes.append(("afade", f"t=out:st={start:.3f}:d={fade_out_s:.3f}"))
+    for name, args in extra or []:
+        nodes.append((str(name), None if args in (None, "") else str(args)))
+    return nodes
+
+
 def extract_audio(
     input_path: str,
     output_path: str,
@@ -46,17 +74,25 @@ def extract_audio(
     target_lufs: float | None = None,
     channels: int | None = None,
     sample_rate: int | None = None,
+    layout: str | None = None,
+    gain_db: float = 0.0,
+    fade_in_s: float = 0.0,
+    fade_out_s: float = 0.0,
     audio_filter: list | None = None,
     encoder_options: dict | None = None,
     container_options: dict | None = None,
     on_progress: Callable[[float, str], None] | None = None,
     cancel_event: Event | None = None,
 ) -> str:
-    """Extract audio with optional LUFS mastering, channel mix, and soxr resampling.
+    """Extract audio with optional LUFS mastering, gain, fades and resampling.
 
-    ``audio_filter`` is a caller-supplied ``(filter, args)`` chain (the
-    Terminal's ``-af``); ``encoder_options``/``container_options`` are the
-    generic option-panel values: encoder keys merge last and pass through
+    ``layout`` names any channel layout the build supports (e.g. "5.1",
+    "quad") and wins over ``channels``; ``gain_db`` is a dB volume change;
+    ``fade_in_s``/``fade_out_s`` shape the ends (the out-fade anchors to the
+    measured duration). ``audio_filter`` is a caller-supplied
+    ``(filter, args)`` chain (the Terminal's ``-af``);
+    ``encoder_options``/``container_options`` are the generic option-panel
+    values: encoder keys merge last and pass through
     :func:`_supported_encoder_options`, container keys reach the muxer.
     """
     # Do not create a partial output while the serial queue is paused.
@@ -96,11 +132,20 @@ def extract_audio(
         target_layout = "stereo" if n_ch == 2 else "mono"
 
     out_rate = int(sample_rate) if sample_rate else None
-    loud_chain = None
-    if loud_args is not None:
+    duration_s = float(info.duration_s or 0.0)
+    effect_nodes = _audio_effect_nodes(
+        loudnorm_args=loud_args,
+        gain_db=float(gain_db or 0.0),
+        fade_in_s=float(fade_in_s or 0.0),
+        fade_out_s=float(fade_out_s or 0.0),
+        duration_s=duration_s,
+        extra=audio_filter,
+    )
+    audio_chain = None
+    if effect_nodes:
 
-        def _loudnorm_build(frame) -> av.filter.Graph:
-            lg = av.filter.Graph()
+        def _effects_build(frame) -> av.filter.Graph:
+            eg = av.filter.Graph()
             ab_kwargs: dict = {
                 "sample_rate": frame.sample_rate,
                 "format": frame.format.name,
@@ -108,19 +153,15 @@ def extract_audio(
             }
             if frame.time_base:
                 ab_kwargs["time_base"] = frame.time_base
-            src = lg.add_abuffer(**ab_kwargs)
-            ln = lg.add("loudnorm", loud_args)
-            sink = lg.add("abuffersink")
-            lg.link_nodes(src, ln, sink)
-            lg.configure()
-            return lg
+            chain_nodes = [eg.add_abuffer(**ab_kwargs)]
+            for name, args in effect_nodes:
+                chain_nodes.append(eg.add(name, args) if args else eg.add(name))
+            sink = eg.add("abuffersink")
+            eg.link_nodes(*chain_nodes, sink)
+            eg.configure()
+            return eg
 
-        loud_chain = FilterChain(build=_loudnorm_build)
-    elif audio_filter:
-        # A caller-supplied chain (the Terminal's -af passthrough): the same
-        # (filter, args-string) nodes the video path uses, so any filter this
-        # build ships works here too.
-        loud_chain = FilterChain(nodes=[(str(n), str(a)) for n, a in audio_filter])
+        audio_chain = FilterChain(build=_effects_build)
 
     job = Job(
         output_path=output_path,
@@ -130,8 +171,8 @@ def extract_audio(
                 kind="audio",
                 codec=chosen_codec,
                 sample_rate=out_rate,
-                channels=channels,
-                layout=target_layout,
+                channels=channels if layout is None else None,
+                layout=layout or target_layout,
                 bit_rate=(bitrate_kbps * 1000) if chosen_codec != "pcm_s16le" else None,
                 pts_policy="encoder",
                 audio_fifo=True,
@@ -142,7 +183,7 @@ def extract_audio(
             )
         ],
         output=OutputSpec(metadata=False, chapters=False, options=dict(container_options or {})),
-        audio_chain=loud_chain,
+        audio_chain=audio_chain,
         progress_label="Extracting Audio",
         complete_label="Audio Extracted",
         cancel_message="Audio extraction cancelled",
