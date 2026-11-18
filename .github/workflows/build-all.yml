@@ -224,7 +224,14 @@ jobs:
           python-version: '3.14'
       - name: Install cross-build host tools (ffmpeg-android-maker)
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends nasm ninja-build meson autoconf automake libtool pkg-config
-      - name: Build full FFmpeg 9.0.2 Android libraries
+      - name: Cache the FFmpeg cross-build (pins-keyed)
+        uses: actions/cache@v4
+        with:
+          path: .wrap-work/ffmpeg-android-maker/build/ffmpeg
+          # Re-tagging the same pin set reuses the 15-minute compile; any
+          # wrap_pins change (codec set, FFmpeg/FAM version) invalidates it.
+          key: ffmpeg-prefix-${{ hashFiles('scripts/wrap_pins.py') }}
+      - name: Build FFmpeg 9.0.2 Android libraries
         run: scripts/build_ffmpeg_android.sh
       - name: Package flet-libffmpeg wheels
         run: python3 scripts/build_flet_libffmpeg_wheel.py --ffmpeg-prefix .wrap-work/ffmpeg-android-maker/build/ffmpeg --out wheels

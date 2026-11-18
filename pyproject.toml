@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
     "av>=19.0.2",
+    "certifi>=2026.10.23",
     "flet>=1.1.2",
     "flet-ads>=1.1.2",
     "flet-audio>=1.1.2",

@@ -59,11 +59,19 @@ fi
 export PATH="$CMAKE_VENV/bin:$PATH"
 echo ">> cmake: $(cmake --version | head -1)"
 
-# ── Build every requested ABI ───────────────────────────────────────────────
+# ── Build every requested ABI (skipped when the pin set is unchanged) ──────
 FAM_ARGS=$(python3 "$ROOT/scripts/wrap_pins.py" --args)
-cd "$FAM_DIR"
-# shellcheck disable=SC2086
-./ffmpeg-android-maker.sh $FAM_ARGS --target-abis="$ABIS"
+PINS_HASH=$(python3 "$ROOT/scripts/wrap_pins.py")
+STAMP="$FAM_DIR/build/ffmpeg/.build-stamp"
+if [ "${WRAP_FORCE_BUILD:-0}" != "1" ] && [ -f "$STAMP" ] && [ "$(cat "$STAMP")" = "$PINS_HASH" ]; then
+    echo ">> cached FFmpeg prefixes for pin set $PINS_HASH — skipping build"
+else
+    cd "$FAM_DIR"
+    # shellcheck disable=SC2086
+    ./ffmpeg-android-maker.sh $FAM_ARGS --target-abis="$ABIS"
+    mkdir -p "$FAM_DIR/build/ffmpeg"
+    echo "$PINS_HASH" > "$STAMP"
+fi
 
 echo ">> ffmpeg prefixes:"
 for abi in ${ABIS//,/ }; do

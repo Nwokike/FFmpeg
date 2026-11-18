@@ -116,7 +116,19 @@ def verify_prefix(prefix: Path, abi: str) -> tuple[dict[str, bytes], str]:
             for n in info["needed"]
             if n not in blobs
             and not n.startswith(("libav", "libsw", "libc.", "libdl.", "libm."))
-            and n not in {"libz.so", "liblog.so", "libandroid.so", "libc++_shared.so"}
+            # Android platform libraries, present on every device at our API
+            # floor — not codecs to fold. libavdevice links mediandk and
+            # camera2ndk through the NDK's autodetected device inputs.
+            and n
+            not in {
+                "libz.so",
+                "liblog.so",
+                "libandroid.so",
+                "libc++_shared.so",
+                "libmediandk.so",
+                "libcamera2ndk.so",
+                "libnativewindow.so",
+            }
         ]
         if unmet:
             fail(

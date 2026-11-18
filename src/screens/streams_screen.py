@@ -344,7 +344,9 @@ def StreamsScreen() -> ft.Control:
     ft.use_effect(
         _mount_stage,
         [stage_url or ""],
-        cleanup=lambda: (_stop_video(),),
+        # _stop_video is async: schedule it, never leave a bare coroutine in
+        # the cleanup lambda (it would never be awaited, leaking the player).
+        cleanup=lambda: _safe_run_task(_stop_video),
     )
 
     def _watch(_=None) -> None:

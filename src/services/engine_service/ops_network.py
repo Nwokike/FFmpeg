@@ -13,6 +13,7 @@ from urllib.parse import urljoin
 import av
 import httpx
 
+from core.net import network_options
 from core.storage_paths import get_temp_dir
 from services.engine_service.builders import _pause_hook, run_copy_job
 from services.engine_service.logs import _INPUT_TIMEOUT, _is_attached_picture, logger
@@ -347,7 +348,10 @@ def _open_network_input(
         from services.engine_service.service import EngineService
 
         return EngineService._open_https_via_httpx(input_url, cancel_event, max_hls_download_mb)
-    return av.open(input_url, "r", timeout=(10.0, 30.0)), None
+    # FFmpeg's TLS backend has no OS trust store: hand it certifi's bundle.
+    return av.open(
+        input_url, "r", timeout=(10.0, 30.0), options=network_options()
+    ), None
 
 
 def record(
