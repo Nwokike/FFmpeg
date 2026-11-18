@@ -32,12 +32,12 @@ ${CMAKE_EXECUTABLE} .. \
     -DBUILD_APPS=OFF \
     -DBUILD_TESTING=OFF || exit 1
 
-# Make the resolved binutils visible in the build log for the next failure.
-${CMAKE_EXECUTABLE} -LA -N . | grep -E '^CMAKE_(AR|RANLIB|C_COMPILER_AR|C_COMPILER_RANLIB):' || true
-echo ">> svtav1 tools: cmake=$(command -v cmake) ar=${FAM_AR} ranlib=${FAM_RANLIB}"
-ls -ld ../Bin/Release
+# CMake's static-library rule invokes the archiver by BARE name ("llvm-ar
+# qc ..."), but the NDK toolchain bin is not on PATH — hence "Error running
+# link command: no such file or directory". FAM_AR is an absolute path there;
+# put its directory on PATH so both llvm-ar and llvm-ranlib resolve.
+export PATH="$(dirname "${FAM_AR}"):${PATH}"
+echo ">> svtav1 ar: $(command -v llvm-ar)"
 
-# VERBOSE=1 so a link failure prints the actual ar command, not just "Error
-# running link command: no such file or directory".
-${MAKE_EXECUTABLE} VERBOSE=1 -j${HOST_NPROC} || exit 1
+${MAKE_EXECUTABLE} -j${HOST_NPROC} || exit 1
 ${MAKE_EXECUTABLE} install
