@@ -816,6 +816,13 @@ def run_copy_job(
                             None,
                         )
                         if pos is not None:
+                            if packet.dts is None and packet.pts is not None:
+                                # A later input's first packet can arrive with
+                                # pts only. Untouched, the muxer reads dts as 0
+                                # and rejects the join ("non monotonically
+                                # increasing dts: N >= 0"); anchor dts to pts
+                                # BEFORE the shift so both move together.
+                                packet.dts = packet.pts
                             native_pts = packet.pts if packet.pts is not None else 0
                             native_dts = packet.dts if packet.dts is not None else native_pts
                             if pos not in _timeline_state["seen_pos"]:
@@ -834,10 +841,21 @@ def run_copy_job(
                             if packet.dts is not None:
                                 packet.dts = packet.dts + delta
                             previous_dts = last_dts.get(pos)
-                            if previous_dts is not None and packet.dts <= previous_dts:
+                            # Some packets (flush artifacts, side-data) carry no
+                            # dts/pts at all — comparing None crashed the join
+                            # on the first real-media concat.
+                            if (
+                                packet.dts is not None
+                                and previous_dts is not None
+                                and packet.dts <= previous_dts
+                            ):
                                 packet.dts = previous_dts + 1
                             previous_pts = last_pts.get(pos)
-                            if previous_pts is not None and packet.pts <= previous_pts:
+                            if (
+                                packet.pts is not None
+                                and previous_pts is not None
+                                and packet.pts <= previous_pts
+                            ):
                                 packet.pts = previous_pts + 1
                             if (
                                 packet.dts is not None

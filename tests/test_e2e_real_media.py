@@ -13,6 +13,7 @@ Skipped automatically when the local media roots are absent (CI).
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import av
@@ -20,7 +21,12 @@ import pytest
 
 from core.state import Job
 from services.command_parser import CommandError, parse_command
-from services.engine_service import EngineService, check_params, friendly_job_error
+from services.engine_service import (
+    EngineCapabilityError,
+    EngineService,
+    check_params,
+    friendly_job_error,
+)
 from services.job_queue import JobQueue
 
 pytestmark = pytest.mark.live
@@ -28,6 +34,11 @@ pytestmark = pytest.mark.live
 VIDEOS = Path.home() / "Videos"
 PICTURES = Path.home() / "Pictures" / "Camera Roll"
 DESKTOP = Path.home() / "Desktop"
+# Downloaded real-media corpus (scripts/fetch_testmedia.py) — lets this pass
+# run on any machine, not only one with a personal video library.
+MEDIA = Path(
+    os.environ.get("FFMPEG_TEST_MEDIA", Path(__file__).resolve().parents[1] / "testdata" / "media")
+)
 
 HLS_MASTER_URL = "https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8"
 
@@ -58,13 +69,23 @@ def _require(root: Path, name: str) -> None:
 
 @pytest.fixture(scope="module")
 def media(tmp_path_factory):
-    """Real inputs + a 6s working clip (itself produced by a stream-copy cut)."""
-    _require(VIDEOS, "~/Videos")
-    mp4 = _smallest(VIDEOS, "*.mp4")
-    assert mp4 is not None, "no .mp4 in ~/Videos"
-    hevc = _first(VIDEOS, "*HEVC*.mkv")
-    subbed = _first(VIDEOS, "*Sub*.mp4", "*sub*.mkv")
-    jpg = _first(PICTURES, "*.jpg", "*.JPG") if PICTURES.is_dir() else None
+    """Real inputs + a 6s working clip (itself produced by a stream-copy cut).
+
+    Sources, in order: the owner's ~/Videos + ~/Pictures, else the downloaded
+    real-media corpus (testdata/media, fetched by scripts/fetch_testmedia.py).
+    """
+    if VIDEOS.is_dir() and any(VIDEOS.iterdir()):
+        mp4 = _smallest(VIDEOS, "*.mp4")
+        assert mp4 is not None, "no .mp4 in ~/Videos"
+        hevc = _first(VIDEOS, "*HEVC*.mkv")
+        subbed = _first(VIDEOS, "*Sub*.mp4", "*sub*.mkv")
+        jpg = _first(PICTURES, "*.jpg", "*.JPG") if PICTURES.is_dir() else None
+    else:
+        _require(MEDIA, "testdata/media (run scripts/fetch_testmedia.py)")
+        mp4 = MEDIA / "bbb_h264_aac.mp4"
+        hevc = MEDIA / "jellyfish_hevc_aac.mp4"
+        subbed = None  # no subtitle-bearing sample in the download set
+        jpg = MEDIA / "photo_640x480.jpg" if (MEDIA / "photo_640x480.jpg").exists() else None
     work = tmp_path_factory.mktemp("e2e")
     clip = work / "clip6s.mp4"
     EngineService.cut_trim(str(mp4), str(clip), 5.0, 11.0, stream_copy=True)
@@ -177,7 +198,13 @@ def test_convert_hevc_decode_transcodes(media, tmp_path):
         pytest.skip("no HEVC mkv in ~/Videos")
     src = media["hevc"]
     clip = tmp_path / "hevc6s.mkv"
-    EngineService.cut_trim(src, str(clip), 30.0, 36.0, stream_copy=True)
+    # Windows are chosen inside the ACTUAL duration (the corpus samples are
+    # 10s; a hardcoded 30-36s window cut nothing and passed vacuously).
+    src_dur = _duration(src) or 10.0
+    start = min(2.0, max(0.0, src_dur - 2.0))
+    EngineService.cut_trim(
+        src, str(clip), start, start + min(6.0, src_dur - start), stream_copy=True
+    )
     assert _has_stream(clip, "video")
     out = tmp_path / "hevc_conv.mp4"
     EngineService.convert(
@@ -203,11 +230,16 @@ def test_convert_audio_branch(media, tmp_path):
     an audio FILE (no video stream) — convert must not invent a video track."""
     src = tmp_path / "src_audio.m4a"
     EngineService.extract_audio(str(media["clip"]), str(src), format_name="m4a")
-    out = tmp_path / "conv.ogg"
-    EngineService.convert(str(src), str(out), audio_codec="libvorbis")
+    out = tmp_path / "conv.opus"
+    # libopus is verified on every wheel this app ships (desktop and the lean
+    # Android build); vorbis encode is not in either, so requesting it must be
+    # refused by the capability gate rather than attempted.
+    EngineService.convert(str(src), str(out), audio_codec="libopus")
     assert out.exists() and out.stat().st_size > 0
     assert _has_stream(out, "audio")
     assert not _has_stream(out, "video"), "audio convert invented a video stream"
+    with pytest.raises(EngineCapabilityError):
+        EngineService.convert(str(src), str(tmp_path / "nope.ogg"), audio_codec="libvorbis")
 
 
 def test_convert_opus_from_44k_source(media, tmp_path):
@@ -324,8 +356,11 @@ def test_remux_copy_drop_and_rotate(media, tmp_path):
 def test_concat_cut_and_crossfade(media, tmp_path):
     a = media["clip"]
     b = tmp_path / "clip_b.mp4"
-    EngineService.cut_trim(str(media["mp4"]), str(b), 20.0, 26.0, stream_copy=True)
+    # Second window comes from the START of the source (the corpus samples are
+    # 10s; a hardcoded 20-26s window produced an empty clip and a None dur).
+    EngineService.cut_trim(str(media["mp4"]), str(b), 0.0, 4.0, stream_copy=True)
     b_dur = _duration(b)
+    assert b_dur, "second clip has no duration"
     expected = media["clip_dur"] + b_dur
 
     joined = tmp_path / "joined.mp4"
@@ -415,8 +450,10 @@ def test_command_mode_plans_execute(media, tmp_path):
 
 def test_command_mode_refusals_still_loud(media, tmp_path):
     src = str(media["mp4"])
+    # -an is a REAL convert (video only, audio stripped), not a refusal.
+    plan = parse_command(f'ffmpeg -i "{src}" -an out.mp4', duration_s=_duration(src))
+    assert plan.op == "convert" and not plan.params.get("audio_codec")
     for cmd in (
-        f'ffmpeg -i "{src}" -an out.mp4',
         f'ffmpeg -i "{src}" -i "{src}" -vn out.mp4',
         f'ffmpeg -i "{src}" -ss 5 -to 3 out.gif',
         f'ffmpeg -i "{src}" -ss 5 -t 5 out.mp3',

@@ -118,6 +118,7 @@ def _build_video_filter_graph(
     denoise: str | None = None,
     sharpen: int | None = None,
     watermark: dict | None = None,
+    fps: int | None = None,
 ) -> av.filter.Graph | None:
     """buffer → crop?/eq?/denoise?/sharpen? → [overlay] → transpose?/setpts? → sink.
 
@@ -168,6 +169,13 @@ def _build_video_filter_graph(
 
     rot = rotation % 360
     tail: list = []
+    if fps and "fps" in avail:
+        # Real CFR conversion. Without this node the encoder is merely TOLD a
+        # new rate and every frame is relabelled: a 30fps source "converted"
+        # to 24fps came out 300/24 = 12.5s instead of 10s (measured on the
+        # real-media pass). fps runs before transpose/setpts so the timing
+        # change happens on the source timeline.
+        tail.append(("fps", str(int(fps))))
     if rot == 90:
         tail.append(("transpose", "clock"))
     elif rot == 180:

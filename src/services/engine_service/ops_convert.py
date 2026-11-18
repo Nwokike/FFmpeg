@@ -85,6 +85,7 @@ def convert(
     need_vfilter = (
         rotation % 360 != 0
         or abs(speed - 1.0) > 1e-6
+        or bool(fps)
         or bool(crop_aspect and crop_aspect != "original")
         or bool(eq)
         or bool(denoise and denoise != "off")
@@ -112,6 +113,7 @@ def convert(
                     denoise=denoise,
                     sharpen=sharpen,
                     watermark=watermark,
+                    fps=fps,
                 )
             )
             if need_vfilter

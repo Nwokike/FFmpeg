@@ -190,11 +190,25 @@ def estimate_hls_segments(client, url: str) -> tuple[list[str], int | None]:
     return segments, total
 
 
+def _hls_segment_durations(text: str) -> list[float]:
+    """#EXTINF durations in playlist order (0.0 where a segment omits it)."""
+    durs: list[float] = []
+    for line in text.splitlines():
+        if line.startswith("#EXTINF:"):
+            try:
+                durs.append(float(line[len("#EXTINF:") :].split(",", 1)[0]))
+            except ValueError:
+                durs.append(0.0)
+    return durs
+
+
 def _download_hls_segments(
     client,
     url: str,
     on_cancel,
     max_hls_download_mb: float | None = None,
+    deadline: float | None = None,
+    max_duration_s: float | None = None,
 ) -> list[tuple[str, bytes]]:
     """Resolve master→media playlist and download every segment.
 
@@ -221,13 +235,22 @@ def _download_hls_segments(
             raise ValueError(f"This stream is encrypted and can't be recorded offline: {key_error}")
     if not segments:
         raise ValueError("HLS playlist contained no media segments")
+    durations = _hls_segment_durations(playlist)
     out: list[tuple[str, bytes]] = []
     running = 0
-    for seg in segments:
+    content_s = 0.0
+    for idx, seg in enumerate(segments):
         on_cancel()
+        if deadline is not None and time.monotonic() >= deadline:
+            logger.info("HLS download deadline reached — %d segment(s) captured", len(out))
+            break
+        if max_duration_s is not None and content_s >= max_duration_s:
+            logger.info("HLS capture reached %.1fs — stopping", content_s)
+            break
         data = _hls_download_segment(client, seg, 256 * 1024, on_cancel)
         running += len(data)
         _check_hls_cap(running, cap, seg)
+        content_s += durations[idx] if idx < len(durations) else 0.0
         out.append((seg, data))
     total = sum(len(b) for _, b in out)
     if total < 32 * 1024:
@@ -242,21 +265,24 @@ def _open_https_via_httpx(
     url: str,
     cancel_event: Event | None = None,
     max_hls_download_mb: float | None = None,
+    duration_s: float | None = None,
 ):
     """Download an HTTPS (optionally HLS) stream into a local temp file.
 
-    The fallback for a wheel built WITHOUT a TLS protocol handler (the stock
-    flet-libffmpeg is bare LGPL): ``av.open`` cannot open HTTPS there, so the
-    bytes are fetched with ``httpx`` on the app's own network stack. When the
-    wheel's TLS probe says https works, :meth:`_open_network_input` never
-    calls this — the native path is always preferred.
+    The fallback for a wheel WITHOUT a TLS protocol handler (the stock
+    flet-libffmpeg is bare LGPL) and for a native TLS failure (HLS does not
+    propagate ``ca_file`` into its nested opens): ``av.open`` cannot read
+    those URLs, so the bytes are fetched with ``httpx`` on the app's own
+    network stack. When the wheel's TLS probe says https works,
+    :meth:`_open_network_input` only gets here on a certificate failure.
     HLS playlists are expanded segment-by-segment so the resulting file is a
     plain container PyAV can demux.
 
     Plain files stream in ONE GET (the old code sniffed 512B, discarded the
     response, and GET again from byte 0). HLS totals are capped at
     ``max_hls_download_mb`` (None = the caller overrode the cap for this
-    download).
+    download). ``duration_s`` bounds the download by wall time, so recording
+    a LIVE stream for N seconds does not pull until the cap.
 
     Returns ``(container, cleanup_path)`` — PyAV containers are Cython
     objects without a ``__dict__``, so the caller cannot be handed the
@@ -269,6 +295,7 @@ def _open_https_via_httpx(
     total_written = 0
     chunk_size = 256 * 1024
     cap = _hls_cap_bytes(max_hls_download_mb)
+    deadline = time.monotonic() + duration_s if duration_s else None
 
     def _raise_if_cancelled() -> None:
         if cancel_event and cancel_event.is_set():
@@ -297,6 +324,8 @@ def _open_https_via_httpx(
                             total_written += len(head)
                         for chunk in first.iter_bytes(chunk_size=chunk_size):
                             _raise_if_cancelled()
+                            if deadline is not None and time.monotonic() >= deadline:
+                                break
                             if chunk:
                                 total_written += len(chunk)
                                 _check_hls_cap(total_written, cap, url)
@@ -305,7 +334,12 @@ def _open_https_via_httpx(
             if is_hls:
                 with temp_path.open("wb") as fh:
                     segments = _download_hls_segments(
-                        client, url, _raise_if_cancelled, max_hls_download_mb
+                        client,
+                        url,
+                        _raise_if_cancelled,
+                        max_hls_download_mb,
+                        deadline,
+                        max_duration_s=duration_s,
                     )
                     for _seg, seg_bytes in segments:
                         _raise_if_cancelled()
@@ -329,27 +363,68 @@ def _open_https_via_httpx(
         raise
 
 
+def _is_tls_failure(exc: BaseException) -> bool:
+    """True when the error text names a TLS/certificate problem.
+
+    FFmpeg returns a bare EIO; the certificate reason lives in the log line
+    appended to the exception (``last error log: [tls] Peer certificate
+    failed verification``).
+    """
+    text = str(exc).lower()
+    return "certificate" in text or "tls" in text
+
+
 def _open_network_input(
     input_url: str,
     cancel_event: Event | None = None,
     max_hls_download_mb: float | None = None,
+    duration_s: float | None = None,
 ):
     """Return ``(container, cleanup_path)`` for a URL.
 
     Every protocol this wheel handles natively goes straight to ``av.open``
     (no cleanup path) — including HTTPS when the wheel's TLS probe says the
-    handler is compiled in. Only a wheel WITHOUT TLS falls back to
-    :meth:`_open_https_via_httpx` (the app's own network stack), and that
-    download's temp file must be removed after the mux closes.
-    ``max_hls_download_mb=None`` overrides the cap for this download.
+    handler is compiled in, with certifi's CA bundle passed as ``ca_file``.
+    Two cases fall back to :meth:`_open_https_via_httpx` (the app's own
+    network stack): a wheel WITHOUT a TLS handler, and a TLS failure — HLS
+    nests avio opens (master → variant → segments) and FFmpeg does not
+    propagate the CA option into those children, so a variant can fail
+    verification after the master opened. The fallback's temp file must be
+    removed after the mux closes; ``duration_s`` bounds its download so a
+    live stream is captured for the requested time, not until the cap.
     """
     if input_url.lower().startswith("https://") and not _tls_available():
         # Deferred through the class: tests patch EngineService._open_https_via_httpx.
         from services.engine_service.service import EngineService
 
-        return EngineService._open_https_via_httpx(input_url, cancel_event, max_hls_download_mb)
+        return EngineService._open_https_via_httpx(
+            input_url, cancel_event, max_hls_download_mb, duration_s=duration_s
+        )
+
+    def _via_httpx(reason: str):
+        from services.engine_service.service import EngineService
+
+        logger.info("%s — fetching through httpx", reason)
+        return EngineService._open_https_via_httpx(
+            input_url, cancel_event, max_hls_download_mb, duration_s=duration_s
+        )
+
     # FFmpeg's TLS backend has no OS trust store: hand it certifi's bundle.
-    return av.open(input_url, "r", timeout=(10.0, 30.0), options=network_options()), None
+    try:
+        container = av.open(input_url, "r", timeout=(10.0, 30.0), options=network_options())
+    except av.error.FFmpegError as exc:
+        if not (input_url.lower().startswith("https://") and _is_tls_failure(exc)):
+            raise
+        return _via_httpx(f"Native TLS failed ({exc})")
+    # An HLS master opens even when every variant fails its nested TLS check
+    # (FFmpeg copies only the parent's URL options into child opens), leaving
+    # a container with no streams — fall back instead of failing downstream.
+    if input_url.lower().startswith("https://") and not any(
+        s.type in ("video", "audio", "subtitle", "data") for s in container.streams
+    ):
+        container.close()
+        return _via_httpx("Native URL produced no streams")
+    return container, None
 
 
 def record(
@@ -381,7 +456,9 @@ def record(
         raise ValueError("That doesn't look like a stream URL (need scheme://…)")
     cleanup_path: str | None = None
     try:
-        inp, cleanup_path = _open_network_input(input_url, cancel_event, max_hls_download_mb)
+        inp, cleanup_path = _open_network_input(
+            input_url, cancel_event, max_hls_download_mb, duration_s=duration_s
+        )
     except av.error.ProtocolNotFoundError as exc:
         raise ValueError(f"This build can't open that protocol: {exc}") from exc
     except av.error.TimeoutError as exc:

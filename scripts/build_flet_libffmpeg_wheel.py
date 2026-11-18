@@ -139,8 +139,11 @@ def verify_prefix(prefix: Path, abi: str) -> tuple[dict[str, bytes], str]:
     configure = _find_configure_string(blobs)
     if not configure:
         fail(f"{abi}: embedded FFmpeg configure string not found")
-    if f"ffmpeg-{FFMPEG_VERSION}" not in configure and f"/{FFMPEG_VERSION}/" not in configure:
-        fail(f"{abi}: configure string is not FFmpeg {FFMPEG_VERSION}: {configure[:120]}")
+    # FAM builds from a tarball, so the recorded configure line carries no
+    # version — FFmpeg compiles its version into libavutil (av_version_info),
+    # which is what `av.ffmpeg_version_info` reports at runtime.
+    if not any(FFMPEG_VERSION.encode() in blob for blob in blobs.values()):
+        fail(f"{abi}: binaries do not carry FFmpeg {FFMPEG_VERSION}")
     if "--enable-gpl" not in configure:
         fail(f"{abi}: configure string lacks --enable-gpl")
     missing = [t for t in REQUIRED_TOKENS if f"--enable-{t}" not in configure]
