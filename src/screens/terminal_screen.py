@@ -226,6 +226,8 @@ def TerminalScreen() -> ft.Control:
                         hint_text="ffmpeg -i in.mp4 -c:v libx264 -crf 23 out.mp4",
                         dense=True,
                         expand=True,
+                        text_size=FONT_SM,
+                        text_style=ft.TextStyle(font_family="monospace"),
                     ),
                     ft.FilledButton("Run", icon=ft.Icons.PLAY_ARROW_ROUNDED, on_click=_submit),
                 ],
