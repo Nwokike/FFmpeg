@@ -188,6 +188,14 @@ jobs:
             echo "IS_PRERELEASE=true" >> $GITHUB_OUTPUT
             echo "MAKE_LATEST=false" >> $GITHUB_OUTPUT
           fi
+      - name: Clear any release left by an earlier build of this tag
+        if: github.event_name != 'pull_request'
+        # Re-tagging a version (the documented release flow) leaves the
+        # previous run's release behind; action-gh-release then fails with
+        # already_exists. Clear it first — the placeholder is recreated below.
+        run: gh release delete "${{ steps.tag_info.outputs.TAG_NAME }}" --yes || true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - name: Create GitHub Release Placeholder
         if: github.event_name != 'pull_request'
         uses: softprops/action-gh-release@v2
