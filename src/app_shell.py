@@ -96,7 +96,9 @@ def _shell_body(
     tool screens, ensuring the body container remains an Expanded child of
     View's column so Flutter scroll views receive valid flex constraints.
     """
-    is_dark = is_dark_mode(ft.context.page, app_state)
+    # Safe under a page-less test context: is_dark_mode falls back through
+    # ft.context.page itself and never crashes on a missing page.
+    is_dark = is_dark_mode(None, app_state)
     # SafeArea has no bottom/left/right fields — those names silently bind to
     # LayoutControl's absolute-position offsets (Optional[Number]), so passing
     # False there ships bools into Dart double? fields ("type 'bool' is not a
@@ -340,7 +342,7 @@ def AppShell() -> ft.Control:
                     _select_tab,
                     sidebar_collapsed,
                     _toggle_sidebar,
-                    is_dark=is_dark_mode(ft.context.page, app_state),
+                    is_dark=is_dark_mode(None, app_state),
                 )
             width = app_state.window_width or 1100
             content_w = min(CONTENT_MAX_W, max(600, width - SIDEBAR_EXPANDED_WIDTH - 120))

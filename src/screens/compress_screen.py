@@ -7,6 +7,7 @@ from pathlib import Path
 import flet as ft
 
 from components.encoder_options import ContainerOptionRows, EncoderOptionPanel, OptionValues
+from components.studio import chip_group, media_summary_card, screen_header
 from components.tool_job_status import tool_job_row
 from core.constants import COMPRESS_PRESETS
 from core.engine_probe import codec_label
@@ -14,8 +15,22 @@ from core.notify import ERROR, show_snack
 from core.state import Job, use_app_state
 from core.storage_paths import format_bytes, get_temp_dir, unique_temp_name
 from core.styles import card_container, section_header
-from core.theme import ACCENT_BLUE, TEXT_MUTED_DARK, TEXT_MUTED_LIGHT, is_dark_mode
-from core.tokens import FONT_LG, FONT_MD, FONT_SM, FONT_XS, RADIUS_LG, SPACE_MD, SPACE_SM
+from core.theme import (
+    ACCENT_BLUE,
+    SUCCESS_GREEN,
+    TEXT_MUTED_DARK,
+    TEXT_MUTED_LIGHT,
+    is_dark_mode,
+)
+from core.tokens import (
+    FONT_LG,
+    FONT_SM,
+    FONT_XS,
+    RADIUS_LG,
+    SPACE_LG,
+    SPACE_MD,
+    SPACE_SM,
+)
 from state.controller_ctx import use_controller
 
 
@@ -142,56 +157,23 @@ def CompressScreen() -> ft.Control:
         )
         ctrl.start_job(job)
 
+    target_bytes = target_mb * 1024 * 1024
+    savings_pct = max(0.0, (1 - target_bytes / orig_bytes) * 100.0) if orig_bytes else 0.0
+
     return ft.ListView(
         controls=[
-            # Header
-            ft.Row(
-                controls=[
-                    ft.IconButton(
-                        icon=ft.Icons.ARROW_BACK_ROUNDED,
-                        on_click=lambda _: ctrl.navigate("dashboard"),
-                        tooltip="Back to Dashboard",
-                    ),
-                    ft.Text("Video Compressor", size=FONT_LG, weight=ft.FontWeight.BOLD),
-                ],
-                spacing=SPACE_SM,
-            ),
-            # Input file overview
-            card_container(
-                content=ft.Row(
-                    controls=[
-                        ft.Icon(ft.Icons.COMPRESS_ROUNDED, size=32, color=ACCENT_BLUE),
-                        ft.Column(
-                            controls=[
-                                ft.Text(
-                                    file_name,
-                                    size=FONT_MD,
-                                    weight=ft.FontWeight.BOLD,
-                                    max_lines=1,
-                                    overflow=ft.TextOverflow.ELLIPSIS,
-                                ),
-                                ft.Text(
-                                    (
-                                        f"Current Size: {orig_size_str} • {duration_s:.1f}s"
-                                        if info
-                                        else f"Current Size: {orig_size_str}"
-                                    ),
-                                    size=FONT_SM,
-                                    color=muted,
-                                ),
-                            ],
-                            spacing=2,
-                            expand=True,
-                        ),
-                        ft.OutlinedButton(
-                            "Change", on_click=lambda _: ctrl.pick_media_for("compress")
-                        ),
-                    ],
-                    alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
-                ),
-                padding=SPACE_MD,
-                border_radius=RADIUS_LG,
+            screen_header(
+                "Compress",
+                subtitle=file_name,
+                on_back=lambda: ctrl.navigate("dashboard"),
                 is_dark=is_dark,
+            ),
+            media_summary_card(
+                media_path,
+                info,
+                is_dark=is_dark,
+                on_change=lambda: ctrl.pick_media_for("compress"),
+                extra_chips=[f"target {target_mb:.1f} MB"],
             ),
             # Live pipeline status (derived, never stuck)
             *([tool_job_row(running_job, ctrl, is_dark=is_dark)] if running_job else []),
@@ -238,20 +220,16 @@ def CompressScreen() -> ft.Control:
             ),
             # Target Presets
             section_header("Destination Presets", "Quick target size limits", is_dark=is_dark),
-            ft.Row(
-                controls=[
-                    ft.Chip(
-                        label=ft.Text(label),
-                        selected=abs(target_mb - val) < 0.1,
-                        on_click=lambda _, v=val: set_target_mb(v),
-                    )
-                    for _, label, val in presets
-                ],
-                wrap=True,
-                spacing=SPACE_SM,
+            chip_group(
+                [(label, val) for _, label, val in presets],
+                value=next(
+                    (val for _i, _l, val in presets if abs(target_mb - val) < 0.1),
+                    None,
+                ),
+                on_change=set_target_mb,
             ),
-            # Target Size Slider (0.1 MB steps — the old 78 divisions made the
-            # round(…,1) a lie at exactly 1.0 MB granularity).
+            # Target Size Slider — continuous; the value rounds to 0.1 MB so
+            # the old 780-division grid is unnecessary and coarse by feel.
             section_header(
                 "Custom Target Size",
                 f"Maximum file size: {target_mb:.1f} MB (≈ {est_video_kbps} kbps video + audio)",
@@ -261,26 +239,49 @@ def CompressScreen() -> ft.Control:
                 value=float(target_mb),
                 min=2.0,
                 max=80.0,
-                divisions=780,
+                label="{value} MB",
                 on_change=lambda e: set_target_mb(round(float(e.control.value), 1)),
             ),
-            # Efficiency readout card
+            # Before/after summary card
             card_container(
                 content=ft.Column(
                     controls=[
                         ft.Row(
                             controls=[
-                                ft.Icon(ft.Icons.INFO_OUTLINE_ROUNDED, size=18, color=ACCENT_BLUE),
+                                ft.Column(
+                                    controls=[
+                                        ft.Text("NOW", size=FONT_XS, color=muted),
+                                        ft.Text(
+                                            orig_size_str, size=FONT_LG, weight=ft.FontWeight.BOLD
+                                        ),
+                                    ],
+                                    spacing=0,
+                                ),
+                                ft.Icon(ft.Icons.ARROW_FORWARD_ROUNDED, size=18, color=ACCENT_BLUE),
+                                ft.Column(
+                                    controls=[
+                                        ft.Text("AFTER", size=FONT_XS, color=muted),
+                                        ft.Text(
+                                            f"≤ {target_mb:.1f} MB",
+                                            size=FONT_LG,
+                                            weight=ft.FontWeight.BOLD,
+                                        ),
+                                    ],
+                                    spacing=0,
+                                ),
+                                ft.Container(expand=True),
                                 ft.Text(
-                                    "Estimated Reduction", size=FONT_SM, weight=ft.FontWeight.W_600
+                                    f"-{savings_pct:.0f}%" if savings_pct > 0 else "already small",
+                                    size=FONT_LG,
+                                    weight=ft.FontWeight.BOLD,
+                                    color=SUCCESS_GREEN,
                                 ),
                             ],
-                            spacing=SPACE_SM,
+                            alignment=ft.MainAxisAlignment.CENTER,
+                            spacing=SPACE_LG,
                         ),
                         ft.Text(
-                            f"Original: {orig_size_str} → Target: ≤ {target_mb:.1f} MB "
-                            "(decimal MB vs platform quotas).\n"
-                            f"Below ~1 Mbps the engine downscales to 720p, below "
+                            "Below ~1 Mbps the engine downscales to 720p, below "
                             f"~400 kbps to 480p; {chosen_label}/AAC, preset fast, "
                             "~8% container headroom.",
                             size=FONT_XS,
