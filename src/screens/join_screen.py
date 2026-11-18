@@ -15,6 +15,7 @@ from pathlib import Path
 import flet as ft
 
 from components.banner_ad import BannerAdView
+from components.studio import chip_group, screen_header
 from components.tool_job_status import tool_job_row
 from core.engine_probe import codec_label
 from core.notify import ERROR, show_snack
@@ -22,7 +23,7 @@ from core.state import Job, use_app_state
 from core.storage_paths import format_bytes, get_temp_dir, unique_temp_name
 from core.styles import card_container, section_header
 from core.theme import TEXT_MUTED_DARK, TEXT_MUTED_LIGHT, is_dark_mode
-from core.tokens import FONT_LG, FONT_SM, FONT_XS, RADIUS_LG, SPACE_MD, SPACE_SM
+from core.tokens import FONT_SM, FONT_XS, RADIUS_LG, SPACE_MD, SPACE_SM
 from services.engine_service import EngineService, available_filters, check_pair
 from state.controller_ctx import use_controller
 from state.service_ctx import use_services
@@ -282,16 +283,11 @@ def JoinScreen() -> ft.Control:
 
     return ft.ListView(
         controls=[
-            ft.Row(
-                controls=[
-                    ft.IconButton(
-                        icon=ft.Icons.ARROW_BACK_ROUNDED,
-                        on_click=lambda _: ctrl.navigate("dashboard"),
-                        tooltip="Back to Dashboard",
-                    ),
-                    ft.Text("Join Clips", size=FONT_LG, weight=ft.FontWeight.BOLD),
-                ],
-                spacing=SPACE_SM,
+            screen_header(
+                "Join Clips",
+                subtitle=f"{len(entries)} clips" if entries else "Add two or more clips",
+                on_back=lambda: ctrl.navigate("dashboard"),
+                is_dark=is_dark,
             ),
             section_header(
                 "Files to Join",
@@ -339,28 +335,28 @@ def JoinScreen() -> ft.Control:
             card_container(
                 content=ft.Column(
                     controls=[
-                        ft.Row(
-                            controls=[
-                                ft.Chip(
-                                    label=ft.Text("Lossless (hard cut)"),
-                                    selected=transition == "cut",
-                                    on_select=lambda _: set_transition("cut"),
-                                ),
-                                *[
-                                    ft.Chip(
-                                        label=ft.Text(label),
-                                        disabled=gate_reason is not None,
-                                        selected=transition == "crossfade" and fade_s == value,
-                                        on_select=lambda _, v=value: (
-                                            set_transition("crossfade"),
-                                            set_fade_s(v),
-                                        ),
-                                    )
-                                    for label, value in _FADES
-                                ],
-                            ],
-                            wrap=True,
-                            spacing=SPACE_SM,
+                        chip_group(
+                            [("Lossless (hard cut)", "cut")]
+                            + [(label, ("crossfade", value)) for label, value in _FADES],
+                            value="cut" if transition == "cut" else ("crossfade", fade_s),
+                            on_change=lambda picked: (
+                                set_transition("cut")
+                                if picked == "cut"
+                                else (set_transition("crossfade"), set_fade_s(picked[1]))
+                            ),
+                            disabled_values=(
+                                [("crossfade", value) for _l, value in _FADES]
+                                if gate_reason is not None
+                                else []
+                            ),
+                            tips=(
+                                {
+                                    ("crossfade", value): f"Crossfade unavailable: {gate_reason}"
+                                    for _l, value in _FADES
+                                }
+                                if gate_reason is not None
+                                else None
+                            ),
                         ),
                         ft.Text(
                             f"Crossfade unavailable: {gate_reason}"
@@ -383,17 +379,10 @@ def JoinScreen() -> ft.Control:
                                     size=FONT_XS,
                                     color=muted,
                                 ),
-                                ft.Row(
-                                    controls=[
-                                        ft.Chip(
-                                            label=ft.Text(codec_label(enc)),
-                                            selected=chosen_video == enc,
-                                            on_click=lambda _, e=enc: set_v_codec(e),
-                                        )
-                                        for enc in join_codecs
-                                    ],
-                                    wrap=True,
-                                    spacing=SPACE_SM,
+                                chip_group(
+                                    [(codec_label(enc), enc) for enc in join_codecs],
+                                    value=chosen_video,
+                                    on_change=set_v_codec,
                                 ),
                             ]
                             if join_codecs
@@ -407,16 +396,10 @@ def JoinScreen() -> ft.Control:
                 is_dark=is_dark,
             ),
             section_header("Output", "Target container", is_dark=is_dark),
-            ft.Row(
-                controls=[
-                    ft.Chip(
-                        label=ft.Text(ext.upper() if ext != "mkv" else "MKV"),
-                        selected=container_fmt == ext,
-                        on_select=lambda _, v=ext: set_container_fmt(v),
-                    )
-                    for ext in _CONTAINERS
-                ],
-                spacing=SPACE_SM,
+            chip_group(
+                [(ext.upper() if ext != "mkv" else "MKV", ext) for ext in _CONTAINERS],
+                value=container_fmt,
+                on_change=set_container_fmt,
             ),
             # Banner slot directly above the primary action — the natural
             # pause between reviewing the clip list and starting the join.
