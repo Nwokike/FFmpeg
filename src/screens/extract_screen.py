@@ -7,6 +7,7 @@ from pathlib import Path
 import flet as ft
 
 from components.encoder_options import ContainerOptionRows, EncoderOptionPanel, OptionValues
+from components.studio import chip_group, media_summary_card, screen_header
 from components.tool_job_status import tool_job_row
 from core.constants import (
     DEFAULT_EXTRACT_FORMAT,
@@ -15,9 +16,9 @@ from core.constants import (
 from core.engine_probe import can_encode_format
 from core.state import Job, use_app_state
 from core.storage_paths import format_bytes, get_temp_dir, unique_temp_name
-from core.styles import card_container, section_header
-from core.theme import ACCENT_CYAN, ACCENT_RED, TEXT_MUTED_DARK, TEXT_MUTED_LIGHT, is_dark_mode
-from core.tokens import FONT_LG, FONT_MD, FONT_SM, RADIUS_LG, SPACE_MD, SPACE_SM
+from core.styles import section_header
+from core.theme import ACCENT_RED, TEXT_MUTED_DARK, TEXT_MUTED_LIGHT, is_dark_mode
+from core.tokens import FONT_SM, SPACE_MD, SPACE_SM
 from state.controller_ctx import use_controller
 
 # Mode names in display order — the derived-clamp fallback walks this.
@@ -59,11 +60,6 @@ def ExtractScreen() -> ft.Control:
     media_path = app_state.current_media_path
     info = app_state.current_media_info
     file_name = Path(media_path).name if media_path else "No file selected"
-    file_size_str = (
-        format_bytes(Path(media_path).stat().st_size)
-        if media_path and Path(media_path).exists()
-        else "0 B"
-    )
     has_audio = info.audio_stream is not None if info is not None else True
     duration_s = max(0.5, info.duration_s if info and info.duration_s else 10.0)
 
@@ -74,6 +70,10 @@ def ExtractScreen() -> ft.Control:
     gif_fps, set_gif_fps = ft.use_state(15)
     gif_width, set_gif_width = ft.use_state(480)
     gif_duration, set_gif_duration = ft.use_state(min(5.0, duration_s))
+    gif_start, set_gif_start = ft.use_state(0.0)
+    gif_colors, set_gif_colors = ft.use_state(0)  # 0 = encoder default palette
+    gif_dither, set_gif_dither = ft.use_state("")
+    gif_loop, set_gif_loop = ft.use_state(0)  # 0 = loop forever
     sub_fmt, set_sub_fmt = ft.use_state(DEFAULT_SUBTITLE_FORMAT)
     sub_sel, set_sub_sel = ft.use_state(0)  # index into sub_streams
     muxer_rows, set_muxer_rows = ft.use_state([])
@@ -182,8 +182,11 @@ def ExtractScreen() -> ft.Control:
                 params={
                     "fps": int(gif_fps),
                     "width": int(gif_width),
-                    "start_s": 0.0,
+                    "start_s": float(gif_start),
                     "duration_s": float(gif_duration),
+                    **({"colors": int(gif_colors)} if gif_colors else {}),
+                    **({"dither": gif_dither} if gif_dither else {}),
+                    "loop_count": int(gif_loop),
                 },
                 original_size_bytes=Path(media_path).stat().st_size
                 if Path(media_path).exists()
@@ -262,89 +265,50 @@ def ExtractScreen() -> ft.Control:
 
     return ft.ListView(
         controls=[
-            # Header
-            ft.Row(
-                controls=[
-                    ft.IconButton(
-                        icon=ft.Icons.ARROW_BACK_ROUNDED,
-                        on_click=lambda _: ctrl.navigate("dashboard"),
-                        tooltip="Back to Dashboard",
-                    ),
-                    ft.Text("Extract Media Tracks", size=FONT_LG, weight=ft.FontWeight.BOLD),
-                ],
-                spacing=SPACE_SM,
-            ),
-            # Input file overview
-            card_container(
-                content=ft.Row(
-                    controls=[
-                        ft.Icon(ft.Icons.FILE_DOWNLOAD_OUTLINED, size=32, color=ACCENT_CYAN),
-                        ft.Column(
-                            controls=[
-                                ft.Text(
-                                    file_name,
-                                    size=FONT_MD,
-                                    weight=ft.FontWeight.BOLD,
-                                    max_lines=1,
-                                    overflow=ft.TextOverflow.ELLIPSIS,
-                                ),
-                                ft.Text(
-                                    f"Size: {file_size_str} • {duration_s:.1f}s",
-                                    size=FONT_SM,
-                                    color=muted,
-                                ),
-                            ],
-                            spacing=2,
-                            expand=True,
-                        ),
-                        ft.OutlinedButton(
-                            "Change", on_click=lambda _: ctrl.pick_media_for("extract")
-                        ),
-                    ],
-                    alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
-                ),
-                padding=SPACE_MD,
-                border_radius=RADIUS_LG,
+            screen_header(
+                "Extract",
+                subtitle=file_name,
+                on_back=lambda: ctrl.navigate("dashboard"),
                 is_dark=is_dark,
+            ),
+            media_summary_card(
+                media_path,
+                info,
+                is_dark=is_dark,
+                on_change=lambda: ctrl.pick_media_for("extract"),
             ),
             # Live pipeline status (derived, never stuck)
             *([tool_job_row(running_job, ctrl, is_dark=is_dark)] if running_job else []),
-            # Mode Switcher Chips
+            # Mode Switcher (capability-gated per file)
             section_header("Extraction Target", "Choose what to extract", is_dark=is_dark),
-            ft.Row(
-                controls=[
-                    ft.Chip(
-                        label=ft.Text(label),
-                        selected=active_mode == key,
-                        disabled=not mode_ok[key],
-                        tooltip=tooltip if not mode_ok[key] else None,
-                        on_click=lambda _, k=key: set_mode(k),
-                    )
-                    for key, label, tooltip in (
+            chip_group(
+                [
+                    (label, key)
+                    for key, label, _tip in (
                         ("audio", "Audio Track", "This file has no audio track"),
                         ("frames", "Video Frames", "Video frames need a video file"),
                         ("gif", "Animated GIF", "GIFs need a video file"),
                         ("subtitles", "Subtitles", "This file carries no subtitle streams"),
                     )
                 ],
-                spacing=SPACE_SM,
-                wrap=True,
+                value=mode,
+                on_change=set_mode,
+                disabled_values=[k for k in ("audio", "frames", "gif", "subtitles") if not mode_ok[k]],
+                tips={
+                    "audio": "This file has no audio track",
+                    "frames": "Video frames need a video file",
+                    "gif": "GIFs need a video file",
+                    "subtitles": "This file carries no subtitle streams",
+                },
             ),
             # Conditional settings based on mode
             *(
                 [
                     section_header("Audio Format", "Select target sound format", is_dark=is_dark),
-                    ft.Row(
-                        controls=[
-                            ft.Chip(
-                                label=ft.Text(fmt.upper()),
-                                selected=chosen_audio_fmt == fmt,
-                                on_click=lambda _, f=fmt: set_audio_fmt(f),
-                            )
-                            for fmt in audio_formats
-                        ],
-                        wrap=True,
-                        spacing=SPACE_SM,
+                    chip_group(
+                        [(fmt.upper(), fmt) for fmt in audio_formats],
+                        value=chosen_audio_fmt,
+                        on_change=set_audio_fmt,
                     ),
                     # Bitrate is a target/ceiling for lossy, meaningless for
                     # WAV and advisory for FLAC — hidden for lossless.
@@ -472,6 +436,34 @@ def ExtractScreen() -> ft.Control:
                         max=max(1.0, float(min(8.0, duration_s))),
                         divisions=14,
                         on_change=lambda e: set_gif_duration(round(float(e.control.value), 1)),
+                    ),
+                    section_header(
+                        "GIF Start",
+                        f"Begins at {gif_start:.1f}s — the in-point of the clip",
+                        is_dark=is_dark,
+                    ),
+                    ft.Slider(
+                        value=float(min(gif_start, max(0.0, duration_s - gif_duration))),
+                        min=0.0,
+                        max=max(0.1, float(duration_s - gif_duration)),
+                        divisions=max(1, int(min(60, duration_s))),
+                        on_change=lambda e: set_gif_start(round(float(e.control.value), 1)),
+                    ),
+                    section_header("GIF Palette", "Colours, dithering and looping", is_dark=is_dark),
+                    chip_group(
+                        [("Auto", 0), ("64 colours", 64), ("128 colours", 128), ("256 colours", 256)],
+                        value=gif_colors,
+                        on_change=set_gif_colors,
+                    ),
+                    chip_group(
+                        [("No dither", ""), ("Bayer", "bayer"), ("Sierra", "sierra2_4a")],
+                        value=gif_dither,
+                        on_change=set_gif_dither,
+                    ),
+                    chip_group(
+                        [("Loop forever", 0), ("Play once", 1), ("3 loops", 3)],
+                        value=gif_loop,
+                        on_change=set_gif_loop,
                     ),
                     ft.Text(
                         "GIFs cap at 20 fps, 640px wide and 8s — the palette "

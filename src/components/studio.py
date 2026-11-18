@@ -69,14 +69,18 @@ def chip_group(
     on_change: Callable[[Any], None],
     is_dark: bool = True,
     wrap: bool = False,
+    disabled_values: Iterable[Any] = (),
+    tips: dict[Any, str] | None = None,
     key: str | None = None,
 ) -> ft.Control:
     """A single-select chip row. ``options`` may be strings or (label, value) pairs.
 
     The row scrolls horizontally by default so a long option set stays one line
     on a phone instead of wrapping into a tall block; pass ``wrap=True`` for
-    layouts that genuinely want multi-line flow.
+    layouts that genuinely want multi-line flow. ``disabled_values`` renders a
+    chip inert with its ``tips`` entry as the explanation (capability gates).
     """
+    disabled = set(disabled_values)
     chips: list[ft.Control] = []
     for option in options:
         label, option_value = option if isinstance(option, tuple) else (option, option)
@@ -86,6 +90,8 @@ def chip_group(
                 label=ft.Text(str(label), size=FONT_SM),
                 selected=selected,
                 show_checkmark=selected,
+                disabled=option_value in disabled,
+                tooltip=(tips or {}).get(option_value),
                 on_select=lambda _e, v=option_value: on_change(v),
             )
         )
