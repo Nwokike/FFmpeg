@@ -261,7 +261,7 @@ def ProbeScreen() -> ft.Control:
         if s.stream_type in ("video", "audio"):
             trailing.append(
                 ft.Dropdown(
-                    value=lang,
+                    value=s.metadata.get("language") or "",
                     options=[
                         ft.DropdownOption(key=code, text=label)
                         for code, label in [
