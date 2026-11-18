@@ -73,10 +73,13 @@ from services.engine_service.ops_convert import (
 )
 from services.engine_service.ops_extract import (
     create_gif,
+    export_sequence,
     extract_frames,
     extract_subtitles,
     keyframe_times,
     read_cues,
+    sequence_to_video,
+    thumbnail_sheet,
     thumbnail_strip,
 )
 from services.engine_service.ops_network import (
@@ -184,6 +187,9 @@ class EngineService:
     extract_frames = staticmethod(extract_frames)
     extract_subtitles = staticmethod(extract_subtitles)
     read_cues = staticmethod(read_cues)
+    export_sequence = staticmethod(export_sequence)
+    sequence_to_video = staticmethod(sequence_to_video)
+    thumbnail_sheet = staticmethod(thumbnail_sheet)
     keyframe_times = staticmethod(keyframe_times)
     probe = staticmethod(probe_media)
     record = staticmethod(record)

@@ -73,10 +73,13 @@ from services.engine_service.ops_convert import (
 )
 from services.engine_service.ops_extract import (
     create_gif,
+    export_sequence,
     extract_frames,
     extract_subtitles,
     keyframe_times,
     read_cues,
+    sequence_to_video,
+    thumbnail_sheet,
     thumbnail_strip,
 )
 from services.engine_service.ops_network import (
@@ -243,6 +246,7 @@ __all__ = [
     "create_gif",
     "cut_trim",
     "estimate_hls_segments",
+    "export_sequence",
     "extract_audio",
     "extract_frames",
     "extract_subtitles",
@@ -257,6 +261,8 @@ __all__ = [
     "remux",
     "run_copy_job",
     "run_encode_job",
+    "sequence_to_video",
     "set_pause_event",
+    "thumbnail_sheet",
     "thumbnail_strip",
 ]

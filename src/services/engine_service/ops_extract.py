@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 from collections.abc import Callable
 from pathlib import Path
@@ -16,9 +17,10 @@ from services.engine_service.builders import (
     probe_media,
     run_encode_job,
 )
-from services.engine_service.graphs import _mjpeg_bytes
+from services.engine_service.graphs import _mjpeg_bytes, available_filters
 from services.engine_service.logs import _INPUT_OPTIONS, _INPUT_TIMEOUT, _decode_packet, logger
-from services.engine_service.options import _supported_encoder_options
+from services.engine_service.options import _pick_video_encoder, _supported_encoder_options
+from services.engine_service.resolve import _resolve_or_raw
 from services.engine_service.safety import _close_container, _safe_seek
 from services.engine_service.subtitles import SubCue, _write_ass, _write_srt, _write_vtt
 from services.job_model import FilterChain, InputSpec, Job, OutputSpec, StreamSpec
@@ -98,6 +100,9 @@ def create_gif(
     width: int = 480,
     start_s: float = 0.0,
     duration_s: float = 5.0,
+    colors: int | None = None,
+    dither: str | None = None,
+    loop_count: int | None = None,
     encoder_options: dict | None = None,
     container_options: dict | None = None,
     on_progress: Callable[[float, str], None] | None = None,
@@ -105,8 +110,10 @@ def create_gif(
 ) -> str:
     """Generate a palette-optimized animated GIF from a video segment.
 
-    ``encoder_options`` reach the gif encoder (lossy LZW/palette knobs);
-    ``container_options`` reach the muxer.
+    ``colors`` caps the palette (2-256), ``dither`` selects paletteuse's
+    dithering (e.g. "bayer", "none"), ``loop_count`` sets the GIF loop count
+    (0 = forever). ``encoder_options`` reach the gif encoder (lossy LZW/
+    palette knobs); ``container_options`` reach the muxer.
     """
     info = probe_media(input_path)
     if info.video_stream is None:
@@ -117,6 +124,16 @@ def create_gif(
     out_h = max(1, int(out_w * ((vs.height or 1) / (vs.width or 1))))
     end_s = start_s + duration_s
 
+    palette_args = None
+    if colors:
+        palette_args = f"max_colors={max(2, min(int(colors), 256))}"
+    use_args = None
+    if dither:
+        use_args = f"dither={dither}"
+    mux_options = dict(container_options or {})
+    if loop_count is not None:
+        mux_options.setdefault("loop", str(int(loop_count)))
+
     def _palette_chain_build(frame):
         g = av.filter.Graph()
         try:
@@ -124,8 +141,8 @@ def create_gif(
             fps_f = g.add("fps", str(out_fps))
             scale_f = g.add("scale", f"{out_w}:{out_h}")
             split_f = g.add("split")
-            pgen = g.add("palettegen")
-            puse = g.add("paletteuse")
+            pgen = g.add("palettegen", palette_args) if palette_args else g.add("palettegen")
+            puse = g.add("paletteuse", use_args) if use_args else g.add("paletteuse")
             sink = g.add("buffersink")
             g.link_nodes(src, fps_f, scale_f, split_f)
             split_f.link_to(pgen, output_idx=0, input_idx=0)
@@ -162,7 +179,7 @@ def create_gif(
             container="gif",
             metadata=False,
             chapters=False,
-            options=dict(container_options or {}),
+            options=mux_options,
         ),
         video_chain=FilterChain(build=_palette_chain_build),
         window=(start_s, end_s),
@@ -171,6 +188,201 @@ def create_gif(
         cancel_message="GIF creation cancelled",
     )
     return run_encode_job(job, on_progress=on_progress, cancel_event=cancel_event)
+
+
+_SEQUENCE_CODECS = {
+    "png": ("png", "rgb24"),
+    "jpg": ("mjpeg", "yuvj420p"),
+    "jpeg": ("mjpeg", "yuvj420p"),
+}
+
+
+def export_sequence(
+    input_path: str,
+    output_dir: str,
+    *,
+    fmt: str = "png",
+    every_n: int = 1,
+    start_s: float = 0.0,
+    end_s: float | None = None,
+    width: int | None = None,
+    on_progress: Callable[[float, str], None] | None = None,
+    cancel_event: Event | None = None,
+) -> str:
+    """Export decoded frames as a numbered image sequence (image2 muxer).
+
+    ``every_n`` keeps one frame out of every N decoded frames; ``width``
+    scales (aspect preserved). Returns the pattern the files were written to.
+    """
+    codec_map = _SEQUENCE_CODECS.get(fmt.lower())
+    if codec_map is None:
+        raise ValueError(f"Unsupported sequence format: {fmt} (use png or jpg)")
+    codec, pix_fmt = codec_map
+    if codec not in av.codecs_available:
+        raise ValueError(f"This build cannot encode {fmt}")
+    out_dir = Path(output_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    ext = "jpg" if codec == "mjpeg" else "png"
+    pattern = str(out_dir / f"frame_%05d.{ext}")
+
+    info = probe_media(input_path)
+    if info.video_stream is None:
+        raise ValueError("No video stream found")
+    vs = info.video_stream
+    duration = info.duration_s or 0.0
+    stop = min(end_s, duration) if end_s is not None else duration
+    every_n = max(1, int(every_n))
+
+    inp = av.open(input_path, "r", timeout=_INPUT_TIMEOUT, options=_INPUT_OPTIONS)
+    out = av.open(pattern, "w", format="image2")
+    try:
+        src = inp.streams.video[0]
+        stream = out.add_stream(codec)
+        stream.pix_fmt = pix_fmt
+        if width:
+            stream.width = int(width)
+            stream.height = max(1, round(int(width) * (vs.height or 1) / (vs.width or 1)))
+        else:
+            stream.width = src.codec_context.width
+            stream.height = src.codec_context.height
+        if start_s > 0:
+            _safe_seek(inp, int(start_s * av.time_base))
+        kept = 0
+        seen = 0
+        for frame in inp.decode(src):
+            _pause_hook(cancel_event)
+            if cancel_event and cancel_event.is_set():
+                raise InterruptedError("Sequence export cancelled")
+            t = float(frame.time or 0.0)
+            if t < start_s - 0.05:
+                continue
+            if stop and t > stop:
+                break
+            seen += 1
+            if (seen - 1) % every_n:
+                continue
+            if width:
+                frame = frame.reformat(width=stream.width, height=stream.height)
+            frame.pts = None
+            for pkt in stream.encode(frame):
+                out.mux(pkt)
+            kept += 1
+            if on_progress and kept % 10 == 0:
+                total = max(1, int(((stop or duration) - start_s) * (vs.fps or 25) / every_n))
+                on_progress(min(0.99, kept / total), f"Exported {kept} frames…")
+        for pkt in stream.encode(None):
+            out.mux(pkt)
+    finally:
+        _close_container(out)
+        _close_container(inp)
+    if on_progress:
+        on_progress(1.0, f"Exported {kept} frames")
+    return pattern
+
+
+def sequence_to_video(
+    pattern: str,
+    output_path: str,
+    *,
+    fps: int = 25,
+    video_codec: str | None = None,
+    container_options: dict | None = None,
+    on_progress: Callable[[float, str], None] | None = None,
+    cancel_event: Event | None = None,
+) -> str:
+    """Encode an image sequence (``frame_%05d.png``) into a video."""
+    if not any(ch in pattern for ch in "%"):
+        raise ValueError("The sequence needs a numbered pattern such as frame_%05d.png")
+    fps = max(1, min(int(fps), 120))
+    chosen = _resolve_or_raw(video_codec, "video") if video_codec else _pick_video_encoder()
+    job = Job(
+        output_path=output_path,
+        inputs=[InputSpec(path=pattern, format="image2", options={"framerate": str(fps)})],
+        streams=[StreamSpec(kind="video", codec=chosen, fps=fps, cap_fps=False)],
+        output=OutputSpec(options=dict(container_options or {})),
+        progress_label="Encoding sequence",
+        complete_label="Sequence encoded",
+        cancel_message="Sequence encode cancelled",
+    )
+    return run_encode_job(job, on_progress=on_progress, cancel_event=cancel_event)
+
+
+def thumbnail_sheet(
+    input_path: str,
+    output_path: str,
+    *,
+    cols: int = 4,
+    rows: int = 3,
+    width: int = 160,
+    start_s: float | None = None,
+    end_s: float | None = None,
+    on_progress: Callable[[float, str], None] | None = None,
+    cancel_event: Event | None = None,
+) -> str:
+    """Compose a contact sheet (cols x rows thumbnails) into one image.
+
+    Uses the ``tile`` filter: an fps sampler picks exactly cols*rows frames
+    across the window, each is scaled to ``width``, and tile assembles them.
+    """
+    if "tile" not in available_filters():
+        raise ValueError("This build has no tile filter — contact sheets are unavailable")
+    if "png" not in av.codecs_available:
+        raise ValueError("This build cannot encode the PNG sheet")
+    info = probe_media(input_path)
+    if info.video_stream is None:
+        raise ValueError("No video stream found")
+    duration = info.duration_s or 0.0
+    start = 0.0 if start_s is None else max(0.0, float(start_s))
+    end = min(end_s, duration) if end_s is not None else duration
+    span = max(0.5, end - start)
+    count = max(1, int(cols) * int(rows))
+    thumb_w = int(width)
+    vs = info.video_stream
+    thumb_h = max(1, round(thumb_w * (vs.height or 1) / (vs.width or 1)))
+    nodes = [
+        ("fps", f"{count / span:.6f}"),
+        ("scale", f"{thumb_w}:{thumb_h}"),
+        ("tile", f"{int(cols)}x{int(rows)}"),
+    ]
+    # image2 requires a numbered pattern (a plain filename fails write_header),
+    # and a rounding surplus can emit an extra grid. Write to an internal
+    # pattern, then keep the first sheet under the caller's exact path.
+    out_path = Path(output_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    suffix = out_path.suffix or ".png"
+    pattern = str(out_path.with_name(f"{out_path.stem}_%03d{suffix}"))
+    job = Job(
+        output_path=pattern,
+        inputs=[InputSpec(path=input_path)],
+        streams=[
+            StreamSpec(
+                kind="video",
+                codec="png",
+                pix_fmt="rgb24",
+                # The sheet is exactly the tile grid; declaring it lets the
+                # encoder open at the final size instead of the input size.
+                scale_width=thumb_w * int(cols),
+                scale_height=thumb_h * int(rows),
+                even_align=False,
+                cap_fps=False,
+            )
+        ],
+        output=OutputSpec(container="image2", metadata=False, chapters=False),
+        video_chain=FilterChain(nodes=nodes),
+        window=(start, end),
+        progress_label="Building contact sheet",
+        complete_label="Sheet ready",
+        cancel_message="Sheet cancelled",
+    )
+    run_encode_job(job, on_progress=on_progress, cancel_event=cancel_event)
+    sheets = sorted(out_path.parent.glob(f"{out_path.stem}_*{suffix}"))
+    if not sheets:
+        raise ValueError("The sheet produced no image")
+    Path(sheets[0]).replace(out_path)
+    for extra in sheets[1:]:
+        with contextlib.suppress(OSError):
+            Path(extra).unlink()
+    return str(out_path)
 
 
 def read_cues(

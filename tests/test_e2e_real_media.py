@@ -570,3 +570,24 @@ def test_subtitle_mux_and_burn_gate(media, tmp_path):
     else:
         with pytest.raises(EngineCapabilityError):
             EngineService.burn_subtitles(str(media["mp4"]), str(burned), sidecar_path=str(srt))
+
+
+def test_image_sequence_roundtrip(media, tmp_path):
+    """Frames → numbered PNGs → video: both directions of the image2 muxer."""
+    pat = EngineService.export_sequence(
+        str(media["mp4"]), str(tmp_path / "seq"), every_n=45, width=96
+    )
+    files = sorted(Path(str(pat)).parent.glob("*.png"))
+    assert files, "sequence produced no frames"
+    vid = tmp_path / "seq.mp4"
+    EngineService.sequence_to_video(pat, str(vid), fps=8)
+    assert _duration(vid) > 0.2
+    assert _has_stream(vid, "video")
+
+
+def test_thumbnail_sheet(media, tmp_path):
+    sheet = tmp_path / "sheet.png"
+    EngineService.thumbnail_sheet(str(media["mp4"]), str(sheet), cols=3, rows=2, width=96)
+    with _open(sheet) as c:
+        v = next(s for s in c.streams if s.type == "video")
+        assert v.codec_context.width == 288  # 3 columns x 96 px
