@@ -686,7 +686,7 @@ async def main(page: ft.Page) -> None:
             page.update()
             # The tray mirrors the same numbers (~2 updates/second; the
             # service throttles). Never called from the worker thread.
-            await job_notify.update_job(job, queued=max(0, len(queue.active_jobs) - 1))
+            await job_notify.update_job(job, queued=max(0, len(queue.active_jobs()) - 1))
 
     def _set_worker_field(job: Job, name: str, value) -> None:
         """Mutate a Job from the worker without notifying Flet off-context."""
@@ -730,7 +730,7 @@ async def main(page: ft.Page) -> None:
 
         # Tray: end the foreground service (or hand it to the next job) and
         # leave a tap-to-result alert for the finished one.
-        await job_notify.finished(job, queued=len(queue.active_jobs))
+        await job_notify.finished(job, queued=len(queue.active_jobs()))
 
         # Notify UI and navigate to result if successful (ad break moved to the
         # result→dashboard exit — never between completion and its own result)

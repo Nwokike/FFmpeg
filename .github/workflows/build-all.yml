@@ -243,17 +243,23 @@ jobs:
           # Audit the artifact, not just the build exit code (proot-distro-flet
           # pattern): a wheel that quietly lacks a payload lib would surface
           # much later as a runtime failure on the device.
+          # NOTE: wheel platform tags use UNDERSCORES (arm64_v8a), while the
+          # ABI's own spelling is hyphenated (arm64-v8a) — globbing with the
+          # hyphenated form matches nothing and, under pipefail, aborted the
+          # audit with exit 2 before printing anything.
+          shopt -s nullglob
           ls -lh wheels/
-          for abi in arm64-v8a armeabi-v7a x86_64; do
-            ff=$(ls wheels/flet_libffmpeg-*android_24_${abi}.whl 2>/dev/null | wc -l)
-            av=$(ls wheels/av-*android_24_${abi}.whl 2>/dev/null | wc -l)
-            [ "$ff" -eq 1 ] || { echo "::error::expected exactly 1 flet_libffmpeg wheel for ${abi}, found $ff"; exit 1; }
-            [ "$av" -eq 1 ] || { echo "::error::expected exactly 1 av wheel for ${abi}, found $av"; exit 1; }
-            wheel=$(ls wheels/flet_libffmpeg-*android_24_${abi}.whl)
+          for pair in "arm64-v8a:arm64_v8a" "armeabi-v7a:armeabi_v7a" "x86_64:x86_64"; do
+            abi="${pair%%:*}"
+            plat="${pair##*:}"
+            ff=(wheels/flet_libffmpeg-*android_24_${plat}.whl)
+            av=(wheels/av-*android_24_${plat}.whl)
+            [ "${#ff[@]}" -eq 1 ] || { echo "::error::expected exactly 1 flet_libffmpeg wheel for ${abi}, found ${#ff[@]}"; exit 1; }
+            [ "${#av[@]}" -eq 1 ] || { echo "::error::expected exactly 1 av wheel for ${abi}, found ${#av[@]}"; exit 1; }
             for lib in libavcodec.so libavdevice.so libavfilter.so libavformat.so libavutil.so libswresample.so libswscale.so; do
-              unzip -l "$wheel" | grep -q "opt/lib/${lib}" || { echo "::error::${lib} missing from $(basename "$wheel")"; exit 1; }
+              unzip -l "${ff[0]}" | grep -q "opt/lib/${lib}" || { echo "::error::${lib} missing from $(basename "${ff[0]}")"; exit 1; }
             done
-            unzip -l "$(ls wheels/av-*android_24_${abi}.whl)" | grep -q "av/__init__.py" || { echo "::error::av package missing from the av wheel (${abi})"; exit 1; }
+            unzip -l "${av[0]}" | grep -q "av/__init__.py" || { echo "::error::av package missing from the av wheel (${abi})"; exit 1; }
           done
       - uses: actions/upload-artifact@v4
         with:

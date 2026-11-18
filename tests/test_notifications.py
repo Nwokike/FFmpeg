@@ -195,3 +195,13 @@ def test_android_declarations_and_icons_are_present():
         assert icon.is_file() and icon.stat().st_size > 0, icon
     deps = doc["project"]["dependencies"]
     assert any(d.startswith("flet-notifications") for d in deps)
+
+
+def test_main_treats_active_jobs_as_a_method():
+    """Regression: len(queue.active_jobs) raised TypeError the moment a job
+    finished (active_jobs is a method on JobQueue, not a property)."""
+    import re
+
+    src = (ROOT / "src" / "main.py").read_text()
+    assert "len(queue.active_jobs())" in src
+    assert re.search(r"len\(queue\.active_jobs\)", src) is None
