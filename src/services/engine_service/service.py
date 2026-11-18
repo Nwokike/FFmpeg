@@ -76,6 +76,7 @@ from services.engine_service.ops_extract import (
     extract_frames,
     extract_subtitles,
     keyframe_times,
+    read_cues,
     thumbnail_strip,
 )
 from services.engine_service.ops_network import (
@@ -93,6 +94,10 @@ from services.engine_service.ops_network import (
     _record_from,
     estimate_hls_segments,
     record,
+)
+from services.engine_service.ops_subtitles import (
+    burn_subtitles,
+    mux_subtitles,
 )
 from services.engine_service.options import (  # noqa: F401 — engine surface
     _NUMERIC_OPTION_TYPES,
@@ -173,12 +178,15 @@ class EngineService:
     convert = staticmethod(convert)
     create_gif = staticmethod(create_gif)
     cut_trim = staticmethod(cut_trim)
+    burn_subtitles = staticmethod(burn_subtitles)
     estimate_hls_segments = staticmethod(estimate_hls_segments)
     extract_audio = staticmethod(extract_audio)
     extract_frames = staticmethod(extract_frames)
     extract_subtitles = staticmethod(extract_subtitles)
+    read_cues = staticmethod(read_cues)
     keyframe_times = staticmethod(keyframe_times)
     probe = staticmethod(probe_media)
     record = staticmethod(record)
     remux = staticmethod(remux)
+    mux_subtitles = staticmethod(mux_subtitles)
     thumbnail_strip = staticmethod(thumbnail_strip)

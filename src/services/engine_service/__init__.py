@@ -76,6 +76,7 @@ from services.engine_service.ops_extract import (
     extract_frames,
     extract_subtitles,
     keyframe_times,
+    read_cues,
     thumbnail_strip,
 )
 from services.engine_service.ops_network import (
@@ -94,6 +95,7 @@ from services.engine_service.ops_network import (
     estimate_hls_segments,
     record,
 )
+from services.engine_service.ops_subtitles import burn_subtitles, mux_subtitles
 from services.engine_service.options import (
     _NUMERIC_OPTION_TYPES,
     _NUMERIC_SUFFIXES,
@@ -232,6 +234,7 @@ __all__ = [
     "available_audio_encoders",
     "available_filters",
     "available_video_encoders",
+    "burn_subtitles",
     "check_pair",
     "check_params",
     "compress_to_target",
@@ -247,7 +250,9 @@ __all__ = [
     "friendly_job_error",
     "keyframe_times",
     "logger",
+    "mux_subtitles",
     "probe_media",
+    "read_cues",
     "record",
     "remux",
     "run_copy_job",

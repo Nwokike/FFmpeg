@@ -173,27 +173,17 @@ def create_gif(
     return run_encode_job(job, on_progress=on_progress, cancel_event=cancel_event)
 
 
-def extract_subtitles(
+def read_cues(
     input_path: str,
-    output_path: str,
     stream_index: int = 0,
-    format_name: str = "srt",
-    on_progress: Callable[[float, str], None] | None = None,
     cancel_event: Event | None = None,
-) -> str:
-    """Extract a text subtitle stream to SRT/ASS/WebVTT via hand writers.
+) -> list[SubCue]:
+    """Every text cue of a media file or subtitle sidecar (SRT/ASS/VTT).
 
-    Timing comes from SubtitleSet empirically verified on this build:
-    ``pts`` is microseconds (AV_TIME_BASE), ``start_display_time`` is a
-    millisecond offset, and ``end_display_time`` is a millisecond DURATION.
-    Bitmap (image-based) subtitle tracks raise a clear error — OCR is out
-    of scope. Writers are plain text, so no muxer availability gate.
+    Works for embedded subtitle streams and for sidecar files alike: PyAV
+    opens both and ``SubtitleSet`` decoding is identical. Bitmap tracks raise
+    the same loud error extraction does (OCR is out of scope).
     """
-    writers = {"srt": _write_srt, "ass": _write_ass, "webvtt": _write_vtt, "vtt": _write_vtt}
-    writer = writers.get(format_name.lower())
-    if writer is None:
-        raise ValueError(f"Unsupported subtitle format: {format_name}")
-
     inp = av.open(input_path, "r", timeout=_INPUT_TIMEOUT, options=_INPUT_OPTIONS)
     try:
         subs = inp.streams.subtitles
@@ -207,20 +197,16 @@ def extract_subtitles(
             )
             stream_index = 0
         sub = subs[stream_index]
-
         cues: list[SubCue] = []
-        cancelled = False
         for pkt in inp.demux([sub]):
             _pause_hook(cancel_event)
             if cancel_event and cancel_event.is_set():
-                cancelled = True
-                break
+                raise InterruptedError("Subtitle read cancelled")
             if pkt.size == 0:
                 continue
             ss = sub.codec_context.decode2(pkt)
             if ss is None:
                 continue
-
             text_parts: list[str] = []
             for rect in ss.rects:
                 if getattr(rect, "type", None) == b"bitmap":
@@ -237,28 +223,57 @@ def extract_subtitles(
                     )
             if not text_parts:
                 continue
-
             start_s = (ss.pts or 0) / 1_000_000 + (ss.start_display_time or 0) / 1000
             dur_s = (ss.end_display_time or 0) / 1000
             if dur_s <= 0:
                 logger.debug("Cue without duration at %.2fs — defaulting to 2s", start_s)
                 dur_s = 2.0
             cues.append(SubCue(start_s=start_s, end_s=start_s + dur_s, text="\n".join(text_parts)))
-
-            if on_progress and len(cues) % 25 == 0:
-                on_progress(0.5, f"Extracted {len(cues)} cues…")
-
-        if cancelled:
-            raise InterruptedError("Subtitle extraction cancelled")
-
-        if not cues:
-            raise ValueError("No text cues found in that subtitle stream")
-
-        writer(output_path, cues)
-        if on_progress:
-            on_progress(1.0, f"Wrote {len(cues)} cues")
+        return cues
     finally:
         _close_container(inp)
+
+
+def extract_subtitles(
+    input_path: str,
+    output_path: str,
+    stream_index: int = 0,
+    format_name: str = "srt",
+    shift_s: float = 0.0,
+    on_progress: Callable[[float, str], None] | None = None,
+    cancel_event: Event | None = None,
+) -> str:
+    """Extract a text subtitle stream to SRT/ASS/WebVTT via hand writers.
+
+    Timing comes from SubtitleSet empirically verified on this build:
+    ``pts`` is microseconds (AV_TIME_BASE), ``start_display_time`` is a
+    millisecond offset, and ``end_display_time`` is a millisecond DURATION.
+    Bitmap (image-based) subtitle tracks raise a clear error — OCR is out
+    of scope. Writers are plain text, so no muxer availability gate.
+    ``shift_s`` moves every cue by that many seconds (negative = earlier,
+    clamped at 0) — the app's subtitle-sync control.
+    """
+    writers = {"srt": _write_srt, "ass": _write_ass, "webvtt": _write_vtt, "vtt": _write_vtt}
+    writer = writers.get(format_name.lower())
+    if writer is None:
+        raise ValueError(f"Unsupported subtitle format: {format_name}")
+
+    cues = read_cues(input_path, stream_index, cancel_event)
+    if shift_s:
+        cues = [
+            SubCue(
+                start_s=max(0.0, c.start_s + shift_s),
+                end_s=max(0.0, c.end_s + shift_s),
+                text=c.text,
+            )
+            for c in cues
+        ]
+    if not cues:
+        raise ValueError("No text cues found in that subtitle stream")
+
+    writer(output_path, cues)
+    if on_progress:
+        on_progress(1.0, f"Wrote {len(cues)} cues")
 
     if cancel_event and cancel_event.is_set():
         _discard_cancelled(output_path)

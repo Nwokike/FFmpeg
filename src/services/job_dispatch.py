@@ -182,6 +182,33 @@ def _build_job_dispatch(engine, state, job, _on_progress, cancel_evt):
             cancel_event=cancel_evt,
         )
 
+    def _run_mux_subs():
+        engine.mux_subtitles(
+            input_path=job.input_path,
+            sidecar_path=p.get("sidecar_path", ""),
+            output_path=job.output_path,
+            container=p.get("container"),
+            language=p.get("language"),
+            on_progress=_on_progress,
+            cancel_event=cancel_evt,
+        )
+
+    def _run_burn_subs():
+        engine.burn_subtitles(
+            input_path=job.input_path,
+            output_path=job.output_path,
+            sidecar_path=p.get("sidecar_path"),
+            stream_index=p.get("sub_stream", 0),
+            font_size_pct=p.get("font_size_pct", 0.05),
+            color=p.get("color", "white"),
+            position=p.get("position", "bottom"),
+            video_codec=p.get("video_codec"),
+            audio_codec=p.get("audio_codec", DEFAULT_AUDIO_CODEC),
+            container_options=p.get("container_options"),
+            on_progress=_on_progress,
+            cancel_event=cancel_evt,
+        )
+
     return {
         # name, retry clones params verbatim, and unknown ops fail loudly.
         "convert": _run_convert,
@@ -194,6 +221,8 @@ def _build_job_dispatch(engine, state, job, _on_progress, cancel_evt):
         "concat": _run_concat,
         "remux": _run_remux,
         "create_gif": _run_create_gif,
+        "mux_subs": _run_mux_subs,
+        "burn_subs": _run_burn_subs,
     }
 
 

@@ -35,6 +35,7 @@ _NATIVE_LICENSES = {
     "libfreetype": "FTL / GPL-2.0-or-later",
     "libfribidi": "LGPL-2.1-or-later",
     "mbedtls (TLS)": "Apache-2.0 / GPL-2.0-or-later",
+    "Roboto (subtitle burn-in font)": "Apache-2.0",
 }
 
 _PY_DISTS = (

@@ -547,3 +547,26 @@ def test_thumbnails_and_keyframes(media):
     kfs = EngineService.keyframe_times(str(media["mp4"]), limit=5)
     assert 0 < len(kfs) <= 5
     assert all(k >= 0 for k in kfs)
+
+
+def test_subtitle_mux_and_burn_gate(media, tmp_path):
+    """External subtitle tracks mux into a real media file; burn-in is gated
+    by the wheel (drawtext exists in the Android wrap build, not in the
+    stock desktop PyAV wheel)."""
+    from services.engine_service import available_filters
+
+    srt = tmp_path / "en.srt"
+    srt.write_text("1\n00:00:01,000 --> 00:00:03,000\nReal media cue\n")
+    out = tmp_path / "withsubs.mkv"
+    EngineService.mux_subtitles(str(media["mp4"]), str(srt), str(out), language="eng")
+    with _open(out) as c:
+        assert any(s.type == "subtitle" for s in c.streams)
+        assert any(s.type == "video" for s in c.streams)
+
+    burned = tmp_path / "burned.mp4"
+    if "drawtext" in available_filters():
+        EngineService.burn_subtitles(str(media["mp4"]), str(burned), sidecar_path=str(srt))
+        assert _has_stream(burned, "video")
+    else:
+        with pytest.raises(EngineCapabilityError):
+            EngineService.burn_subtitles(str(media["mp4"]), str(burned), sidecar_path=str(srt))
