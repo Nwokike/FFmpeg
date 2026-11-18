@@ -10,7 +10,14 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+# ABSOLUTE, resolved before any cd: the script later cd's into the forge tree,
+# and a relative "wheels" would then copy into .wrap-work/mobile-forge/wheels
+# while the CI audit looks in <repo>/wheels (that mismatch cost two builds).
 WHEELS="${1:-$ROOT/wheels}"
+case "$WHEELS" in
+    /*) ;;
+    *) WHEELS="$PWD/$WHEELS" ;;
+esac
 WORK="${WRAP_WORK:-$ROOT/.wrap-work}"
 PYVER=$(python3 "$ROOT/scripts/wrap_pins.py" --value PYTHON_VERSION)
 FORGE_REPO=$(python3 "$ROOT/scripts/wrap_pins.py" --value FORGE_REPO)
