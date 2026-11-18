@@ -476,7 +476,16 @@ def test_hls_timeout_is_four_phase():
 # ── TLS routing: measured per wheel, never assumed from the platform ────────
 
 
+class _FakeStream:
+    type = "video"
+
+
 class _FakeContainer:
+    # The network open path requires at least one usable stream: an HLS
+    # master whose variants all failed TLS opens returns an EMPTY container
+    # and now falls back to httpx.
+    streams = (_FakeStream(),)
+
     def close(self):
         pass
 
@@ -511,7 +520,7 @@ def test_https_falls_back_to_httpx_only_without_tls(monkeypatch):
     monkeypatch.setattr(es.av, "open", _no_native)
     called: dict = {}
 
-    def _fake_fetch(url, cancel_event=None, max_hls_download_mb=None):
+    def _fake_fetch(url, cancel_event=None, max_hls_download_mb=None, duration_s=None):
         called["url"] = url
         return _FakeContainer(), "/tmp/https_dl_test.dat"
 

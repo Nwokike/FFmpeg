@@ -25,7 +25,10 @@ def test_https_routes_through_httpx_only_on_a_tls_less_wheel(monkeypatch):
         EngineService,
         "_open_https_via_httpx",
         staticmethod(
-            lambda url, cancel_event=None, max_hls_download_mb=None: (sentinel, "/tmp/backing.dat")
+            lambda url, cancel_event=None, max_hls_download_mb=None, duration_s=None: (
+                sentinel,
+                "/tmp/backing.dat",
+            )
         ),
     )
 
@@ -42,6 +45,7 @@ def test_https_routes_through_httpx_only_on_a_tls_less_wheel(monkeypatch):
 def test_http_routes_straight_to_native_av_open(monkeypatch):
     """Only HTTPS needs the httpx transport — HTTP keeps PyAV's own path."""
     container = MagicMock()
+    container.streams = [MagicMock(type="video")]
     monkeypatch.setattr(av, "open", lambda *a, **k: container)
     monkeypatch.setattr(
         EngineService,
@@ -58,6 +62,7 @@ def test_https_uses_av_open_when_the_wheel_has_tls(monkeypatch):
     """Our wrap wheel ships TLS: https goes straight to av.open."""
 
     container = MagicMock()
+    container.streams = [MagicMock(type="audio")]
     monkeypatch.setattr("services.engine_service.options._TLS_OK", True)
     monkeypatch.setattr(av, "open", lambda *a, **k: container)
     monkeypatch.setattr(
