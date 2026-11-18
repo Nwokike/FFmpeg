@@ -9,15 +9,26 @@ rm -rf ${CMAKE_BUILD_DIR}
 mkdir ${CMAKE_BUILD_DIR}
 cd ${CMAKE_BUILD_DIR}
 
+# Pin the archiver explicitly: NDK r27's toolchain can resolve CMAKE_AR to a
+# target-prefixed wrapper that does not exist ("Error running link command:
+# no such file or directory" at archive time). FAM_AR/FAM_RANLIB are the
+# llvm-ar/llvm-ranlib every autotools recipe here already uses.
 ${CMAKE_EXECUTABLE} .. \
     -DANDROID_PLATFORM=${ANDROID_PLATFORM} \
     -DANDROID_ABI=${ANDROID_ABI} \
     -DCMAKE_TOOLCHAIN_FILE=${SCRIPTS_DIR}/libaom/android.cmake \
     -DCMAKE_INSTALL_PREFIX=${INSTALL_DIR} \
+    -DCMAKE_AR=${FAM_AR} \
+    -DCMAKE_RANLIB=${FAM_RANLIB} \
+    -DCMAKE_C_COMPILER_AR=${FAM_AR} \
+    -DCMAKE_C_COMPILER_RANLIB=${FAM_RANLIB} \
     -DBUILD_SHARED_LIBS=0 \
     -DSVT_AV1_LTO=OFF \
     -DBUILD_APPS=OFF \
     -DBUILD_TESTING=OFF || exit 1
+
+# Make the resolved binutils visible in the build log for the next failure.
+${CMAKE_EXECUTABLE} -LA -N . | grep -E '^CMAKE_(AR|RANLIB|C_COMPILER_AR|C_COMPILER_RANLIB):' || true
 
 ${MAKE_EXECUTABLE} -j${HOST_NPROC} || exit 1
 ${MAKE_EXECUTABLE} install
