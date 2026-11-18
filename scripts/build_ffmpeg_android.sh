@@ -41,7 +41,21 @@ FAM_DIR="$WORK/ffmpeg-android-maker"
 FAM_REPO=$(python3 "$ROOT/scripts/wrap_pins.py" --value FAM_REPO)
 FAM_COMMIT=$(python3 "$ROOT/scripts/wrap_pins.py" --value FAM_COMMIT)
 if [ ! -d "$FAM_DIR/.git" ]; then
-    git clone --quiet "$FAM_REPO" "$FAM_DIR"
+    if [ -d "$FAM_DIR" ]; then
+        # Cache hit: actions/cache restored $FAM_DIR/build/ffmpeg into $FAM_DIR,
+        # so the directory exists without .git. Preserve the cached build.
+        TMP_BAK="$WORK/fam_cached_build"
+        rm -rf "$TMP_BAK"
+        mv "$FAM_DIR" "$TMP_BAK"
+        git clone --quiet "$FAM_REPO" "$FAM_DIR"
+        if [ -d "$TMP_BAK/build" ]; then
+            mkdir -p "$FAM_DIR"
+            mv "$TMP_BAK/build" "$FAM_DIR/"
+        fi
+        rm -rf "$TMP_BAK"
+    else
+        git clone --quiet "$FAM_REPO" "$FAM_DIR"
+    fi
 fi
 git -C "$FAM_DIR" checkout --quiet "$FAM_COMMIT"
 

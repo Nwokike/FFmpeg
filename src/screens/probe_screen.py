@@ -7,7 +7,7 @@ from pathlib import Path
 
 import flet as ft
 
-from components.studio import screen_header
+from components.studio import chip_group, screen_header
 from core.notify import ERROR, show_snack
 from core.state import Job, MediaInfo, use_app_state
 from core.storage_paths import format_bytes, get_temp_dir, unique_temp_name
@@ -116,6 +116,36 @@ def ProbeScreen() -> ft.Control:
 
     info = app_state.current_media_info
     media_path = app_state.current_media_path
+
+    # Dossier editing state, seeded once per file: container tags and chapters.
+    seeded, set_seeded = ft.use_state("")
+    tag_rows, set_tag_rows = ft.use_state([])
+    ch_rows, set_ch_rows = ft.use_state([])
+    if info is not None and media_path and seeded != media_path:
+        set_seeded(media_path)
+        set_tag_rows([[k, v] for k, v in info.metadata.items()])
+        set_ch_rows([[c.title, round(c.start_s, 2), round(c.end_s, 2)] for c in info.chapters])
+
+    def _row_setter(setter, rows):
+        def _update(index: int, field: int, value: str) -> None:
+            updated = [list(row) for row in rows]
+            updated[index][field] = value
+            setter(updated)
+
+        def _delete(index: int) -> None:
+            setter([list(row) for i, row in enumerate(rows) if i != index])
+
+        def _add(blank: list) -> None:
+            setter([*[list(row) for row in rows], list(blank)])
+
+        return _update, _delete, _add
+
+    remux_container, set_remux_container = ft.use_state("mkv")
+    faststart, set_faststart = ft.use_state(False)
+    rotation, set_rotation = ft.use_state(0)
+
+    _update_tag, _delete_tag, _add_tag = _row_setter(set_tag_rows, tag_rows)
+    _update_ch, _delete_ch, _add_ch = _row_setter(set_ch_rows, ch_rows)
 
     if not info or not media_path or not Path(media_path).exists():
         return ft.ListView(
@@ -274,12 +304,34 @@ def ProbeScreen() -> ft.Control:
                 show_snack(page, "Keep at least one track", bgcolor=ERROR)
             return
         stem = Path(media_path).stem
-        out_path = str(get_temp_dir() / unique_temp_name(f"{stem}_tracks", ".mkv"))
+        ext = f".{remux_container}"
+        out_path = str(get_temp_dir() / unique_temp_name(f"{stem}_tracks", ext))
+        metadata = {str(r[0]).strip(): str(r[1]) for r in tag_rows if str(r[0]).strip()}
+        chapters: list[dict] = []
+        for title, start, end in ch_rows:
+            try:
+                chapters.append(
+                    {
+                        "title": str(title).strip() or "Chapter",
+                        "start_s": float(start),
+                        "end_s": float(end),
+                    }
+                )
+            except (TypeError, ValueError):
+                continue
+        container = "matroska" if remux_container == "mkv" else remux_container
         job = Job(
             op="remux",
             input_path=media_path,
             output_path=out_path,
-            params={"drop": list(excluded)},
+            params={
+                "drop": list(excluded),
+                "metadata": metadata,
+                "chapters": chapters,
+                "container": container,
+                "rotation": rotation if rotation else None,
+                "faststart": faststart,
+            },
             original_size_bytes=info.file_size_bytes,
         )
         set_remuxing(True)
@@ -288,6 +340,23 @@ def ProbeScreen() -> ft.Control:
         except Exception as exc:
             logger.warning("Remux start failed: %s", exc)
             set_remuxing(False)
+
+    def _extract_attachments(_):
+        if not media_path:
+            return
+        stem = Path(media_path).stem
+        out_dir = str(get_temp_dir() / unique_temp_name(f"{stem}_attachments", ""))
+        job = Job(
+            op="attachments",
+            input_path=media_path,
+            output_path=out_dir,
+            params={},
+            original_size_bytes=info.file_size_bytes if info else 0,
+        )
+        try:
+            ctrl.start_job(job)
+        except Exception as exc:
+            logger.warning("Attachment extraction start failed: %s", exc)
 
     async def _share_report() -> None:
         try:
@@ -371,45 +440,177 @@ def ProbeScreen() -> ft.Control:
                 f"Streams ({len(info.streams)})", "Track-by-track breakdown", is_dark=is_dark
             ),
             ft.Column(controls=stream_cards, spacing=SPACE_SM),
-            # Chapters (when the container carries them)
+            # Embedded attachments action (when present)
             *(
                 [
-                    section_header(
-                        f"Chapters ({len(info.chapters)})",
-                        "Navigation points in this file",
-                        is_dark=is_dark,
-                    ),
-                    card_container(
-                        content=ft.Column(
-                            controls=[
+                    ft.OutlinedButton(
+                        "Extract Embedded Attachments (Fonts, Covers)",
+                        icon=ft.Icons.ATTACH_FILE_ROUNDED,
+                        on_click=_extract_attachments,
+                    )
+                ]
+                if any(s.stream_type in ("attachment", "data") for s in info.streams)
+                else []
+            ),
+            # Metadata Tags Editor
+            ft.ExpansionTile(
+                title=ft.Text(
+                    f"Container Metadata Tags ({len(tag_rows)})", weight=ft.FontWeight.BOLD
+                ),
+                subtitle=ft.Text(
+                    "Edit title, artist, comments without re-encoding", size=FONT_XS, color=muted
+                ),
+                controls=[
+                    ft.Column(
+                        controls=[
+                            *[
                                 ft.Row(
                                     controls=[
-                                        ft.Icon(ft.Icons.FLAG_ROUNDED, size=16, color=PRIMARY),
-                                        ft.Text(
-                                            ch.title,
-                                            size=FONT_SM,
-                                            weight=ft.FontWeight.W_600,
-                                            expand=True,
+                                        ft.TextField(
+                                            value=str(r[0]),
+                                            hint_text="Tag Key",
+                                            dense=True,
+                                            expand=1,
+                                            on_change=lambda e, i=idx: _update_tag(
+                                                i, 0, e.control.value or ""
+                                            ),
                                         ),
-                                        ft.Text(
-                                            f"{_fmt_ct(ch.start_s)} → {_fmt_ct(ch.end_s)}",
-                                            size=FONT_XS,
-                                            color=muted,
+                                        ft.TextField(
+                                            value=str(r[1]),
+                                            hint_text="Tag Value",
+                                            dense=True,
+                                            expand=2,
+                                            on_change=lambda e, i=idx: _update_tag(
+                                                i, 1, e.control.value or ""
+                                            ),
+                                        ),
+                                        ft.IconButton(
+                                            icon=ft.Icons.DELETE_OUTLINE_ROUNDED,
+                                            tooltip="Remove tag",
+                                            on_click=lambda _, i=idx: _delete_tag(i),
                                         ),
                                     ],
                                     spacing=SPACE_SM,
                                 )
-                                for ch in info.chapters
+                                for idx, r in enumerate(tag_rows)
                             ],
-                            spacing=SPACE_SM,
+                            ft.OutlinedButton(
+                                "Add Metadata Tag",
+                                icon=ft.Icons.ADD_ROUNDED,
+                                on_click=lambda _: _add_tag(["", ""]),
+                            ),
+                        ],
+                        spacing=SPACE_SM,
+                    )
+                ],
+            ),
+            # Chapters Editor
+            ft.ExpansionTile(
+                title=ft.Text(f"Chapters ({len(ch_rows)})", weight=ft.FontWeight.BOLD),
+                subtitle=ft.Text(
+                    "Add or adjust chapter navigation points", size=FONT_XS, color=muted
+                ),
+                controls=[
+                    ft.Column(
+                        controls=[
+                            *[
+                                ft.Row(
+                                    controls=[
+                                        ft.TextField(
+                                            value=str(r[0]),
+                                            hint_text="Chapter Title",
+                                            dense=True,
+                                            expand=2,
+                                            on_change=lambda e, i=idx: _update_ch(
+                                                i, 0, e.control.value or ""
+                                            ),
+                                        ),
+                                        ft.TextField(
+                                            value=str(r[1]),
+                                            hint_text="Start (s)",
+                                            dense=True,
+                                            expand=1,
+                                            on_change=lambda e, i=idx: _update_ch(
+                                                i, 1, e.control.value or ""
+                                            ),
+                                        ),
+                                        ft.TextField(
+                                            value=str(r[2]),
+                                            hint_text="End (s)",
+                                            dense=True,
+                                            expand=1,
+                                            on_change=lambda e, i=idx: _update_ch(
+                                                i, 2, e.control.value or ""
+                                            ),
+                                        ),
+                                        ft.IconButton(
+                                            icon=ft.Icons.DELETE_OUTLINE_ROUNDED,
+                                            tooltip="Remove chapter",
+                                            on_click=lambda _, i=idx: _delete_ch(i),
+                                        ),
+                                    ],
+                                    spacing=SPACE_SM,
+                                )
+                                for idx, r in enumerate(ch_rows)
+                            ],
+                            ft.OutlinedButton(
+                                "Add Chapter",
+                                icon=ft.Icons.ADD_ROUNDED,
+                                on_click=lambda _: _add_ch(
+                                    [
+                                        "Chapter",
+                                        round(info.duration_s if info else 0, 2),
+                                        round(info.duration_s if info else 0, 2),
+                                    ]
+                                ),
+                            ),
+                        ],
+                        spacing=SPACE_SM,
+                    )
+                ],
+            ),
+            # Remux / Stream Copy Options
+            section_header(
+                "Save Copy Options", "Container & orientation for stream copy", is_dark=is_dark
+            ),
+            card_container(
+                content=ft.Column(
+                    controls=[
+                        ft.Text("Target Container", size=FONT_SM, weight=ft.FontWeight.W_600),
+                        chip_group(
+                            [("Matroska (MKV)", "mkv"), ("MP4", "mp4"), ("WebM", "webm")],
+                            value=remux_container,
+                            on_change=set_remux_container,
+                            is_dark=is_dark,
                         ),
-                        padding=SPACE_MD,
-                        border_radius=RADIUS_MD,
-                        is_dark=is_dark,
-                    ),
-                ]
-                if info.chapters
-                else []
+                        *(
+                            [
+                                ft.Switch(
+                                    label="Faststart (moov atom at start for web streaming)",
+                                    value=faststart,
+                                    on_change=lambda e: set_faststart(e.control.value),
+                                )
+                            ]
+                            if remux_container == "mp4"
+                            else []
+                        ),
+                        ft.Text(
+                            "Display Matrix Rotation (lossless, no re-encode)",
+                            size=FONT_SM,
+                            weight=ft.FontWeight.W_600,
+                        ),
+                        chip_group(
+                            [("No change", 0), ("90°", 90), ("180°", 180), ("270°", 270)],
+                            value=rotation,
+                            on_change=set_rotation,
+                            is_dark=is_dark,
+                        ),
+                    ],
+                    spacing=SPACE_SM,
+                ),
+                padding=SPACE_MD,
+                border_radius=RADIUS_MD,
+                is_dark=is_dark,
             ),
             # Raw FFmpeg Overview
             section_header("Raw Diagnostics", "Direct container summary", is_dark=is_dark),
