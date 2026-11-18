@@ -161,6 +161,11 @@ def estimate_hls_segments(client, url: str) -> tuple[list[str], int | None]:
     Content-Length). Never downloads media — the streams screen calls this
     for the preflight line before the user commits.
     """
+    if ".mpd" in url.lower():
+        raise ValueError(
+            "DASH streams can be recorded but not pre-sized: the manifest is XML, "
+            "not a segment list — start recording to see real progress"
+        )
     playlist = _hls_fetch_text(client, url)
     base = urljoin(url, ".")
     segments, is_master, key_error = _parse_hls_playlist(playlist, base)

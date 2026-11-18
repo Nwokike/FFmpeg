@@ -690,3 +690,23 @@ def test_remux_metadata_edits_and_attachments(media, tmp_path):
         assert [a.name for a in c.streams.attachments] == ["font.ttf"]
     got = EngineService.extract_attachments(str(out), str(tmp_path / "atts"))
     assert Path(got[0]).read_bytes() == b"FAKEFONT"
+
+
+def test_hls_output_muxing(media, tmp_path):
+    """HLS as an OUTPUT target: playlist + segments, no special casing."""
+    out = tmp_path / "out.m3u8"
+    EngineService.convert(
+        str(media["clip"]),
+        str(out),
+        video_codec="libx264",
+        audio_codec="aac",
+        preset="fast",
+        container="hls",
+        container_options={
+            "hls_time": "2",
+            "hls_segment_filename": str(tmp_path / "seg_%03d.ts"),
+        },
+    )
+    assert out.exists()
+    segments = sorted(tmp_path.glob("seg_*.ts"))
+    assert len(segments) >= 1

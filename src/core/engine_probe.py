@@ -811,6 +811,32 @@ def format_is_lossless(fmt: str) -> bool:
     return False
 
 
+def input_devices() -> list[dict]:
+    """Capture devices this build exposes (desktop cameras/mics, v4l2/avfoundation).
+
+    Empty on Android/mobile wheels, where capture comes from flet-camera
+    instead. Never raises: a build without device support just lists nothing.
+    """
+    try:
+        return [
+            {"name": d.name, "description": d.description} for d in av.enumerate_input_devices()
+        ]
+    except Exception as exc:
+        logger.debug("input device enumeration unavailable: %s", exc)
+        return []
+
+
+def output_devices() -> list[dict]:
+    """Playback/output devices this build exposes (desktop audio/video sinks)."""
+    try:
+        return [
+            {"name": d.name, "description": d.description} for d in av.enumerate_output_devices()
+        ]
+    except Exception as exc:
+        logger.debug("output device enumeration unavailable: %s", exc)
+        return []
+
+
 def containers_for_kind(kind: str) -> list[dict]:
     """Output containers classified by media kind, derived from the wheel.
 
